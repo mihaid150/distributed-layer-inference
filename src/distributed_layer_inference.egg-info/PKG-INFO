@@ -1,0 +1,15 @@
+Metadata-Version: 2.4
+Name: distributed-layer-inference
+Version: 0.1.0
+Summary: Distributed layer inference on resource-constrained edge nodes
+Requires-Python: >=3.10
+Requires-Dist: fastapi
+Requires-Dist: uvicorn[standard]
+Requires-Dist: pydantic
+Requires-Dist: pyyaml
+Requires-Dist: requests
+Requires-Dist: numpy
+Requires-Dist: psutil
+Requires-Dist: torch
+Requires-Dist: transformers
+Requires-Dist: accelerate

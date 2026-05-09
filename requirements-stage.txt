@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic
+pyyaml
+requests
+numpy
+torch
+transformers
+psutil

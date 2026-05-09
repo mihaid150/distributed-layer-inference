@@ -1,0 +1,9 @@
+{
+  "name": "dli-ops-ui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Small operations UI for DLI cluster topology, orchestration status, and logs.",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

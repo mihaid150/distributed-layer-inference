@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference-baseline-deployment
+  namespace: inference
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inference-baseline
+  template:
+    metadata:
+      labels:
+        app: inference-baseline
+    spec:
+      nodeSelector:
+        inference-role: baseline
+      containers:
+        - name: inference-baseline
+          image: registry.local/dli-baseline:latest
+          imagePullPolicy: Always
+          env:
+            - name: SERVICE_NAME
+              value: "inference-baseline"
+            - name: MODEL_NAME
+              value: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+            - name: DEVICE
+              value: "cpu"
+            - name: TORCH_DTYPE
+              value: "float32"
+          ports:
+            - containerPort: 8000
+          resources:
+            requests:
+              memory: "2500Mi"
+              cpu: "1000m"
+            limits:
+              memory: "3900Mi"
+              cpu: "4000m"

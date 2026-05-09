@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "distributed-layer-inference"
+version = "0.1.0"
+description = "Distributed layer inference on resource-constrained edge nodes"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "pyyaml",
+    "requests",
+    "numpy",
+    "psutil",
+    "torch",
+    "transformers",
+    "accelerate"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

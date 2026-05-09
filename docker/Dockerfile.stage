@@ -1,0 +1,32 @@
+# syntax=docker/dockerfile:1.7
+ARG BASE_IMAGE=python:3.11-slim
+FROM ${BASE_IMAGE}
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG PIP_TRUSTED_HOST=pypi.org
+
+WORKDIR /app
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+      curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-stage.txt .
+RUN --mount=type=cache,target=/root/.cache/pip \
+    PIP_INDEX_URL="${PIP_INDEX_URL}" PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST}" \
+    pip install -r requirements-stage.txt
+
+# Copy only the runtime code needed by stage containers.
+COPY src/dli/__init__.py ./src/dli/__init__.py
+COPY src/dli/common/ ./src/dli/common/
+COPY src/dli/inference_stage/ ./src/dli/inference_stage/
+
+# Stage config (includes stage map).
+COPY configs/ ./configs/
+
+ENV PYTHONPATH=/app/src
+
+CMD ["uvicorn", "dli.inference_stage.app:app", "--host", "0.0.0.0", "--port", "8000"]

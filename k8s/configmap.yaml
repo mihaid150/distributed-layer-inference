@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dli-config
+  namespace: inference
+data:
+  STAGE_MAP_PATH: "/app/configs/stage_map.yaml"
+  MODEL_NAME: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+  HF_STAGE_REPO: "mipedadsrl150/dli-tinyllama-1.1b-4stage"
+  HF_STAGE_REVISION: "main"

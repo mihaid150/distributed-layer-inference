@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference-gateway-deployment
+  namespace: inference
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inference-gateway
+  template:
+    metadata:
+      labels:
+        app: inference-gateway
+    spec:
+      nodeSelector:
+        role: master
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+        - operator: Exists
+          effect: NoExecute
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: inference-gateway
+          image: mipeda150/distributed-layer-inference-gateway:v2026-08-05-2300
+          imagePullPolicy: Always
+          env:
+            - name: STAGE_MAP_PATH
+              valueFrom:
+                configMapKeyRef:
+                  name: dli-config
+                  key: STAGE_MAP_PATH
+            - name: FIRST_STAGE_URL
+              value: "http://inference-stage-1:8000/forward"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-hub
+                  key: HF_TOKEN
+          ports:
+            - containerPort: 8000
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "1500Mi"
+              cpu: "2000m"
