@@ -18,7 +18,24 @@ const INVOKE_TIMEOUT_DEFAULT_MS = 15000;
 const INVOKE_TIMEOUT_LONG_DEFAULT_MS = 300000;
 const INVOKE_TIMEOUT_MAX_MS = 600000;
 const PUBLIC_DIR = path.join(__dirname, "public");
+const DATA_DIR = path.join(__dirname, "data");
+const HISTORY_FILE = path.join(DATA_DIR, "metrics-history.ndjson");
+const HISTORY_MAX_ENTRIES = clampNumber(process.env.OPS_UI_HISTORY_MAX_ENTRIES || "4000", 200, 20000, 4000);
 const IN_FLIGHT_INVOKES = new Map();
+const historyEntries = [];
+let historyLoaded = false;
+let nextHistorySeq = 1;
+let historyWriteChain = Promise.resolve();
+const runtimeStats = {
+  startedAt: new Date().toISOString(),
+  totalInvokes: 0,
+  successfulInvokes: 0,
+  failedInvokes: 0,
+  droppedInFlight: 0,
+  timeoutFailures: 0,
+  lastTimeoutCauses: [],
+  byPath: {}
+};
 
 const LOG_TARGETS = {
   gateway: {
@@ -413,6 +430,277 @@ function analyzeLogs(rawText) {
 
   summary.hints = [...hints];
   return summary;
+}
+
+function updateRuntimePathCounter(pathValue, field, delta = 1) {
+  const key = String(pathValue || "unknown");
+  const row = runtimeStats.byPath[key] || {
+    total: 0,
+    success: 0,
+    failed: 0,
+    dropped: 0,
+    timeout: 0
+  };
+  row[field] = Math.max(0, Number(row[field] || 0) + delta);
+  runtimeStats.byPath[key] = row;
+}
+
+function pushTimeoutCause(cause) {
+  const clean = String(cause || "timeout");
+  runtimeStats.lastTimeoutCauses.unshift({
+    at: new Date().toISOString(),
+    cause: clean
+  });
+  if (runtimeStats.lastTimeoutCauses.length > 60) {
+    runtimeStats.lastTimeoutCauses = runtimeStats.lastTimeoutCauses.slice(0, 60);
+  }
+}
+
+function runtimeSnapshot() {
+  return {
+    startedAt: runtimeStats.startedAt,
+    totalInvokes: runtimeStats.totalInvokes,
+    successfulInvokes: runtimeStats.successfulInvokes,
+    failedInvokes: runtimeStats.failedInvokes,
+    droppedInFlight: runtimeStats.droppedInFlight,
+    timeoutFailures: runtimeStats.timeoutFailures,
+    inFlight: IN_FLIGHT_INVOKES.size,
+    queueDepth: 0,
+    queueMode: "drop-on-busy",
+    byPath: runtimeStats.byPath,
+    lastTimeoutCauses: runtimeStats.lastTimeoutCauses,
+    inFlightRequests: [...IN_FLIGHT_INVOKES.values()].map((item) => ({
+      namespace: item.namespace,
+      target: item.target,
+      method: item.method,
+      path: item.path,
+      startedAt: new Date(item.startedAt).toISOString(),
+      inFlightMs: Math.max(0, Date.now() - item.startedAt)
+    }))
+  };
+}
+
+function parseJsonSafe(raw) {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function toFiniteNumber(value, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function roundNumber(value, digits = 4) {
+  const n = toFiniteNumber(value, 0);
+  const factor = 10 ** digits;
+  return Math.round(n * factor) / factor;
+}
+
+function toSafeIsoDate(rawValue, fallbackIso) {
+  if (!rawValue) {
+    return fallbackIso;
+  }
+  const parsed = new Date(rawValue);
+  const timestamp = parsed.getTime();
+  if (!Number.isFinite(timestamp)) {
+    return fallbackIso;
+  }
+  return parsed.toISOString();
+}
+
+function normalizeHistoryStageRows(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .slice(0, 32)
+    .map((item) => {
+      const row = item && typeof item === "object" && !Array.isArray(item) ? item : {};
+      return {
+        stageKey: row.stageKey ? String(row.stageKey) : "",
+        service: row.service ? String(row.service) : "",
+        stageId: Math.round(toFiniteNumber(row.stageId, 0)),
+        samples: Math.round(toFiniteNumber(row.samples, 0)),
+        computeMs: roundNumber(row.computeMs, 3),
+        transferMs: roundNumber(row.transferMs, 3),
+        maxMemMb: roundNumber(row.maxMemMb, 3),
+        maxCpuPct: roundNumber(row.maxCpuPct, 3),
+        maxSystemCpuPct: roundNumber(row.maxSystemCpuPct, 3),
+        networkMib: roundNumber(row.networkMib, 4),
+        payloadMib: roundNumber(row.payloadMib, 4),
+        maxMbps: roundNumber(row.maxMbps, 4)
+      };
+    })
+    .filter((row) => row.stageKey || row.service || row.samples > 0);
+}
+
+function normalizeHistoryNodeRows(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .slice(0, 64)
+    .map((item) => {
+      const row = item && typeof item === "object" && !Array.isArray(item) ? item : {};
+      return {
+        node: row.node ? String(row.node) : "",
+        podHostnames: row.podHostnames ? String(row.podHostnames) : "",
+        services: row.services ? String(row.services) : "",
+        computeMs: roundNumber(row.computeMs, 3),
+        transferMs: roundNumber(row.transferMs, 3),
+        maxMemMb: roundNumber(row.maxMemMb, 3),
+        maxCpuPct: roundNumber(row.maxCpuPct, 3),
+        maxSystemCpuPct: roundNumber(row.maxSystemCpuPct, 3),
+        maxMbps: roundNumber(row.maxMbps, 4),
+        networkDeltaMib: roundNumber(row.networkDeltaMib, 4),
+        payloadMib: roundNumber(row.payloadMib, 4)
+      };
+    })
+    .filter((row) => row.node || row.services || row.podHostnames);
+}
+
+function normalizeHistoryEntry(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return null;
+  }
+
+  const nowIso = new Date().toISOString();
+  const type = String(input.type || "").toLowerCase();
+  if (type !== "endpoint" && type !== "chat") {
+    return null;
+  }
+
+  const createdAt = toSafeIsoDate(input.createdAt, nowIso);
+  const namespace = String(input.namespace || NAMESPACE);
+  const target = String(input.target || "gateway");
+  const method = String(input.method || "POST").toUpperCase();
+  const pathValue = normalizePathForHttp(input.path || (type === "chat" ? "/chat" : "/generate"));
+  const config = input.config && typeof input.config === "object" && !Array.isArray(input.config)
+    ? input.config
+    : {};
+  const metrics = input.metrics && typeof input.metrics === "object" && !Array.isArray(input.metrics)
+    ? input.metrics
+    : {};
+  const profile = input.profile && typeof input.profile === "object" && !Array.isArray(input.profile)
+    ? input.profile
+    : {};
+
+  const record = {
+    id: Number(nextHistorySeq++),
+    type,
+    createdAt,
+    namespace,
+    target,
+    method,
+    path: pathValue,
+    config: {
+      promptChars: Math.max(0, Math.round(toFiniteNumber(config.promptChars, 0))),
+      promptTokens: Math.max(0, Math.round(toFiniteNumber(config.promptTokens, 0))),
+      maxNewTokens: Math.max(0, Math.round(toFiniteNumber(config.maxNewTokens, 0))),
+      minNewTokens: Math.max(0, Math.round(toFiniteNumber(config.minNewTokens, 0))),
+      temperature: roundNumber(config.temperature, 4),
+      timeoutMs: Math.max(0, Math.round(toFiniteNumber(config.timeoutMs, 0))),
+      modelName: config.modelName ? String(config.modelName) : "",
+      topologyHash: config.topologyHash ? String(config.topologyHash) : ""
+    },
+    profile: {
+      baseline: Boolean(profile.baseline),
+      enabledModules: Array.isArray(profile.enabledModules)
+        ? profile.enabledModules.map((item) => String(item)).slice(0, 32)
+        : [],
+      featureFlags: profile.featureFlags && typeof profile.featureFlags === "object" && !Array.isArray(profile.featureFlags)
+        ? profile.featureFlags
+        : {}
+    },
+    metrics: {
+      generatedTokens: Math.max(0, Math.round(toFiniteNumber(metrics.generatedTokens, 0))),
+      latencyMs: roundNumber(metrics.latencyMs, 3),
+      tokensPerSecond: roundNumber(metrics.tokensPerSecond, 6),
+      computeMs: roundNumber(metrics.computeMs, 3),
+      transferMs: roundNumber(metrics.transferMs, 3),
+      transferComputeRatio: roundNumber(metrics.transferComputeRatio, 6),
+      payloadMib: roundNumber(metrics.payloadMib, 6),
+      networkMib: roundNumber(metrics.networkMib, 6),
+      maxMemoryMb: roundNumber(metrics.maxMemoryMb, 3),
+      tokenP50Ms: roundNumber(metrics.tokenP50Ms, 3),
+      tokenP95Ms: roundNumber(metrics.tokenP95Ms, 3),
+      tokenP99Ms: roundNumber(metrics.tokenP99Ms, 3),
+      transferP50Ms: roundNumber(metrics.transferP50Ms, 3),
+      transferP95Ms: roundNumber(metrics.transferP95Ms, 3),
+      transferP99Ms: roundNumber(metrics.transferP99Ms, 3),
+      criticalPath: metrics.criticalPath && typeof metrics.criticalPath === "object" && !Array.isArray(metrics.criticalPath)
+        ? metrics.criticalPath
+        : {},
+      perStage: normalizeHistoryStageRows(metrics.perStage),
+      perNode: normalizeHistoryNodeRows(metrics.perNode)
+    }
+  };
+
+  return record;
+}
+
+async function ensureHistoryLoaded() {
+  if (historyLoaded) {
+    return;
+  }
+  historyLoaded = true;
+  await fsp.mkdir(DATA_DIR, { recursive: true });
+  let raw = "";
+  try {
+    raw = await fsp.readFile(HISTORY_FILE, "utf-8");
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+    raw = "";
+  }
+
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  for (const line of lines) {
+    const parsed = parseJsonSafe(line);
+    if (!parsed || typeof parsed !== "object") {
+      continue;
+    }
+    historyEntries.push(parsed);
+    const parsedId = Number(parsed.id || 0);
+    if (Number.isFinite(parsedId) && parsedId >= nextHistorySeq) {
+      nextHistorySeq = parsedId + 1;
+    }
+  }
+  if (historyEntries.length > HISTORY_MAX_ENTRIES) {
+    historyEntries.splice(0, historyEntries.length - HISTORY_MAX_ENTRIES);
+  }
+}
+
+async function compactHistoryFile() {
+  const serialized = historyEntries.map((entry) => JSON.stringify(entry)).join("\n");
+  const payload = serialized ? `${serialized}\n` : "";
+  await fsp.writeFile(HISTORY_FILE, payload, "utf-8");
+}
+
+async function appendHistoryRecords(records) {
+  if (!records.length) {
+    return [];
+  }
+
+  await ensureHistoryLoaded();
+  const normalized = records.map(normalizeHistoryEntry).filter(Boolean);
+  if (!normalized.length) {
+    return [];
+  }
+
+  historyWriteChain = historyWriteChain.then(async () => {
+    await fsp.mkdir(DATA_DIR, { recursive: true });
+    const chunk = normalized.map((entry) => JSON.stringify(entry)).join("\n");
+    await fsp.appendFile(HISTORY_FILE, `${chunk}\n`, "utf-8");
+    historyEntries.push(...normalized);
+    if (historyEntries.length > HISTORY_MAX_ENTRIES) {
+      historyEntries.splice(0, historyEntries.length - HISTORY_MAX_ENTRIES);
+      await compactHistoryFile();
+    }
+  });
+  await historyWriteChain;
+  return normalized;
 }
 
 function sendJson(res, statusCode, payload) {
@@ -911,6 +1199,33 @@ async function handleInvoke(req, res, query) {
     : INVOKE_TIMEOUT_DEFAULT_MS;
   const timeoutMs = parseInvokeTimeoutMs(payload.timeoutMs, recommendedDefaultTimeoutMs);
   const headers = buildInvokeHeaders(payload.headers);
+  runtimeStats.totalInvokes += 1;
+  updateRuntimePathCounter(pathValue, "total");
+  let runtimeTerminalMarked = false;
+  const markInvokeSuccess = () => {
+    if (runtimeTerminalMarked) {
+      return;
+    }
+    runtimeTerminalMarked = true;
+    runtimeStats.successfulInvokes += 1;
+    updateRuntimePathCounter(pathValue, "success");
+  };
+  const markInvokeFailure = () => {
+    if (runtimeTerminalMarked) {
+      return;
+    }
+    runtimeTerminalMarked = true;
+    runtimeStats.failedInvokes += 1;
+    updateRuntimePathCounter(pathValue, "failed");
+  };
+  const markInvokeDropped = () => {
+    if (runtimeTerminalMarked) {
+      return;
+    }
+    runtimeTerminalMarked = true;
+    runtimeStats.droppedInFlight += 1;
+    updateRuntimePathCounter(pathValue, "dropped");
+  };
 
   let lockKey = null;
   if (longInferenceCall) {
@@ -918,6 +1233,7 @@ async function handleInvoke(req, res, query) {
     const existingInvoke = IN_FLIGHT_INVOKES.get(lockKey);
     if (existingInvoke) {
       const inFlightMs = Math.max(0, Date.now() - existingInvoke.startedAt);
+      markInvokeDropped();
       sendJson(res, 429, {
         error: "Request discarded because another request is already in progress",
         hint: "Wait for the active /generate or /chat request to finish, then retry.",
@@ -957,6 +1273,7 @@ async function handleInvoke(req, res, query) {
     } catch (error) {
       const details = String(error.message || error);
       const stderr = error.stderr ? String(error.stderr) : "";
+      markInvokeFailure();
       sendJson(res, 500, {
         error: "Failed to resolve target pods",
         namespace,
@@ -980,6 +1297,7 @@ async function handleInvoke(req, res, query) {
       parseJson: true
     });
     const podNames = (allPods.items || []).map((pod) => pod.metadata?.name).filter(Boolean);
+    markInvokeFailure();
     sendJson(res, 404, {
       error: "No pod found for target",
       namespace,
@@ -1008,6 +1326,7 @@ async function handleInvoke(req, res, query) {
   const selectedPod = podItems[podItems.length - 1];
   const candidates = await buildHttpCandidates(namespace, targetConfig, selectedPod);
   if (!candidates.length) {
+    markInvokeFailure();
     sendJson(res, 500, {
       error: "No HTTP candidates available for target",
       namespace,
@@ -1061,6 +1380,7 @@ async function handleInvoke(req, res, query) {
       });
 
       if (fallbackViaPortForward?.ok) {
+        markInvokeSuccess();
         sendJson(res, 200, {
           generatedAt: new Date().toISOString(),
           namespace,
@@ -1124,11 +1444,21 @@ async function handleInvoke(req, res, query) {
     const abortedAttempts = attempts.filter((attempt) =>
       /aborted|timeout/i.test(String(attempt.error || ""))
     ).length;
+    if (abortedAttempts > 0) {
+      runtimeStats.timeoutFailures += abortedAttempts;
+      updateRuntimePathCounter(pathValue, "timeout", abortedAttempts);
+      for (const attempt of attempts) {
+        if (/aborted|timeout/i.test(String(attempt.error || ""))) {
+          pushTimeoutCause(`${attempt.candidate?.type || "candidate"}: ${attempt.error}`);
+        }
+      }
+    }
     const timeoutHint =
       abortedAttempts > 0
         ? `Request timed out for ${abortedAttempts}/${attempts.length} candidate(s). Increase timeoutMs for /generate or /chat, or set timeout to 0 for no timeout.`
         : undefined;
 
+    markInvokeFailure();
     sendJson(res, 502, {
       error: "All endpoint call attempts failed",
       hint: timeoutHint,
@@ -1144,6 +1474,7 @@ async function handleInvoke(req, res, query) {
     return;
   }
 
+    markInvokeSuccess();
     sendJson(res, 200, {
       generatedAt: new Date().toISOString(),
       namespace,
@@ -1240,6 +1571,73 @@ function handleEndpointCatalog(req, res, query) {
   });
 }
 
+function handleRuntime(req, res, query) {
+  const namespace = resolveNamespace(query);
+  sendJson(res, 200, {
+    namespace,
+    generatedAt: new Date().toISOString(),
+    runtime: runtimeSnapshot()
+  });
+}
+
+async function handleHistory(req, res, query) {
+  const method = (req.method || "GET").toUpperCase();
+  if (method === "GET") {
+    const typeFilter = String(query.get("type") || "").trim().toLowerCase();
+    const namespaceFilter = String(query.get("namespace") || "").trim();
+    const limit = clampNumber(query.get("limit"), 1, 5000, 300);
+    await ensureHistoryLoaded();
+    let rows = historyEntries;
+    if (typeFilter === "endpoint" || typeFilter === "chat") {
+      rows = rows.filter((row) => String(row.type || "") === typeFilter);
+    }
+    if (namespaceFilter) {
+      rows = rows.filter((row) => String(row.namespace || "") === namespaceFilter);
+    }
+    const selected = rows.slice(-limit).reverse();
+    sendJson(res, 200, {
+      generatedAt: new Date().toISOString(),
+      totalStored: historyEntries.length,
+      returned: selected.length,
+      entries: selected
+    });
+    return;
+  }
+
+  if (method !== "POST") {
+    sendJson(res, 405, { error: "Use GET or POST for /api/history." });
+    return;
+  }
+
+  let payload = {};
+  try {
+    payload = await readJsonBody(req, { maxBytes: 4 * 1024 * 1024 });
+  } catch (error) {
+    sendJson(res, 400, { error: String(error.message || error) });
+    return;
+  }
+
+  const rawEntries = Array.isArray(payload.entries)
+    ? payload.entries
+    : payload.entry
+    ? [payload.entry]
+    : [];
+  if (!rawEntries.length) {
+    sendJson(res, 400, { error: "Missing history entry payload." });
+    return;
+  }
+  if (rawEntries.length > 50) {
+    sendJson(res, 400, { error: "Too many entries in one request (max 50)." });
+    return;
+  }
+
+  const saved = await appendHistoryRecords(rawEntries);
+  sendJson(res, 200, {
+    saved: saved.length,
+    ids: saved.map((entry) => entry.id)
+  });
+}
+
 async function serveStatic(req, res, reqPath) {
   const cleanPath = reqPath === "/" ? "/index.html" : reqPath;
   const normalized = path.normalize(cleanPath).replace(/^(\.\.[/\\])+/, "");
@@ -1302,6 +1700,16 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/invoke") {
       await handleInvoke(req, res, url.searchParams);
+      return;
+    }
+
+    if (url.pathname === "/api/runtime") {
+      handleRuntime(req, res, url.searchParams);
+      return;
+    }
+
+    if (url.pathname === "/api/history") {
+      await handleHistory(req, res, url.searchParams);
       return;
     }
 

@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1.7
-ARG BASE_IMAGE=python:3.11-slim
+# Pinned to a digest so build cache keys stay stable across runs.
+ARG BASE_IMAGE=python:3.11-slim@sha256:a5b427ace4900267d93db34138e512325c6fa6af84ad5e4ed5f3b36258cc4142
 FROM ${BASE_IMAGE}
 ARG PIP_INDEX_URL=https://pypi.org/simple
 ARG PIP_TRUSTED_HOST=pypi.org
@@ -22,6 +23,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # Copy only the runtime code needed by stage containers.
 COPY src/dli/__init__.py ./src/dli/__init__.py
 COPY src/dli/common/ ./src/dli/common/
+COPY src/dli/feature_modules/ ./src/dli/feature_modules/
 COPY src/dli/inference_stage/ ./src/dli/inference_stage/
 
 # Stage config (includes stage map).

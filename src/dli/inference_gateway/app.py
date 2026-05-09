@@ -9,6 +9,8 @@ from requests import RequestException
 from transformers import AutoTokenizer
 
 from dli.common.logging_config import configure_logging
+from dli.feature_modules.catalog import FEATURE_MODULE_CATALOG
+from dli.feature_modules.persistent_backpressure import GatewayBackpressureGuard
 from dli.common.schemas import ChatRequest, GenerateRequest, GenerateResponse, HealthResponse
 from dli.inference_gateway.generation_loop import GenerationLoop
 from dli.inference_gateway.request_schema import GatewayConfig
@@ -55,6 +57,7 @@ generation_loop = GenerationLoop(
     tokenizer=tokenizer,
     stage_client=stage_client,
 )
+backpressure_guard = GatewayBackpressureGuard()
 
 app = FastAPI(
     title="Inference Gateway",
@@ -77,11 +80,27 @@ def config() -> Dict[str, Any]:
         "service_name": gateway_config.service_name,
         "model_name": gateway_config.model_name,
         "first_stage_url": gateway_config.first_stage_url,
+        "feature_modules": FEATURE_MODULE_CATALOG,
     }
 
 
 @app.post("/generate", response_model=GenerateResponse)
 def generate(request: GenerateRequest) -> GenerateResponse:
+    queue_acquired = False
+    if request.feature_flags.backpressure_enabled:
+        queue_limit = int(request.feature_flags.backpressure_queue_size)
+        queue_acquired = backpressure_guard.acquire(queue_limit=queue_limit)
+        if not queue_acquired:
+            snapshot = backpressure_guard.snapshot(queue_limit=queue_limit)
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "Backpressure queue is full. "
+                    f"inflight={snapshot.inflight} waiting={snapshot.waiting} "
+                    f"queue_limit={snapshot.queue_limit}"
+                ),
+            )
+
     prompt_text = (request.prompt or "").strip()
     if not prompt_text and request.messages:
         for message in reversed(request.messages):
@@ -113,10 +132,28 @@ def generate(request: GenerateRequest) -> GenerateResponse:
             status_code=500,
             detail=f"Generation failed: {exc}",
         ) from exc
+    finally:
+        if queue_acquired:
+            backpressure_guard.release()
 
 
 @app.post("/chat", response_model=GenerateResponse)
 def chat(request: ChatRequest) -> GenerateResponse:
+    queue_acquired = False
+    if request.feature_flags.backpressure_enabled:
+        queue_limit = int(request.feature_flags.backpressure_queue_size)
+        queue_acquired = backpressure_guard.acquire(queue_limit=queue_limit)
+        if not queue_acquired:
+            snapshot = backpressure_guard.snapshot(queue_limit=queue_limit)
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "Backpressure queue is full. "
+                    f"inflight={snapshot.inflight} waiting={snapshot.waiting} "
+                    f"queue_limit={snapshot.queue_limit}"
+                ),
+            )
+
     logger.info(
         "Received chat request turns=%s max_new_tokens=%s",
         len(request.messages),
@@ -131,6 +168,7 @@ def chat(request: ChatRequest) -> GenerateResponse:
         temperature=request.temperature,
         top_k=request.top_k,
         top_p=request.top_p,
+        feature_flags=request.feature_flags,
     )
 
     try:
@@ -149,3 +187,6 @@ def chat(request: ChatRequest) -> GenerateResponse:
             status_code=500,
             detail=f"Chat generation failed: {exc}",
         ) from exc
+    finally:
+        if queue_acquired:
+            backpressure_guard.release()

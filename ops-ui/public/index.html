@@ -31,6 +31,7 @@
           <span>Auto</span>
         </label>
         <button id="refreshTopologyBtn">Refresh Now</button>
+        <a class="topbar-link" href="/history.html">History</a>
       </div>
     </header>
 
@@ -46,8 +47,18 @@
       </section>
 
       <section class="panel panel-wide">
+        <h2>Architecture + Module Guide</h2>
+        <div id="architectureGuide" class="architecture-guide"></div>
+      </section>
+
+      <section class="panel panel-wide">
         <h2>Workloads</h2>
         <div id="workloadsTable"></div>
+      </section>
+
+      <section class="panel panel-wide">
+        <h2>Queue + In-Flight</h2>
+        <div id="runtimePanel" class="runtime-panel"></div>
       </section>
 
       <section class="panel panel-wide">
@@ -136,6 +147,48 @@
             Temperature
             <input id="endpointTemperature" type="number" min="0" max="2" step="0.1" value="0.2" />
           </label>
+        </div>
+        <div class="feature-flags-panel">
+          <h3 class="with-actions">
+            <span>Feature Modules</span>
+            <button id="featureFlagsResetBtn" type="button">Baseline Profile</button>
+          </h3>
+          <div class="feature-flag-grid">
+            <fieldset class="feature-flag-group">
+              <legend>Activation Transport</legend>
+              <label><input id="featureTransportJson" type="radio" name="feature-transport" value="json_base64" checked /> JSON + base64</label>
+              <label><input id="featureTransportBinary" type="radio" name="feature-transport" value="binary_octet_stream" /> Binary octet-stream</label>
+            </fieldset>
+
+            <fieldset class="feature-flag-group">
+              <legend>Activation Precision</legend>
+              <label><input id="featurePrecisionFp32" type="radio" name="feature-precision" value="fp32" checked /> FP32 (baseline)</label>
+              <label><input id="featurePrecisionFp16" type="radio" name="feature-precision" value="fp16" /> FP16</label>
+              <label><input id="featurePrecisionBf16" type="radio" name="feature-precision" value="bf16" /> BF16</label>
+              <label><input id="featurePrecisionInt8" type="radio" name="feature-precision" value="int8" /> INT8</label>
+            </fieldset>
+
+            <fieldset class="feature-flag-group">
+              <legend>Execution Profile</legend>
+              <label><input id="featureRebalanceBaseline" type="radio" name="feature-rebalance" value="baseline" checked /> Baseline partition</label>
+              <label><input id="featureRebalanceLatency" type="radio" name="feature-rebalance" value="latency_balanced_v1" /> Latency-balanced partition</label>
+            </fieldset>
+
+            <fieldset class="feature-flag-group">
+              <legend>Module Toggles</legend>
+              <label><input id="featureKvCache" type="checkbox" /> KV/forward cache</label>
+              <label><input id="featureTopologyAware" type="checkbox" /> Topology-aware routing</label>
+              <label><input id="featurePersistentSessions" type="checkbox" /> Persistent sessions</label>
+              <label><input id="featureBackpressure" type="checkbox" /> Backpressure guard</label>
+              <label>
+                Queue size
+                <input id="featureBackpressureQueue" type="number" min="0" max="256" step="1" value="0" />
+              </label>
+            </fieldset>
+          </div>
+          <p class="muted">
+            These controls auto-update <code>feature_flags</code> in Endpoint JSON and are also sent on Chat requests.
+          </p>
         </div>
         <label class="endpoint-body-label">
           JSON body (for POST/PUT/PATCH):

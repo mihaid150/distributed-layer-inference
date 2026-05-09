@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DLI Metrics History</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>DLI Metrics History</h1>
+        <p id="historyMeta" class="muted">Loading history...</p>
+      </div>
+      <div class="controls">
+        <a class="topbar-link" href="/index.html">Dashboard</a>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="panel panel-wide">
+        <h2>Run History</h2>
+        <div class="history-controls">
+          <label>
+            Type
+            <select id="historyType">
+              <option value="all" selected>all</option>
+              <option value="endpoint">endpoint</option>
+              <option value="chat">chat</option>
+            </select>
+          </label>
+          <label>
+            Namespace
+            <input id="historyNamespace" type="text" value="inference" />
+          </label>
+          <label>
+            Limit
+            <input id="historyLimit" type="number" min="10" max="5000" step="10" value="300" />
+          </label>
+          <button id="historyRefreshBtn">Refresh</button>
+        </div>
+        <div id="historyCards" class="invoke-metric-cards"></div>
+        <div class="history-layout">
+          <div class="invoke-subpanel">
+            <h3>Latency / Ratio / Percentile Trends</h3>
+            <div id="historyCharts" class="chart-grid"></div>
+          </div>
+          <div class="invoke-subpanel">
+            <h3 class="with-actions">
+              <span>A/B Compare</span>
+            </h3>
+            <div class="history-a-b">
+              <label>
+                Run A
+                <select id="compareA"></select>
+              </label>
+              <label>
+                Run B
+                <select id="compareB"></select>
+              </label>
+            </div>
+            <div id="compareSummary"></div>
+          </div>
+          <div class="history-table-wrap">
+            <table class="metrics-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Date</th>
+                  <th>Type</th>
+                  <th>Namespace</th>
+                  <th>Target</th>
+                  <th>Path</th>
+                  <th>Prompt Chars</th>
+                  <th>Prompt Tok</th>
+                  <th>Gen Tok</th>
+                  <th>Max Tok</th>
+                  <th>Min Tok</th>
+                  <th>Temp</th>
+                  <th>Timeout</th>
+                  <th>Topology</th>
+                  <th>Latency</th>
+                  <th>Tok/s</th>
+                  <th>Comm/Comp</th>
+                  <th>Max Mem</th>
+                  <th>Net MiB</th>
+                  <th>Profile</th>
+                </tr>
+              </thead>
+              <tbody id="historyTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/history.js"></script>
+  </body>
+</html>

@@ -15,6 +15,7 @@ from dli.common.schemas import (
     TokenStepMetric,
 )
 from dli.common.timing import elapsed_ms, now_ms
+from dli.feature_modules.partition_rebalance import PartitionRebalanceModule
 from dli.inference_stage.activation_codec import ActivationCodec
 from dli.inference_gateway.stage_client import StageClient
 
@@ -41,6 +42,7 @@ class GenerationLoop:
 
     def generate(self, request: GenerateRequest) -> GenerateResponse:
         request_id = str(uuid.uuid4())
+        feature_flags = request.feature_flags
 
         total_start = now_ms()
 
@@ -79,6 +81,8 @@ class GenerationLoop:
                 tensor_dtype=tensor_dtype,
                 tensor_shape=tensor_shape,
                 metadata={
+                    "feature_flags": feature_flags.model_dump(),
+                    "rebalance": PartitionRebalanceModule.describe(feature_flags),
                     "temperature": request.temperature,
                     "min_new_tokens": request.min_new_tokens,
                     "eos_token_id": eos_token_id,
@@ -88,9 +92,14 @@ class GenerationLoop:
                     "current_sequence_length": int(input_ids.shape[-1]),
                 },
                 metrics=[],
+                transport={"encoding": "json_base64"},
+                feature_flags=feature_flags,
             )
 
-            stage_result = self.stage_client.forward_with_transport(stage_request)
+            stage_result = self.stage_client.forward_with_transport(
+                stage_request,
+                input_tensor=input_ids,
+            )
             stage_response = stage_result.response
 
             if stage_response.next_token_id is None:
@@ -125,6 +134,8 @@ class GenerationLoop:
                         stage_result.transport.get("estimated_link_mbps", 0.0)
                     ),
                     "stage1_url": stage_result.transport.get("url"),
+                    "transport_encoding": stage_result.transport.get("encoding"),
+                    "feature_modules": feature_flags.enabled_module_keys(),
                 },
             )
             stage_metrics = list(stage_response.metrics)
@@ -167,6 +178,7 @@ class GenerationLoop:
                 token_metrics=token_metrics,
                 total_latency_ms=total_latency_ms,
                 prompt_token_count=prompt_token_count,
+                feature_flags=feature_flags.model_dump(),
             ),
             token_metrics=token_metrics,
         )
@@ -249,6 +261,7 @@ class GenerationLoop:
         token_metrics: List[TokenStepMetric],
         total_latency_ms: float,
         prompt_token_count: int,
+        feature_flags: Dict[str, Any],
     ) -> Dict[str, Any]:
         per_stage: Dict[str, Dict[str, Any]] = {}
         total_compute_ms = 0.0
@@ -314,6 +327,22 @@ class GenerationLoop:
             "prompt_token_count": prompt_token_count,
             "generated_token_count": len(token_metrics),
             "total_latency_ms": total_latency_ms,
+            "feature_flags": feature_flags,
+            "enabled_modules": [
+                name
+                for name, enabled in {
+                    "binary_transport": feature_flags.get("transport_mode") == "binary_octet_stream",
+                    "activation_precision": feature_flags.get("activation_precision") != "fp32",
+                    "kv_cache": bool(feature_flags.get("kv_cache_enabled")),
+                    "rebalance": feature_flags.get("rebalance_profile") != "baseline",
+                    "topology_aware": bool(feature_flags.get("topology_aware_routing")),
+                    "persistent_sessions_backpressure": bool(
+                        feature_flags.get("persistent_sessions_enabled")
+                        or feature_flags.get("backpressure_enabled")
+                    ),
+                }.items()
+                if enabled
+            ],
             "aggregate": {
                 "compute_time_ms_sum": total_compute_ms,
                 "transfer_time_ms_sum": total_transfer_ms,

@@ -5,10 +5,12 @@ const els = {
   overviewCards: document.getElementById("overviewCards"),
   pipeline: document.getElementById("pipeline"),
   workloadsTable: document.getElementById("workloadsTable"),
+  runtimePanel: document.getElementById("runtimePanel"),
   namespaceInput: document.getElementById("namespaceInput"),
   refreshSeconds: document.getElementById("refreshSeconds"),
   autoRefresh: document.getElementById("autoRefresh"),
   refreshTopologyBtn: document.getElementById("refreshTopologyBtn"),
+  architectureGuide: document.getElementById("architectureGuide"),
   logTarget: document.getElementById("logTarget"),
   logSource: document.getElementById("logSource"),
   logTail: document.getElementById("logTail"),
@@ -25,6 +27,20 @@ const els = {
   endpointMaxTokens: document.getElementById("endpointMaxTokens"),
   endpointMinTokens: document.getElementById("endpointMinTokens"),
   endpointTemperature: document.getElementById("endpointTemperature"),
+  featureTransportJson: document.getElementById("featureTransportJson"),
+  featureTransportBinary: document.getElementById("featureTransportBinary"),
+  featurePrecisionFp32: document.getElementById("featurePrecisionFp32"),
+  featurePrecisionFp16: document.getElementById("featurePrecisionFp16"),
+  featurePrecisionBf16: document.getElementById("featurePrecisionBf16"),
+  featurePrecisionInt8: document.getElementById("featurePrecisionInt8"),
+  featureRebalanceBaseline: document.getElementById("featureRebalanceBaseline"),
+  featureRebalanceLatency: document.getElementById("featureRebalanceLatency"),
+  featureKvCache: document.getElementById("featureKvCache"),
+  featureTopologyAware: document.getElementById("featureTopologyAware"),
+  featurePersistentSessions: document.getElementById("featurePersistentSessions"),
+  featureBackpressure: document.getElementById("featureBackpressure"),
+  featureBackpressureQueue: document.getElementById("featureBackpressureQueue"),
+  featureFlagsResetBtn: document.getElementById("featureFlagsResetBtn"),
   endpointBody: document.getElementById("endpointBody"),
   invokeEndpointBtn: document.getElementById("invokeEndpointBtn"),
   invokeMeta: document.getElementById("invokeMeta"),
@@ -52,8 +68,15 @@ let chatBusy = false;
 let invokeBusy = false;
 let podToNodeMap = new Map();
 let invokeRuns = [];
+let featureModuleCatalog = [];
+let latestInvokeFeatureFlags = null;
+let latestInvokeEnabledModules = [];
+let latestChatFeatureFlags = null;
+let latestChatEnabledModules = [];
+let runtimeSnapshot = null;
 
 const SESSION_STORAGE_KEY = "dli_ops_ui_session_v2";
+const HISTORY_POST_BATCH_LIMIT = 1;
 const INVOKE_TIMEOUT_MIN_MS = 1000;
 const INVOKE_TIMEOUT_DEFAULT_MS = 15000;
 const INVOKE_TIMEOUT_LONG_DEFAULT_MS = 300000;
@@ -67,6 +90,70 @@ const CHART_PALETTE = [
   "#ff8a65",
   "#4dd0e1",
   "#ffd54f"
+];
+const ALERT_THRESHOLDS = {
+  transferP95Ms: 9000,
+  transferComputeRatio: 2.4,
+  processCpuPct: 85,
+  memoryMb: 2400
+};
+
+const FEATURE_FLAG_DEFAULTS = Object.freeze({
+  transport_mode: "json_base64",
+  activation_precision: "fp32",
+  kv_cache_enabled: false,
+  rebalance_profile: "baseline",
+  topology_aware_routing: false,
+  persistent_sessions_enabled: false,
+  backpressure_enabled: false,
+  backpressure_queue_size: 0
+});
+
+const BASELINE_WORKFLOW_STEPS = [
+  "Gateway tokenizes prompt/messages and prepares the stage-1 request.",
+  "Stage-1 runs its partition and forwards activations to stage-2.",
+  "Stage-2 and stage-3 repeat compute + forward to the next stage.",
+  "Stage-4 computes logits and returns next-token to gateway.",
+  "Gateway appends token and loops until stop condition."
+];
+
+const MODULE_FALLBACK_CATALOG = [
+  {
+    key: "binary_transport",
+    title: "Binary Activation Transport",
+    summary:
+      "Replace JSON+base64 activations with binary octet-stream envelopes between stages."
+  },
+  {
+    key: "activation_precision",
+    title: "Activation Precision Reduction",
+    summary:
+      "Send FP16/BF16/INT8 activations plus scale metadata, then restore before compute."
+  },
+  {
+    key: "kv_cache",
+    title: "Stage KV/Forward Cache",
+    summary:
+      "Enable stage-side dedupe/forward cache; avoid repeated work for duplicate forward requests."
+  },
+  {
+    key: "rebalance",
+    title: "Partition Rebalance Profile",
+    summary:
+      "Switch from baseline partition to a rebalance profile marker for staged experiments."
+  },
+  {
+    key: "topology_aware",
+    title: "Topology-Aware Routing",
+    summary:
+      "Allow topology-aware next-hop override policy for cross-node forwarding."
+  },
+  {
+    key: "persistent_sessions_backpressure",
+    title: "Persistent Sessions + Backpressure",
+    summary:
+      "Reuse HTTP sessions and enforce bounded single-flight/queue behavior."
+  }
 ];
 
 function statusClass(status) {
@@ -173,6 +260,107 @@ function parseJsonOrNull(text) {
   }
 }
 
+function toBool(value) {
+  return value === true || String(value).toLowerCase() === "true";
+}
+
+function deriveEnabledModules(featureFlags, explicitModules) {
+  const flags = asObject(featureFlags);
+  const explicit = new Set(
+    asArray(explicitModules).map((item) => String(item || "").trim()).filter(Boolean)
+  );
+  const derived = [
+    ["binary_transport", flags.transport_mode === "binary_octet_stream"],
+    ["activation_precision", String(flags.activation_precision || "fp32") !== "fp32"],
+    ["kv_cache", toBool(flags.kv_cache_enabled)],
+    ["rebalance", String(flags.rebalance_profile || "baseline") !== "baseline"],
+    ["topology_aware", toBool(flags.topology_aware_routing)],
+    [
+      "persistent_sessions_backpressure",
+      toBool(flags.persistent_sessions_enabled) || toBool(flags.backpressure_enabled)
+    ]
+  ];
+
+  for (const [key, enabled] of derived) {
+    if (enabled) {
+      explicit.add(key);
+    }
+  }
+
+  return [...explicit].sort((a, b) => a.localeCompare(b));
+}
+
+function getFeatureFlagProfileChips(featureFlags) {
+  const flags = asObject(featureFlags);
+  if (!Object.keys(flags).length) {
+    return [];
+  }
+  return [
+    `transport=${safeText(flags.transport_mode || "json_base64")}`,
+    `precision=${safeText(flags.activation_precision || "fp32")}`,
+    `kv_cache=${toBool(flags.kv_cache_enabled) ? "on" : "off"}`,
+    `rebalance=${safeText(flags.rebalance_profile || "baseline")}`,
+    `topology=${toBool(flags.topology_aware_routing) ? "on" : "off"}`,
+    `sessions=${toBool(flags.persistent_sessions_enabled) ? "on" : "off"}`,
+    `backpressure=${toBool(flags.backpressure_enabled) ? "on" : "off"}`,
+    `queue=${safeText(flags.backpressure_queue_size ?? "-")}`
+  ];
+}
+
+function buildTopologyHash() {
+  const parts = [...podToNodeMap.entries()]
+    .map(([pod, node]) => `${pod}:${node}`)
+    .sort((a, b) => a.localeCompare(b));
+  return parts.join("|");
+}
+
+function parseGenerateConfigFromBody(bodyValue) {
+  const parsed = asObject(bodyValue);
+  return {
+    promptChars: String(parsed.prompt || "").length,
+    maxNewTokens: Number(parsed.max_new_tokens || 0),
+    minNewTokens: Number(parsed.min_new_tokens || 0),
+    temperature: Number(parsed.temperature || 0)
+  };
+}
+
+async function postHistoryEntries(entries) {
+  const rows = asArray(entries).filter((item) => item && typeof item === "object");
+  if (!rows.length) {
+    return;
+  }
+  const batched = rows.slice(0, HISTORY_POST_BATCH_LIMIT);
+  try {
+    await fetch("/api/history", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ entries: batched })
+    });
+  } catch {
+    // ignore history persistence errors in UI path
+  }
+}
+
+function makeAlertRibbons(alerts) {
+  if (!alerts.length) {
+    return "";
+  }
+  return `
+    <div class="invoke-subpanel">
+      <h3>Alerts</h3>
+      <div class="alert-ribbons">
+        ${alerts
+          .map(
+            (item) => `
+            <div class="alert-ribbon ${escapeHtml(item.level || "info")}">${escapeHtml(item.message)}</div>
+          `
+          )
+          .join("")}
+      </div>
+    </div>
+  `;
+}
+
 function isGenerationEndpoint() {
   const method = String(els.endpointMethod.value || "").toUpperCase();
   const path = String(els.endpointPath.value || "").trim();
@@ -190,6 +378,178 @@ function syncGenerationControlsEnabledState() {
   for (const control of controls) {
     control.disabled = !enabled;
   }
+}
+
+function getCheckedRadioValue(name, fallback) {
+  const selected = document.querySelector(`input[name="${name}"]:checked`);
+  return selected ? String(selected.value) : String(fallback);
+}
+
+function setCheckedRadioValue(name, value, fallback) {
+  const next = String(value == null ? fallback : value);
+  const wanted = document.querySelector(`input[name="${name}"][value="${next}"]`);
+  if (wanted) {
+    wanted.checked = true;
+    return;
+  }
+  const fallbackInput = document.querySelector(
+    `input[name="${name}"][value="${String(fallback)}"]`
+  );
+  if (fallbackInput) {
+    fallbackInput.checked = true;
+  }
+}
+
+function normalizeFeatureFlags(rawFlags) {
+  const flags = asObject(rawFlags);
+  const transportMode =
+    String(flags.transport_mode || FEATURE_FLAG_DEFAULTS.transport_mode) ===
+    "binary_octet_stream"
+      ? "binary_octet_stream"
+      : "json_base64";
+  const precisionCandidates = new Set(["fp32", "fp16", "bf16", "int8"]);
+  const activationPrecision = String(
+    flags.activation_precision || FEATURE_FLAG_DEFAULTS.activation_precision
+  );
+  const precisionMode = precisionCandidates.has(activationPrecision)
+    ? activationPrecision
+    : FEATURE_FLAG_DEFAULTS.activation_precision;
+  const rebalanceProfile =
+    String(flags.rebalance_profile || FEATURE_FLAG_DEFAULTS.rebalance_profile) ===
+    "latency_balanced_v1"
+      ? "latency_balanced_v1"
+      : "baseline";
+  const queueSize = Math.round(
+    clampNumber(
+      flags.backpressure_queue_size,
+      0,
+      256,
+      FEATURE_FLAG_DEFAULTS.backpressure_queue_size
+    )
+  );
+  return {
+    transport_mode: transportMode,
+    activation_precision: precisionMode,
+    kv_cache_enabled: toBool(flags.kv_cache_enabled),
+    rebalance_profile: rebalanceProfile,
+    topology_aware_routing: toBool(flags.topology_aware_routing),
+    persistent_sessions_enabled: toBool(flags.persistent_sessions_enabled),
+    backpressure_enabled: toBool(flags.backpressure_enabled),
+    backpressure_queue_size: queueSize
+  };
+}
+
+function isBaselineFeatureFlags(flags) {
+  const normalized = normalizeFeatureFlags(flags);
+  return (
+    normalized.transport_mode === FEATURE_FLAG_DEFAULTS.transport_mode &&
+    normalized.activation_precision === FEATURE_FLAG_DEFAULTS.activation_precision &&
+    normalized.kv_cache_enabled === FEATURE_FLAG_DEFAULTS.kv_cache_enabled &&
+    normalized.rebalance_profile === FEATURE_FLAG_DEFAULTS.rebalance_profile &&
+    normalized.topology_aware_routing === FEATURE_FLAG_DEFAULTS.topology_aware_routing &&
+    normalized.persistent_sessions_enabled ===
+      FEATURE_FLAG_DEFAULTS.persistent_sessions_enabled &&
+    normalized.backpressure_enabled === FEATURE_FLAG_DEFAULTS.backpressure_enabled &&
+    normalized.backpressure_queue_size === FEATURE_FLAG_DEFAULTS.backpressure_queue_size
+  );
+}
+
+function readFeatureFlagsFromControls() {
+  const backpressureEnabled = toBool(els.featureBackpressure?.checked);
+  const queueSize = Math.round(
+    clampNumber(els.featureBackpressureQueue?.value, 0, 256, 0)
+  );
+  return normalizeFeatureFlags({
+    transport_mode: getCheckedRadioValue(
+      "feature-transport",
+      FEATURE_FLAG_DEFAULTS.transport_mode
+    ),
+    activation_precision: getCheckedRadioValue(
+      "feature-precision",
+      FEATURE_FLAG_DEFAULTS.activation_precision
+    ),
+    kv_cache_enabled: toBool(els.featureKvCache?.checked),
+    rebalance_profile: getCheckedRadioValue(
+      "feature-rebalance",
+      FEATURE_FLAG_DEFAULTS.rebalance_profile
+    ),
+    topology_aware_routing: toBool(els.featureTopologyAware?.checked),
+    persistent_sessions_enabled: toBool(els.featurePersistentSessions?.checked),
+    backpressure_enabled: backpressureEnabled,
+    backpressure_queue_size: backpressureEnabled ? queueSize : 0
+  });
+}
+
+function applyFeatureFlagControls(flags) {
+  const next = normalizeFeatureFlags(flags);
+  setCheckedRadioValue(
+    "feature-transport",
+    next.transport_mode,
+    FEATURE_FLAG_DEFAULTS.transport_mode
+  );
+  setCheckedRadioValue(
+    "feature-precision",
+    next.activation_precision,
+    FEATURE_FLAG_DEFAULTS.activation_precision
+  );
+  setCheckedRadioValue(
+    "feature-rebalance",
+    next.rebalance_profile,
+    FEATURE_FLAG_DEFAULTS.rebalance_profile
+  );
+  if (els.featureKvCache) {
+    els.featureKvCache.checked = toBool(next.kv_cache_enabled);
+  }
+  if (els.featureTopologyAware) {
+    els.featureTopologyAware.checked = toBool(next.topology_aware_routing);
+  }
+  if (els.featurePersistentSessions) {
+    els.featurePersistentSessions.checked = toBool(next.persistent_sessions_enabled);
+  }
+  if (els.featureBackpressure) {
+    els.featureBackpressure.checked = toBool(next.backpressure_enabled);
+  }
+  if (els.featureBackpressureQueue) {
+    els.featureBackpressureQueue.value = String(next.backpressure_queue_size);
+  }
+  syncFeatureFlagControlState();
+}
+
+function syncFeatureFlagControlState() {
+  if (!els.featureBackpressureQueue) {
+    return;
+  }
+  const enabled = toBool(els.featureBackpressure?.checked);
+  els.featureBackpressureQueue.disabled = !enabled;
+}
+
+function syncFeatureFlagControlsFromBody() {
+  const parsed = parseJsonOrNull(els.endpointBody.value || "");
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return;
+  }
+  applyFeatureFlagControls(asObject(parsed.feature_flags));
+}
+
+function syncBodyFromFeatureFlagControls() {
+  const method = String(els.endpointMethod.value || "").toUpperCase();
+  if (method === "GET" || method === "HEAD") {
+    return;
+  }
+
+  const parsed = parseJsonOrNull(els.endpointBody.value || "");
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return;
+  }
+
+  const nextBody = { ...parsed };
+  const flags = readFeatureFlagsFromControls();
+  if (isBaselineFeatureFlags(flags)) {
+    delete nextBody.feature_flags;
+  } else {
+    nextBody.feature_flags = flags;
+  }
+  els.endpointBody.value = prettyJson(nextBody);
 }
 
 function syncGenerationFieldsFromBody() {
@@ -216,6 +576,8 @@ function syncGenerationFieldsFromBody() {
       clampNumber(parsed.temperature, 0, 2, 0.2)
     );
   }
+
+  applyFeatureFlagControls(asObject(parsed.feature_flags));
 }
 
 function syncBodyFromGenerationFields() {
@@ -286,6 +648,140 @@ async function loadEndpointCatalog() {
   }
   syncGenerationControlsEnabledState();
   syncGenerationFieldsFromBody();
+}
+
+function getModuleCatalogRows() {
+  if (featureModuleCatalog.length) {
+    return featureModuleCatalog;
+  }
+  return MODULE_FALLBACK_CATALOG;
+}
+
+function renderArchitectureGuide() {
+  if (!els.architectureGuide) {
+    return;
+  }
+
+  const invokeEnabled = deriveEnabledModules(
+    latestInvokeFeatureFlags,
+    latestInvokeEnabledModules
+  );
+  const chatEnabled = deriveEnabledModules(latestChatFeatureFlags, latestChatEnabledModules);
+  const invokeSet = new Set(invokeEnabled);
+  const chatSet = new Set(chatEnabled);
+
+  const baselineChips = [
+    "json_base64 transport",
+    "fp32 activations",
+    "no stage cache",
+    "baseline partition",
+    "static next-hop",
+    "default HTTP requests"
+  ];
+
+  const moduleRows = getModuleCatalogRows();
+  const moduleCards = moduleRows
+    .map((moduleRow) => {
+      const key = String(moduleRow.key || "");
+      const title = String(moduleRow.title || key);
+      const summary = String(moduleRow.summary || "");
+      const invokeOn = invokeSet.has(key);
+      const chatOn = chatSet.has(key);
+      return `
+        <div class="module-card">
+          <div class="module-title-row">
+            <h3>${escapeHtml(title)}</h3>
+            <span class="module-key">${escapeHtml(key)}</span>
+          </div>
+          <div class="status-badges">
+            <span class="status-badge ${invokeOn ? "on" : "off"}">Endpoint: ${invokeOn ? "on" : "off"}</span>
+            <span class="status-badge ${chatOn ? "on" : "off"}">Chat: ${chatOn ? "on" : "off"}</span>
+          </div>
+          <p>${escapeHtml(summary)}</p>
+        </div>
+      `;
+    })
+    .join("");
+
+  const invokeProfile = getFeatureFlagProfileChips(latestInvokeFeatureFlags);
+  const chatProfile = getFeatureFlagProfileChips(latestChatFeatureFlags);
+
+  els.architectureGuide.innerHTML = `
+    <div class="architecture-overview">
+      <div class="architecture-card">
+        <h3>Baseline Architecture</h3>
+        <p>Default flow before enabling modules. This is your comparison point for all experiments.</p>
+        <ol class="arch-flow">
+          ${BASELINE_WORKFLOW_STEPS.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}
+        </ol>
+        <div class="profile-row">
+          ${baselineChips.map((chip) => `<span class="profile-chip">${escapeHtml(chip)}</span>`).join("")}
+        </div>
+      </div>
+      <div class="architecture-card">
+        <h3>Current Activation Profile</h3>
+        <p>Live profile extracted from the latest endpoint/chat responses.</p>
+        <div class="profile-row">
+          <span class="status-badge ${invokeEnabled.length ? "on" : "off"}">
+            Endpoint modules: ${invokeEnabled.length ? invokeEnabled.join(", ") : "baseline-only"}
+          </span>
+        </div>
+        <div class="profile-row">
+          ${
+            invokeProfile.length
+              ? invokeProfile.map((chip) => `<span class="profile-chip">${escapeHtml(chip)}</span>`).join("")
+              : `<span class="profile-chip">No endpoint profile yet</span>`
+          }
+        </div>
+        <div class="profile-row">
+          <span class="status-badge ${chatEnabled.length ? "on" : "off"}">
+            Chat modules: ${chatEnabled.length ? chatEnabled.join(", ") : "baseline-only"}
+          </span>
+        </div>
+        <div class="profile-row">
+          ${
+            chatProfile.length
+              ? chatProfile.map((chip) => `<span class="profile-chip">${escapeHtml(chip)}</span>`).join("")
+              : `<span class="profile-chip">No chat profile yet</span>`
+          }
+        </div>
+      </div>
+    </div>
+    <div class="module-grid">
+      ${moduleCards}
+    </div>
+  `;
+}
+
+async function loadFeatureModuleCatalog() {
+  const namespace = getNamespace();
+  try {
+    const res = await fetch("/api/invoke", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        namespace,
+        target: "gateway",
+        method: "GET",
+        path: "/config",
+        timeoutMs: 10000
+      })
+    });
+    if (!res.ok) {
+      renderArchitectureGuide();
+      return;
+    }
+    const payload = await res.json();
+    const moduleRows = asArray(payload?.responseJson?.feature_modules).filter(
+      (item) => item && typeof item === "object" && item.key
+    );
+    if (moduleRows.length) {
+      featureModuleCatalog = moduleRows;
+    }
+  } catch {
+    // keep fallback catalog
+  }
+  renderArchitectureGuide();
 }
 
 function renderOverview(data) {
@@ -380,6 +876,102 @@ function renderWorkloads(data) {
       <tbody>${rows || "<tr><td colspan='7'>No pods</td></tr>"}</tbody>
     </table>
   `;
+}
+
+function renderRuntimePanel() {
+  if (!els.runtimePanel) {
+    return;
+  }
+  const snapshot = asObject(runtimeSnapshot);
+  if (!Object.keys(snapshot).length) {
+    els.runtimePanel.innerHTML = `<div class="muted">Runtime telemetry not available yet.</div>`;
+    return;
+  }
+  const byPath = asObject(snapshot.byPath);
+  const cards = [
+    { k: "In Flight", v: String(snapshot.inFlight || 0) },
+    { k: "Queue Depth", v: String(snapshot.queueDepth || 0) },
+    { k: "Mode", v: safeText(snapshot.queueMode || "-") },
+    { k: "Total Invokes", v: String(snapshot.totalInvokes || 0) },
+    { k: "Successful", v: String(snapshot.successfulInvokes || 0) },
+    { k: "Failed", v: String(snapshot.failedInvokes || 0) },
+    { k: "Dropped (busy)", v: String(snapshot.droppedInFlight || 0) },
+    { k: "Timeout Failures", v: String(snapshot.timeoutFailures || 0) }
+  ];
+
+  const pathRows = Object.entries(byPath)
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([pathKey, row]) => {
+      const p = asObject(row);
+      return `<li><strong>${escapeHtml(pathKey)}</strong>: total=${safeText(p.total || 0)} success=${safeText(
+        p.success || 0
+      )} failed=${safeText(p.failed || 0)} dropped=${safeText(p.dropped || 0)} timeout=${safeText(p.timeout || 0)}</li>`;
+    })
+    .join("");
+
+  const inFlightRows = asArray(snapshot.inFlightRequests)
+    .map(
+      (item) => `
+      <li>${escapeHtml(item.method)} ${escapeHtml(item.path)} target=${escapeHtml(item.target)} inFlight=${formatNumber(
+        item.inFlightMs,
+        0
+      )}ms</li>
+    `
+    )
+    .join("");
+
+  const timeoutRows = asArray(snapshot.lastTimeoutCauses)
+    .slice(0, 8)
+    .map(
+      (item) =>
+        `<li>${escapeHtml(item.at || "-")} • ${escapeHtml(item.cause || "timeout")}</li>`
+    )
+    .join("");
+
+  els.runtimePanel.innerHTML = `
+    <div class="runtime-cards">
+      ${cards
+        .map(
+          (card) => `
+          <div class="runtime-card">
+            <div class="k">${escapeHtml(card.k)}</div>
+            <div class="v">${escapeHtml(card.v)}</div>
+          </div>
+        `
+        )
+        .join("")}
+    </div>
+    <div class="chart-grid">
+      <div class="runtime-list">
+        <strong>In-Flight Requests</strong>
+        <ul>${inFlightRows || "<li>none</li>"}</ul>
+      </div>
+      <div class="runtime-list">
+        <strong>Recent Timeout Causes</strong>
+        <ul>${timeoutRows || "<li>none</li>"}</ul>
+      </div>
+      <div class="runtime-list">
+        <strong>Path Counters</strong>
+        <ul>${pathRows || "<li>none</li>"}</ul>
+      </div>
+    </div>
+  `;
+}
+
+async function loadRuntime() {
+  if (!els.runtimePanel) {
+    return;
+  }
+  const namespace = getNamespace();
+  try {
+    const payload = await fetchJson(`/api/runtime?namespace=${encodeURIComponent(namespace)}`);
+    runtimeSnapshot = asObject(payload.runtime);
+    renderRuntimePanel();
+  } catch (error) {
+    els.runtimePanel.innerHTML = `<div class="log-pill line-err">Runtime error: ${escapeHtml(
+      error.message
+    )}</div>`;
+  }
 }
 
 function renderLogs(payload) {
@@ -499,6 +1091,169 @@ function formatDurationCompact(ms) {
     return `${n.toFixed(1)} ms`;
   }
   return `${(n / 1000).toFixed(2)} s`;
+}
+
+function buildCriticalPathSankey(criticalPath, totalLatencyMs) {
+  const total = Math.max(1e-9, Number(totalLatencyMs || 0));
+  const rows = [
+    {
+      key: "Gateway Serialize",
+      css: "gateway-serialize",
+      value: Number(criticalPath.gatewaySerializationMs || 0)
+    },
+    {
+      key: "Gateway Wait",
+      css: "gateway-wait",
+      value: Number(criticalPath.gatewayWaitMs || 0)
+    },
+    {
+      key: "Stage Compute",
+      css: "stage-compute",
+      value: Number(criticalPath.stageComputeMs || 0)
+    },
+    {
+      key: "Stage Transfer",
+      css: "stage-transfer",
+      value: Number(criticalPath.stageTransferMs || 0)
+    },
+    {
+      key: "Residual",
+      css: "residual",
+      value: Number(criticalPath.stageResidualMs || 0)
+    }
+  ];
+
+  const segments = rows
+    .filter((row) => row.value > 0)
+    .map((row) => {
+      const pct = Math.max(0.25, (100 * row.value) / total);
+      return `<div class="sankey-segment ${row.css}" style="width:${pct}%"></div>`;
+    })
+    .join("");
+  const legend = rows
+    .map((row) => {
+      const pct = (100 * row.value) / total;
+      return `
+        <div class="sankey-legend-row">
+          <span class="sankey-legend-swatch ${row.css}"></span>
+          <span>${escapeHtml(row.key)}</span>
+          <span>${formatNumber(row.value, 1)} ms (${formatNumber(pct, 2)}%)</span>
+        </div>
+      `;
+    })
+    .join("");
+
+  return `
+    <div class="sankey">
+      <div class="sankey-track">${segments || `<div class="sankey-segment gateway-wait" style="width:100%"></div>`}</div>
+      <div class="sankey-legend">${legend}</div>
+    </div>
+  `;
+}
+
+function buildStageTokenHeatmap(tokenMetrics) {
+  const stageMap = new Map();
+  const tokens = asArray(tokenMetrics);
+  for (const tokenStep of tokens) {
+    const tokenIndex = Number(tokenStep.token_index || 0);
+    for (const sample of asArray(tokenStep.stage_metrics)) {
+      const stageKey = stageLabelFromMetric(sample);
+      const stage = stageMap.get(stageKey) || {
+        stageKey,
+        service: String(sample.service_name || stageKey),
+        stageId: Number(sample.stage_id || 0),
+        byToken: new Map()
+      };
+      const latencyValue = Number(sample.compute_time_ms || 0) + Number(sample.transfer_time_ms || 0);
+      stage.byToken.set(tokenIndex, (stage.byToken.get(tokenIndex) || 0) + latencyValue);
+      stageMap.set(stageKey, stage);
+    }
+  }
+
+  const stages = [...stageMap.values()].sort((a, b) => a.stageId - b.stageId);
+  if (!stages.length || !tokens.length) {
+    return `<div class="muted">No token/stage samples for heatmap.</div>`;
+  }
+  const tokenIndices = tokens.map((step) => Number(step.token_index || 0));
+  const maxLatency = Math.max(
+    1,
+    ...stages.flatMap((stage) => tokenIndices.map((idx) => Number(stage.byToken.get(idx) || 0)))
+  );
+  const headerCells = tokenIndices.map((idx) => `<th>T${idx}</th>`).join("");
+  const rows = stages
+    .map((stage) => {
+      const cells = tokenIndices
+        .map((idx) => {
+          const value = Number(stage.byToken.get(idx) || 0);
+          const alpha = Math.min(0.95, 0.1 + 0.85 * (value / maxLatency));
+          const color = `rgba(93,178,255,${alpha})`;
+          return `<td class="heatmap-cell" style="background:${color}">${formatNumber(value, 1)}</td>`;
+        })
+        .join("");
+      return `<tr><td>${escapeHtml(stage.stageKey)}</td>${cells}</tr>`;
+    })
+    .join("");
+
+  return `
+    <div class="heatmap-wrap">
+      <table class="heatmap-table">
+        <thead><tr><th>Stage</th>${headerCells}</tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function buildInvokeAlerts({
+  transferP95Ms,
+  transferComputeRatio,
+  maxProcessCpu,
+  maxMemoryMb,
+  runtime
+}) {
+  const alerts = [];
+  if (Number(transferP95Ms || 0) > ALERT_THRESHOLDS.transferP95Ms) {
+    alerts.push({
+      level: "warn",
+      message: `Transfer p95 is high (${formatNumber(transferP95Ms, 1)} ms). Network path dominates token latency.`
+    });
+  }
+  if (Number(transferComputeRatio || 0) > ALERT_THRESHOLDS.transferComputeRatio) {
+    alerts.push({
+      level: "warn",
+      message: `Communication/compute ratio ${formatNumber(
+        transferComputeRatio,
+        3
+      )} is above target (${ALERT_THRESHOLDS.transferComputeRatio}).`
+    });
+  }
+  if (Number(maxProcessCpu || 0) >= ALERT_THRESHOLDS.processCpuPct) {
+    alerts.push({
+      level: "err",
+      message: `Node CPU saturation detected (max process CPU ${formatNumber(maxProcessCpu, 1)}%).`
+    });
+  }
+  if (Number(maxMemoryMb || 0) >= ALERT_THRESHOLDS.memoryMb) {
+    alerts.push({
+      level: "warn",
+      message: `Memory cliff risk: peak process memory ${formatNumber(maxMemoryMb, 1)} MB.`
+    });
+  }
+  const inFlight = Number(asObject(runtime).inFlight || 0);
+  const dropped = Number(asObject(runtime).droppedInFlight || 0);
+  if (inFlight > 0) {
+    alerts.push({
+      level: "info",
+      message: `Queue state: ${inFlight} request(s) currently in flight (drop-on-busy mode).`
+    });
+  }
+  if (dropped > 0) {
+    alerts.push({
+      level: "warn",
+      message: `Dropped requests due to busy pipeline: ${dropped}.`
+    });
+  }
+  return alerts;
 }
 
 function buildLineChartSvg(series, { width = 920, height = 220, yLabel = "" } = {}) {
@@ -653,6 +1408,20 @@ function restoreSessionState() {
   );
   chatTurns = asArray(parsed.chatTurns).filter((item) => item && typeof item === "object");
   invokeRuns = asArray(parsed.invokeRuns).filter((item) => item && typeof item === "object");
+
+  const lastInvoke = invokeRuns.length ? asObject(invokeRuns[invokeRuns.length - 1]) : {};
+  latestInvokeFeatureFlags = asObject(lastInvoke.feature_flags);
+  latestInvokeEnabledModules = deriveEnabledModules(
+    latestInvokeFeatureFlags,
+    lastInvoke.enabled_modules
+  );
+
+  const lastTurn = chatTurns.length ? asObject(chatTurns[chatTurns.length - 1]) : {};
+  latestChatFeatureFlags = asObject(lastTurn.feature_flags);
+  latestChatEnabledModules = deriveEnabledModules(
+    latestChatFeatureFlags,
+    lastTurn.enabled_modules
+  );
 }
 
 function updateChatContextInfo() {
@@ -954,29 +1723,97 @@ function summarizeTokenRows(tokenMetrics) {
 function buildInvokeRunSummary({
   responseJson,
   nodeRows,
+  stageRows,
   tokenRows,
   criticalPath,
-  totalLatencyMs
+  totalLatencyMs,
+  requestConfig
 }) {
+  const summary = asObject(responseJson?.summary_metrics);
+  const featureFlags = asObject(summary.feature_flags);
+  const enabledModules = deriveEnabledModules(featureFlags, summary.enabled_modules);
+  const generatedTokens = Number(asArray(responseJson?.generated_token_ids).length || 0);
+  const computeSumMs = tokenRows.reduce((sum, row) => sum + Number(row.computeMs || 0), 0);
+  const transferSumMs = tokenRows.reduce((sum, row) => sum + Number(row.transferMs || 0), 0);
+  const maxMemoryMb = tokenRows.reduce((max, row) => Math.max(max, Number(row.maxMemMb || 0)), 0);
+  const tokenLatencies = tokenRows.map((row) => Number(row.latencyMs || 0));
+  const transferLatencies = tokenRows.map((row) => Number(row.transferMs || 0));
+  const aggregate = asObject(summary.aggregate);
+  const transferComputeRatio = transferSumMs / Math.max(1e-9, computeSumMs);
   return {
     timestamp: new Date().toISOString(),
     totalLatencyMs: Number(totalLatencyMs || 0),
     tokensPerSecond: Number(responseJson?.tokens_per_second || 0),
-    generatedTokens: Number(asArray(responseJson?.generated_token_ids).length || 0),
-    computeSumMs: tokenRows.reduce((sum, row) => sum + Number(row.computeMs || 0), 0),
-    transferSumMs: tokenRows.reduce((sum, row) => sum + Number(row.transferMs || 0), 0),
-    maxMemoryMb: tokenRows.reduce((max, row) => Math.max(max, Number(row.maxMemMb || 0)), 0),
-    p95TokenLatencyMs: percentile(tokenRows.map((row) => row.latencyMs), 0.95),
-    p95TransferLatencyMs: percentile(tokenRows.map((row) => row.transferMs), 0.95),
+    generatedTokens,
+    computeSumMs,
+    transferSumMs,
+    transferComputeRatio,
+    maxMemoryMb,
+    p50TokenLatencyMs: percentile(tokenLatencies, 0.5),
+    p95TokenLatencyMs: percentile(tokenLatencies, 0.95),
+    p99TokenLatencyMs: percentile(tokenLatencies, 0.99),
+    p50TransferLatencyMs: percentile(transferLatencies, 0.5),
+    p95TransferLatencyMs: percentile(transferLatencies, 0.95),
+    p99TransferLatencyMs: percentile(transferLatencies, 0.99),
     criticalPath,
+    feature_flags: featureFlags,
+    enabled_modules: enabledModules,
+    isBaseline: enabledModules.length === 0,
+    promptTokens: Number(responseJson?.prompt_token_count || summary.prompt_token_count || 0),
+    config: {
+      promptChars: Number(requestConfig?.promptChars || 0),
+      maxNewTokens: Number(requestConfig?.maxNewTokens || 0),
+      minNewTokens: Number(requestConfig?.minNewTokens || 0),
+      temperature: Number(requestConfig?.temperature || 0),
+      timeoutMs: Number(requestConfig?.timeoutMs || 0),
+      method: String(requestConfig?.method || "POST"),
+      path: String(requestConfig?.path || "/generate"),
+      target: String(requestConfig?.target || "gateway")
+    },
+    payloadMib: Number(aggregate.payload_b64_mebibytes_sum || 0),
+    networkMib: Number(aggregate.network_delta_mebibytes_sum || 0),
+    perStage: stageRows.map((row) => ({
+      stageKey: row.stageKey,
+      service: row.serviceName,
+      stageId: row.stageId,
+      samples: row.samples,
+      computeMs: row.computeMs,
+      transferMs: row.transferMs,
+      maxMemMb: row.maxMemMb,
+      maxCpuPct: row.maxCpuPct,
+      maxSystemCpuPct: row.maxSystemCpuPct,
+      networkMib: row.networkBytes / (1024 * 1024),
+      payloadMib: row.payloadBytes / (1024 * 1024),
+      maxMbps: row.maxBandwidthMbps
+    })),
     perNode: nodeRows.map((row) => ({
       node: row.nodeName,
       computeMs: row.computeMs,
       transferMs: row.transferMs,
       maxMemMb: row.maxMemMb,
-      networkDeltaMib: row.networkBytes / (1024 * 1024)
+      maxCpuPct: row.maxCpuPct,
+      maxSystemCpuPct: row.maxSystemCpuPct,
+      maxMbps: row.maxBandwidthMbps,
+      networkDeltaMib: row.networkBytes / (1024 * 1024),
+      payloadMib: row.payloadBytes / (1024 * 1024),
+      podHostnames: row.podHostnamesCsv,
+      services: row.servicesCsv
     }))
   };
+}
+
+function updateLatestModuleState(responseJson, source) {
+  const summary = asObject(asObject(responseJson).summary_metrics);
+  const featureFlags = asObject(summary.feature_flags);
+  const enabledModules = deriveEnabledModules(featureFlags, summary.enabled_modules);
+
+  if (source === "chat") {
+    latestChatFeatureFlags = featureFlags;
+    latestChatEnabledModules = enabledModules;
+  } else {
+    latestInvokeFeatureFlags = featureFlags;
+    latestInvokeEnabledModules = enabledModules;
+  }
 }
 
 function renderInvokeRunEvolution() {
@@ -988,6 +1825,17 @@ function renderInvokeRunEvolution() {
   const transferSeries = [{ name: "Transfer ms", values: runs.map((r) => Number(r.transferSumMs || 0)) }];
   const computeSeries = [{ name: "Compute ms", values: runs.map((r) => Number(r.computeSumMs || 0)) }];
   const tpsSeries = [{ name: "Tokens/sec", values: runs.map((r) => Number(r.tokensPerSecond || 0)) }];
+  const ratioSeries = [{ name: "Comm/Compute", values: runs.map((r) => Number(r.transferComputeRatio || 0)) }];
+  const tokenPercentileSeries = [
+    { name: "p50", values: runs.map((r) => Number(r.p50TokenLatencyMs || 0)) },
+    { name: "p95", values: runs.map((r) => Number(r.p95TokenLatencyMs || 0)) },
+    { name: "p99", values: runs.map((r) => Number(r.p99TokenLatencyMs || 0)) }
+  ];
+  const transferPercentileSeries = [
+    { name: "p50", values: runs.map((r) => Number(r.p50TransferLatencyMs || 0)) },
+    { name: "p95", values: runs.map((r) => Number(r.p95TransferLatencyMs || 0)) },
+    { name: "p99", values: runs.map((r) => Number(r.p99TransferLatencyMs || 0)) }
+  ];
 
   return `
     <div class="invoke-subpanel">
@@ -1011,12 +1859,24 @@ function renderInvokeRunEvolution() {
           <h4>Throughput per Run</h4>
           ${buildLineChartSvg(tpsSeries, { yLabel: "tokens/sec" })}
         </div>
+        <div class="chart-card">
+          <h4>Comm/Compute Ratio Trend</h4>
+          ${buildLineChartSvg(ratioSeries, { yLabel: "ratio" })}
+        </div>
+        <div class="chart-card">
+          <h4>Token Latency p50/p95/p99</h4>
+          ${buildLineChartSvg(tokenPercentileSeries, { yLabel: "ms" })}
+        </div>
+        <div class="chart-card">
+          <h4>Transfer Latency p50/p95/p99</h4>
+          ${buildLineChartSvg(transferPercentileSeries, { yLabel: "ms" })}
+        </div>
       </div>
     </div>
   `;
 }
 
-function renderInvokeMetrics(responseJson, callMeta) {
+function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
   if (!responseJson || typeof responseJson !== "object") {
     els.invokeMetricsDashboard.innerHTML = `<div class="muted">No structured JSON response available for dashboard rendering.</div>`;
     return;
@@ -1041,6 +1901,20 @@ function renderInvokeMetrics(responseJson, callMeta) {
   const tokenTransferP95 = percentile(tokenRows.map((row) => row.transferMs), 0.95);
   const tokenTransferP99 = percentile(tokenRows.map((row) => row.transferMs), 0.99);
   const criticalPath = buildCriticalPathBreakdown(stageSamples, totalLatencyMs);
+  const transferComputeRatio =
+    Number(aggregate.transfer_time_ms_sum || 0) / Math.max(1e-9, Number(aggregate.compute_time_ms_sum || 0));
+  const networkBytesSum = Number(aggregate.network_delta_bytes_sum || 0);
+  const payloadBytesSum = Number(aggregate.payload_b64_bytes_sum || 0);
+  const bytesPerGeneratedToken = networkBytesSum / Math.max(1, generatedTokenCount);
+  const payloadBytesPerGeneratedToken = payloadBytesSum / Math.max(1, generatedTokenCount);
+  const baselineRef = [...invokeRuns]
+    .reverse()
+    .find((run) => run && run.isBaseline && Number(run.maxMemoryMb || 0) > 0);
+  const baselineSavedMb = baselineRef ? Number(baselineRef.maxMemoryMb || 0) - Number(aggregate.max_process_memory_mb || 0) : 0;
+  const mibPerGiBSaved =
+    baselineSavedMb > 0
+      ? Number(aggregate.network_delta_mebibytes_sum || 0) / (baselineSavedMb / 1024)
+      : null;
 
   const maxProcessCpu = stageRows.reduce((max, row) => Math.max(max, Number(row.maxCpuPct || 0)), 0);
   const maxSystemCpu = stageRows.reduce(
@@ -1064,11 +1938,7 @@ function renderInvokeMetrics(responseJson, callMeta) {
     { k: "Transfer Sum (ms)", v: formatNumber(aggregate.transfer_time_ms_sum, 1) },
     {
       k: "Transfer/Compute Ratio",
-      v: formatNumber(
-        Number(aggregate.transfer_time_ms_sum || 0) /
-          Math.max(1e-9, Number(aggregate.compute_time_ms_sum || 0)),
-        3
-      )
+      v: formatNumber(transferComputeRatio, 3)
     },
     { k: "Payload Sum (MiB)", v: formatNumber(aggregate.payload_b64_mebibytes_sum, 3) },
     { k: "Network Delta (MiB)", v: formatNumber(aggregate.network_delta_mebibytes_sum, 3) },
@@ -1215,19 +2085,114 @@ function renderInvokeMetrics(responseJson, callMeta) {
     )
     .join("");
 
-  invokeRuns.push(
-    buildInvokeRunSummary({
-      responseJson,
-      nodeRows,
-      tokenRows,
-      criticalPath,
-      totalLatencyMs
-    })
-  );
+  const efficiencyKpiRows = [
+    {
+      key: "Network bytes / generated token",
+      value: `${formatNumber(bytesPerGeneratedToken, 1)} B/token`,
+      note: "Lower is better for communication cost."
+    },
+    {
+      key: "Payload bytes / generated token",
+      value: `${formatNumber(payloadBytesPerGeneratedToken, 1)} B/token`,
+      note: "Serialization payload pressure per emitted token."
+    },
+    {
+      key: "MiB transferred / GiB memory saved vs baseline",
+      value:
+        mibPerGiBSaved == null
+          ? "n/a"
+          : `${formatNumber(mibPerGiBSaved, 3)} MiB/GiB`,
+      note:
+        mibPerGiBSaved == null
+          ? "Needs a baseline run and positive memory reduction."
+          : "Lower means better memory-vs-network tradeoff."
+    },
+    {
+      key: "Communication/compute ratio",
+      value: formatNumber(transferComputeRatio, 3),
+      note: "Transfer time divided by compute time."
+    }
+  ]
+    .map(
+      (row) => `
+      <tr>
+        <td>${escapeHtml(row.key)}</td>
+        <td>${escapeHtml(row.value)}</td>
+        <td>${escapeHtml(row.note)}</td>
+      </tr>
+    `
+    )
+    .join("");
+
+  const runSummary = buildInvokeRunSummary({
+    responseJson,
+    nodeRows,
+    stageRows,
+    tokenRows,
+    criticalPath,
+    totalLatencyMs,
+    requestConfig
+  });
+  invokeRuns.push(runSummary);
   if (invokeRuns.length > 120) {
     invokeRuns = invokeRuns.slice(-120);
   }
   persistSessionState();
+
+  const alerts = buildInvokeAlerts({
+    transferP95Ms: tokenTransferP95,
+    transferComputeRatio,
+    maxProcessCpu,
+    maxMemoryMb: Number(aggregate.max_process_memory_mb || 0),
+    runtime: runtimeSnapshot
+  });
+  const criticalPathSankey = buildCriticalPathSankey(criticalPath, totalLatencyMs);
+  const stageHeatmap = buildStageTokenHeatmap(tokenMetrics);
+
+  postHistoryEntries([
+    {
+      type: "endpoint",
+      createdAt: runSummary.timestamp,
+      namespace: getNamespace(),
+      target: runSummary.config?.target || requestConfig.target || "gateway",
+      method: runSummary.config?.method || requestConfig.method || "POST",
+      path: runSummary.config?.path || requestConfig.path || "/generate",
+      config: {
+        promptChars: runSummary.config?.promptChars || 0,
+        promptTokens: runSummary.promptTokens || 0,
+        maxNewTokens: runSummary.config?.maxNewTokens || 0,
+        minNewTokens: runSummary.config?.minNewTokens || 0,
+        temperature: runSummary.config?.temperature || 0,
+        timeoutMs: runSummary.config?.timeoutMs || 0,
+        topologyHash: buildTopologyHash()
+      },
+      profile: {
+        baseline: runSummary.isBaseline,
+        enabledModules: runSummary.enabled_modules,
+        featureFlags: runSummary.feature_flags
+      },
+      metrics: {
+        generatedTokens: runSummary.generatedTokens,
+        latencyMs: runSummary.totalLatencyMs,
+        tokensPerSecond: runSummary.tokensPerSecond,
+        computeMs: runSummary.computeSumMs,
+        transferMs: runSummary.transferSumMs,
+        transferComputeRatio: runSummary.transferComputeRatio,
+        payloadMib: runSummary.payloadMib,
+        networkMib: runSummary.networkMib,
+        maxMemoryMb: runSummary.maxMemoryMb,
+        tokenP50Ms: runSummary.p50TokenLatencyMs,
+        tokenP95Ms: runSummary.p95TokenLatencyMs,
+        tokenP99Ms: runSummary.p99TokenLatencyMs,
+        transferP50Ms: runSummary.p50TransferLatencyMs,
+        transferP95Ms: runSummary.p95TransferLatencyMs,
+        transferP99Ms: runSummary.p99TransferLatencyMs,
+        criticalPath: runSummary.criticalPath,
+        perStage: runSummary.perStage,
+        perNode: runSummary.perNode
+      }
+    }
+  ]);
 
   els.invokeMetricsDashboard.innerHTML = `
     <div class="invoke-metric-cards">
@@ -1241,6 +2206,31 @@ function renderInvokeMetrics(responseJson, callMeta) {
       `
         )
         .join("")}
+    </div>
+    ${makeAlertRibbons(alerts)}
+
+    <div class="invoke-subpanel">
+      <h3>Efficiency KPI</h3>
+      <table class="metrics-table">
+        <thead>
+          <tr>
+            <th>KPI</th>
+            <th>Value</th>
+            <th>Interpretation</th>
+          </tr>
+        </thead>
+        <tbody>${efficiencyKpiRows}</tbody>
+      </table>
+    </div>
+
+    <div class="invoke-subpanel">
+      <h3>Critical-path Sankey (gateway wait vs stage compute/transfer)</h3>
+      ${criticalPathSankey}
+    </div>
+
+    <div class="invoke-subpanel">
+      <h3>Stage-by-Token Heatmap (latency ms)</h3>
+      ${stageHeatmap}
     </div>
 
     <div class="invoke-subpanel">
@@ -1407,6 +2397,15 @@ async function invokeEndpoint() {
         parsedBody = rawBody;
       }
     }
+    if (parsedBody && typeof parsedBody === "object" && !Array.isArray(parsedBody)) {
+      const flags = readFeatureFlagsFromControls();
+      if (isBaselineFeatureFlags(flags)) {
+        delete parsedBody.feature_flags;
+      } else {
+        parsedBody.feature_flags = flags;
+      }
+      els.endpointBody.value = prettyJson(parsedBody);
+    }
   }
 
   const requestPayload = {
@@ -1465,7 +2464,15 @@ async function invokeEndpoint() {
       <div class="log-pill">pod: ${safeText(payload.podName)}</div>
     `;
 
-    renderInvokeMetrics(payload.responseJson, payload.call || {});
+    renderInvokeMetrics(payload.responseJson, payload.call || {}, {
+      ...parseGenerateConfigFromBody(parsedBody),
+      timeoutMs,
+      method,
+      path,
+      target
+    });
+    updateLatestModuleState(payload.responseJson, "invoke");
+    renderArchitectureGuide();
 
     const formatted = payload.responseJson != null
       ? prettyJson(payload.responseJson)
@@ -1479,6 +2486,7 @@ async function invokeEndpoint() {
     els.invokeOutput.textContent = "";
   } finally {
     setInvokeBusy(false);
+    loadRuntime();
   }
 }
 
@@ -1517,9 +2525,11 @@ function renderChatMessages() {
   updateChatContextInfo();
 }
 
-function summarizeTurnMetrics(response) {
+function summarizeTurnMetrics(response, requestConfig = {}) {
   const summary = response.summary_metrics || {};
   const aggregate = summary.aggregate || {};
+  const featureFlags = asObject(summary.feature_flags);
+  const enabledModules = deriveEnabledModules(featureFlags, summary.enabled_modules);
   const stageSamples = asArray(response.token_metrics).flatMap((tokenStep) =>
     asArray(tokenStep.stage_metrics)
   );
@@ -1570,6 +2580,22 @@ function summarizeTurnMetrics(response) {
     transfer_latency_p50_ms: percentile(tokenRows.map((row) => row.transferMs), 0.5),
     transfer_latency_p95_ms: percentile(tokenRows.map((row) => row.transferMs), 0.95),
     transfer_latency_p99_ms: percentile(tokenRows.map((row) => row.transferMs), 0.99),
+    transfer_compute_ratio:
+      Number(aggregate.transfer_time_ms_sum || 0) /
+      Math.max(1e-9, Number(aggregate.compute_time_ms_sum || 0)),
+    config: {
+      promptChars: Number(requestConfig.promptChars || 0),
+      maxNewTokens: Number(requestConfig.maxNewTokens || 0),
+      minNewTokens: Number(requestConfig.minNewTokens || 0),
+      temperature: Number(requestConfig.temperature || 0),
+      timeoutMs: Number(requestConfig.timeoutMs || 0),
+      method: String(requestConfig.method || "POST"),
+      path: String(requestConfig.path || "/chat"),
+      target: String(requestConfig.target || "gateway")
+    },
+    is_baseline: enabledModules.length === 0,
+    feature_flags: featureFlags,
+    enabled_modules: enabledModules,
     critical_path: criticalPath,
     termination_reason: response.termination_reason || "unknown",
     per_stage: summary.per_stage || {},
@@ -1858,6 +2884,28 @@ function renderChatMetricsTimeline() {
   const nodeNetworkSeries = buildPerNodeSeries(chatTurns, (node) => node.network_delta_mib_sum);
   const nodeTransferSeries = buildPerNodeSeries(chatTurns, (node) => node.transfer_time_ms_sum);
   const nodeComputeSeries = buildPerNodeSeries(chatTurns, (node) => node.compute_time_ms_sum);
+  const turnLatencySeries = [
+    { name: "Latency ms", values: chatTurns.map((turn) => Number(turn.total_latency_ms || 0)) }
+  ];
+  const turnThroughputSeries = [
+    { name: "Tokens/sec", values: chatTurns.map((turn) => Number(turn.tokens_per_second || 0)) }
+  ];
+  const turnRatioSeries = [
+    {
+      name: "Comm/Compute",
+      values: chatTurns.map((turn) => Number(turn.transfer_compute_ratio || 0))
+    }
+  ];
+  const turnTokenPercentileSeries = [
+    { name: "p50", values: chatTurns.map((turn) => Number(turn.token_latency_p50_ms || 0)) },
+    { name: "p95", values: chatTurns.map((turn) => Number(turn.token_latency_p95_ms || 0)) },
+    { name: "p99", values: chatTurns.map((turn) => Number(turn.token_latency_p99_ms || 0)) }
+  ];
+  const turnTransferPercentileSeries = [
+    { name: "p50", values: chatTurns.map((turn) => Number(turn.transfer_latency_p50_ms || 0)) },
+    { name: "p95", values: chatTurns.map((turn) => Number(turn.transfer_latency_p95_ms || 0)) },
+    { name: "p99", values: chatTurns.map((turn) => Number(turn.transfer_latency_p99_ms || 0)) }
+  ];
 
   const criticalPathSeries = [
     { name: "Gateway Wait", values: chatTurns.map((turn) => Number(asObject(turn.critical_path).gatewayWaitMs || 0)) },
@@ -1881,6 +2929,31 @@ function renderChatMetricsTimeline() {
       `
         )
         .join("")}
+    </div>
+    <div class="invoke-subpanel">
+      <h3>Turn Trend Charts</h3>
+      <div class="chart-grid">
+        <div class="chart-card">
+          <h4>Latency per Turn (ms)</h4>
+          ${buildLineChartSvg(turnLatencySeries, { yLabel: "ms" })}
+        </div>
+        <div class="chart-card">
+          <h4>Throughput per Turn</h4>
+          ${buildLineChartSvg(turnThroughputSeries, { yLabel: "tokens/sec" })}
+        </div>
+        <div class="chart-card">
+          <h4>Communication/Compute Ratio</h4>
+          ${buildLineChartSvg(turnRatioSeries, { yLabel: "ratio" })}
+        </div>
+        <div class="chart-card">
+          <h4>Token Latency p50/p95/p99</h4>
+          ${buildLineChartSvg(turnTokenPercentileSeries, { yLabel: "ms" })}
+        </div>
+        <div class="chart-card">
+          <h4>Transfer Latency p50/p95/p99</h4>
+          ${buildLineChartSvg(turnTransferPercentileSeries, { yLabel: "ms" })}
+        </div>
+      </div>
     </div>
     <div class="invoke-subpanel">
       <h3>Critical Path Evolution Across Turns</h3>
@@ -2030,8 +3103,19 @@ async function sendChatTurn() {
     els.chatTimeout?.value,
     INVOKE_TIMEOUT_LONG_DEFAULT_MS
   );
+  const featureFlags = readFeatureFlagsFromControls();
 
   const conversation = [...chatMessages, { role: "user", content: userText }];
+  const requestConfig = {
+    promptChars: userText.length,
+    maxNewTokens,
+    minNewTokens,
+    temperature,
+    timeoutMs,
+    method: "POST",
+    path: "/chat",
+    target: "gateway"
+  };
   setChatBusy(true);
   els.chatMeta.innerHTML = "";
 
@@ -2046,7 +3130,8 @@ async function sendChatTurn() {
         messages: conversation,
         max_new_tokens: maxNewTokens,
         min_new_tokens: minNewTokens,
-        temperature
+        temperature,
+        feature_flags: featureFlags
       }
     };
 
@@ -2076,14 +3161,63 @@ async function sendChatTurn() {
 
     const response = payload.responseJson;
     const assistantText = String(response.assistant_message || response.generated_text || "").trim();
-
+    const turnSummary = summarizeTurnMetrics(response, requestConfig);
     chatMessages = [...conversation, { role: "assistant", content: assistantText || "(empty response)" }];
-    chatTurns.push(summarizeTurnMetrics(response));
+    chatTurns.push(turnSummary);
+    updateLatestModuleState(response, "chat");
     els.chatInput.value = "";
 
     renderChatMessages();
     renderChatMetricsTimeline();
+    renderArchitectureGuide();
     persistSessionState();
+    postHistoryEntries([
+      {
+        type: "chat",
+        createdAt: turnSummary.timestamp,
+        namespace: getNamespace(),
+        target: "gateway",
+        method: "POST",
+        path: "/chat",
+        config: {
+          promptChars: turnSummary.config?.promptChars || 0,
+          promptTokens: turnSummary.prompt_tokens || 0,
+          maxNewTokens: turnSummary.config?.maxNewTokens || 0,
+          minNewTokens: turnSummary.config?.minNewTokens || 0,
+          temperature: turnSummary.config?.temperature || 0,
+          timeoutMs: turnSummary.config?.timeoutMs || 0,
+          topologyHash: buildTopologyHash()
+        },
+        profile: {
+          baseline: turnSummary.is_baseline,
+          enabledModules: turnSummary.enabled_modules,
+          featureFlags: turnSummary.feature_flags
+        },
+        metrics: {
+          generatedTokens: turnSummary.generated_tokens,
+          latencyMs: turnSummary.total_latency_ms,
+          tokensPerSecond: turnSummary.tokens_per_second,
+          computeMs: turnSummary.compute_ms_sum,
+          transferMs: turnSummary.transfer_ms_sum,
+          transferComputeRatio: turnSummary.transfer_compute_ratio,
+          payloadMib: turnSummary.payload_mib_sum,
+          networkMib: turnSummary.network_mib_sum,
+          maxMemoryMb: turnSummary.max_memory_mb,
+          tokenP50Ms: turnSummary.token_latency_p50_ms,
+          tokenP95Ms: turnSummary.token_latency_p95_ms,
+          tokenP99Ms: turnSummary.token_latency_p99_ms,
+          transferP50Ms: turnSummary.transfer_latency_p50_ms,
+          transferP95Ms: turnSummary.transfer_latency_p95_ms,
+          transferP99Ms: turnSummary.transfer_latency_p99_ms,
+          criticalPath: turnSummary.critical_path,
+          perStage: Object.entries(asObject(turnSummary.per_stage)).map(([stageKey, stage]) => ({
+            stageKey,
+            ...asObject(stage)
+          })),
+          perNode: Object.values(asObject(turnSummary.per_node)).map((node) => asObject(node))
+        }
+      }
+    ]);
 
     els.chatMeta.innerHTML = `
       <div class="log-pill">turn: ${chatTurns.length}</div>
@@ -2097,14 +3231,18 @@ async function sendChatTurn() {
     )}</div>`;
   } finally {
     setChatBusy(false);
+    loadRuntime();
   }
 }
 
 function clearChatSession() {
   chatMessages = [];
   chatTurns = [];
+  latestChatFeatureFlags = null;
+  latestChatEnabledModules = [];
   renderChatMessages();
   renderChatMetricsTimeline();
+  renderArchitectureGuide();
   persistSessionState();
   els.chatMeta.innerHTML = `<div class="log-pill">Chat session cleared.</div>`;
 }
@@ -2139,11 +3277,13 @@ function updateAutoRefresh() {
   refreshTimer = setInterval(() => {
     loadTopology();
     loadLogs();
+    loadRuntime();
   }, seconds * 1000);
 }
 
 els.refreshTopologyBtn.addEventListener("click", () => {
   loadTopology();
+  loadRuntime();
 });
 
 els.refreshLogsBtn.addEventListener("click", () => {
@@ -2157,11 +3297,13 @@ els.logSource.addEventListener("change", loadLogs);
 els.namespaceInput.addEventListener("change", () => {
   loadTopology();
   loadLogs();
+  loadRuntime();
   loadEndpointCatalog().catch((error) => {
     els.invokeMeta.innerHTML = `<div class="log-pill line-err">Catalog error: ${escapeHtml(
       error.message
     )}</div>`;
   });
+  loadFeatureModuleCatalog();
 });
 els.endpointPreset.addEventListener("change", () => {
   applyEndpointPreset(getSelectedPreset());
@@ -2181,6 +3323,38 @@ els.endpointPrompt.addEventListener("input", syncBodyFromGenerationFields);
 els.endpointMaxTokens.addEventListener("input", syncBodyFromGenerationFields);
 els.endpointMinTokens.addEventListener("input", syncBodyFromGenerationFields);
 els.endpointTemperature.addEventListener("input", syncBodyFromGenerationFields);
+[
+  els.featureTransportJson,
+  els.featureTransportBinary,
+  els.featurePrecisionFp32,
+  els.featurePrecisionFp16,
+  els.featurePrecisionBf16,
+  els.featurePrecisionInt8,
+  els.featureRebalanceBaseline,
+  els.featureRebalanceLatency,
+  els.featureKvCache,
+  els.featureTopologyAware,
+  els.featurePersistentSessions,
+  els.featureBackpressure,
+  els.featureBackpressureQueue
+]
+  .filter(Boolean)
+  .forEach((control) => {
+    control.addEventListener("input", () => {
+      syncFeatureFlagControlState();
+      syncBodyFromFeatureFlagControls();
+    });
+    control.addEventListener("change", () => {
+      syncFeatureFlagControlState();
+      syncBodyFromFeatureFlagControls();
+    });
+  });
+if (els.featureFlagsResetBtn) {
+  els.featureFlagsResetBtn.addEventListener("click", () => {
+    applyFeatureFlagControls(FEATURE_FLAG_DEFAULTS);
+    syncBodyFromFeatureFlagControls();
+  });
+}
 els.invokeEndpointBtn.addEventListener("click", invokeEndpoint);
 els.chatSendBtn.addEventListener("click", sendChatTurn);
 els.chatClearBtn.addEventListener("click", clearChatSession);
@@ -2201,13 +3375,16 @@ restoreSessionState();
 if (invokeRuns.length) {
   els.invokeMetricsDashboard.innerHTML = renderInvokeRunEvolution();
 }
+renderArchitectureGuide();
 loadTopology();
 loadLogs();
+loadRuntime();
 loadEndpointCatalog().catch((error) => {
   els.invokeMeta.innerHTML = `<div class="log-pill line-err">Catalog error: ${escapeHtml(
     error.message
   )}</div>`;
 });
+loadFeatureModuleCatalog();
 renderChatMessages();
 renderChatMetricsTimeline();
 updateChatContextInfo();

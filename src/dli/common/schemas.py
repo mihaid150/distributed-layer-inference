@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
+from dli.common.feature_flags import FeatureFlags
 
 class ChatMessage(BaseModel):
     role: str = Field(..., description="Chat role, e.g. system/user/assistant.")
@@ -24,6 +25,7 @@ class GenerateRequest(BaseModel):
     temperature: float = Field(default=0.0, ge=0.0)
     top_k: Optional[int] = Field(default=None, ge=1)
     top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    feature_flags: FeatureFlags = Field(default_factory=FeatureFlags)
 
     @model_validator(mode="after")
     def validate_prompt_or_messages(self) -> "GenerateRequest":
@@ -62,6 +64,7 @@ class ChatRequest(BaseModel):
     temperature: float = Field(default=0.2, ge=0.0)
     top_k: Optional[int] = Field(default=None, ge=1)
     top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    feature_flags: FeatureFlags = Field(default_factory=FeatureFlags)
 
 
 class StageForwardRequest(BaseModel):
@@ -72,6 +75,8 @@ class StageForwardRequest(BaseModel):
     tensor_shape: List[int]
     metadata: Dict[str, Any] = Field(default_factory=dict)
     metrics: List[Dict[str, Any]] = Field(default_factory=list)
+    transport: Dict[str, Any] = Field(default_factory=dict)
+    feature_flags: FeatureFlags = Field(default_factory=FeatureFlags)
 
 
 class StageForwardResponse(BaseModel):
