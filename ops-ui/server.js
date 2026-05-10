@@ -527,6 +527,7 @@ function normalizeHistoryFeatureFlags(rawFlags) {
     "transport_mode",
     "activation_precision",
     "kv_cache_enabled",
+    "forward_dedupe_enabled",
     "rebalance_profile",
     "topology_aware_routing",
     "persistent_sessions_enabled",
@@ -570,6 +571,9 @@ function deriveHistoryModuleVariants(featureFlags, rawVariants) {
   }
   if (Object.prototype.hasOwnProperty.call(flags, "kv_cache_enabled")) {
     pushPair("kv_cache", flags.kv_cache_enabled ? "on" : "off");
+  }
+  if (Object.prototype.hasOwnProperty.call(flags, "forward_dedupe_enabled")) {
+    pushPair("dedupe", flags.forward_dedupe_enabled ? "on" : "off");
   }
   if (Object.prototype.hasOwnProperty.call(flags, "topology_aware_routing")) {
     pushPair("topology", flags.topology_aware_routing ? "on" : "off");
@@ -706,6 +710,14 @@ function normalizeHistoryEntry(input) {
       computeMs: roundNumber(metrics.computeMs, 3),
       transferMs: roundNumber(metrics.transferMs, 3),
       transferComputeRatio: roundNumber(metrics.transferComputeRatio, 6),
+      rpcComputeRatio: roundNumber(
+        metrics.rpcComputeRatio ?? metrics.transferComputeRatio,
+        6
+      ),
+      trueCommComputeRatio: roundNumber(
+        metrics.trueCommComputeRatio ?? metrics.transferComputeRatio,
+        6
+      ),
       payloadMib: roundNumber(metrics.payloadMib, 6),
       networkMib: roundNumber(metrics.networkMib, 6),
       maxMemoryMb: roundNumber(metrics.maxMemoryMb, 3),

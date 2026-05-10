@@ -230,6 +230,8 @@ def make_stage_metric(
     token_index: int,
     compute_time_ms: float,
     transfer_time_ms: float = 0.0,
+    rpc_wall_time_ms: Optional[float] = None,
+    true_comm_ms: float = 0.0,
     extra: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     system_memory = get_system_memory_usage()
@@ -242,6 +244,7 @@ def make_stage_metric(
     network_delta = _compute_network_delta(network_totals)
     process_io_totals = get_process_io_counters()
     process_io_delta = _compute_process_io_delta(process_io_totals)
+    rpc_wall = transfer_time_ms if rpc_wall_time_ms is None else rpc_wall_time_ms
 
     metric: Dict[str, Any] = {
         "timestamp_ms": now_ms(),
@@ -250,6 +253,10 @@ def make_stage_metric(
         "stage_id": stage_id,
         "token_index": token_index,
         "compute_time_ms": compute_time_ms,
+        "rpc_wall_time_ms": rpc_wall,
+        "true_comm_ms": true_comm_ms,
+        # Backward-compatible alias for previous consumers. This is RPC wall
+        # time, not pure network transfer time.
         "transfer_time_ms": transfer_time_ms,
         "process_memory_mb": process_memory_mb,
         # Keep backward-compatible key name for previous consumers:

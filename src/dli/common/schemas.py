@@ -82,6 +82,7 @@ class StageForwardRequest(BaseModel):
 class StageForwardResponse(BaseModel):
     request_id: str
     token_index: int
+    server_wall_ms: float = 0.0
     tensor_b64: Optional[str] = None
     tensor_dtype: Optional[str] = None
     tensor_shape: Optional[List[int]] = None

@@ -66,6 +66,9 @@ function describeFeatureVariants(profileValue) {
   if ("kv_cache_enabled" in flags) {
     pairs.push(`kv_cache=${flags.kv_cache_enabled ? "on" : "off"}`);
   }
+  if ("forward_dedupe_enabled" in flags) {
+    pairs.push(`dedupe=${flags.forward_dedupe_enabled ? "on" : "off"}`);
+  }
   if ("topology_aware_routing" in flags) {
     pairs.push(`topology=${flags.topology_aware_routing ? "on" : "off"}`);
   }
@@ -262,9 +265,31 @@ function renderCards() {
     total > 0
       ? historyRows.reduce((sum, row) => sum + Number(asObject(row.metrics).latencyMs || 0), 0) / total
       : 0;
-  const avgRatio =
+  const avgRpcRatio =
     total > 0
-      ? historyRows.reduce((sum, row) => sum + Number(asObject(row.metrics).transferComputeRatio || 0), 0) / total
+      ? historyRows.reduce(
+          (sum, row) =>
+            sum +
+            Number(
+              asObject(row.metrics).rpcComputeRatio ??
+                asObject(row.metrics).transferComputeRatio ??
+                0
+            ),
+          0
+        ) / total
+      : 0;
+  const avgTrueCommRatio =
+    total > 0
+      ? historyRows.reduce(
+          (sum, row) =>
+            sum +
+            Number(
+              asObject(row.metrics).trueCommComputeRatio ??
+                asObject(row.metrics).transferComputeRatio ??
+                0
+            ),
+          0
+        ) / total
       : 0;
   const lastTs = total ? new Date(historyRows[0].createdAt).toLocaleString() : "-";
   const cards = [
@@ -272,7 +297,8 @@ function renderCards() {
     { k: "Baseline Runs", v: String(baselineCount) },
     { k: "Module Runs", v: String(moduleCount) },
     { k: "Avg Latency (ms)", v: formatNumber(avgLatency, 1) },
-    { k: "Avg Comm/Comp", v: formatNumber(avgRatio, 3) },
+    { k: "Avg RPC/Comp", v: formatNumber(avgRpcRatio, 3) },
+    { k: "Avg True Comm/Comp", v: formatNumber(avgTrueCommRatio, 3) },
     { k: "Latest Run", v: lastTs }
   ];
   els.historyCards.innerHTML = cards
@@ -339,10 +365,15 @@ function renderCompareSummary() {
     ["Latency (ms)", mB.latencyMs, mA.latencyMs],
     ["Tokens/sec", mB.tokensPerSecond, mA.tokensPerSecond],
     ["Compute (ms)", mB.computeMs, mA.computeMs],
-    ["Transfer (ms)", mB.transferMs, mA.transferMs],
-    ["Comm/Comp", mB.transferComputeRatio, mA.transferComputeRatio],
+    ["RPC Wall (ms)", mB.transferMs, mA.transferMs],
+    ["RPC/Comp", mB.rpcComputeRatio, mA.rpcComputeRatio],
+    [
+      "True Comm/Comp",
+      mB.trueCommComputeRatio ?? mB.transferComputeRatio,
+      mA.trueCommComputeRatio ?? mA.transferComputeRatio
+    ],
     ["Token p95 (ms)", mB.tokenP95Ms, mA.tokenP95Ms],
-    ["Transfer p95 (ms)", mB.transferP95Ms, mA.transferP95Ms],
+    ["RPC Wall p95 (ms)", mB.transferP95Ms, mA.transferP95Ms],
     ["Net (MiB)", mB.networkMib, mA.networkMib],
     ["Payload (MiB)", mB.payloadMib, mA.payloadMib]
   ];
@@ -421,7 +452,10 @@ function renderCompareSummary() {
 function renderCharts() {
   const rowsAsc = [...historyRows].reverse();
   const latency = rowsAsc.map((row) => Number(asObject(row.metrics).latencyMs || 0));
-  const ratio = rowsAsc.map((row) => Number(asObject(row.metrics).transferComputeRatio || 0));
+  const rpcRatio = rowsAsc.map((row) => Number(asObject(row.metrics).rpcComputeRatio || 0));
+  const ratio = rowsAsc.map((row) =>
+    Number(asObject(row.metrics).trueCommComputeRatio ?? asObject(row.metrics).transferComputeRatio ?? 0)
+  );
   const p50 = rowsAsc.map((row) => Number(asObject(row.metrics).tokenP50Ms || 0));
   const p95 = rowsAsc.map((row) => Number(asObject(row.metrics).tokenP95Ms || 0));
   const p99 = rowsAsc.map((row) => Number(asObject(row.metrics).tokenP99Ms || 0));
@@ -436,8 +470,11 @@ function renderCharts() {
       ${buildLineChartSvg([{ name: "Latency", values: latency }])}
     </div>
     <div class="chart-card">
-      <h4>Comm/Compute Ratio Trend</h4>
-      ${buildLineChartSvg([{ name: "Ratio", values: ratio }])}
+      <h4>RPC/Compute + True Comm/Compute</h4>
+      ${buildLineChartSvg([
+        { name: "rpc/compute", values: rpcRatio },
+        { name: "true comm/compute", values: ratio }
+      ])}
     </div>
     <div class="chart-card">
       <h4>Token Latency p50/p95/p99</h4>
@@ -448,16 +485,16 @@ function renderCharts() {
       ])}
     </div>
     <div class="chart-card">
-      <h4>Transfer p95 + Tokens/sec</h4>
+      <h4>RPC Wall p95 + Tokens/sec</h4>
       ${buildLineChartSvg([
-        { name: "transfer p95", values: transferP95 },
+        { name: "RPC wall p95", values: transferP95 },
         { name: "tokens/sec", values: tps }
       ])}
     </div>
     <div class="chart-card">
-      <h4>Transfer vs Compute</h4>
+      <h4>RPC Wall vs Compute</h4>
       ${buildLineChartSvg([
-        { name: "transfer", values: transfer },
+        { name: "RPC wall", values: transfer },
         { name: "compute", values: compute }
       ])}
     </div>
@@ -466,7 +503,7 @@ function renderCharts() {
 
 function renderTable() {
   if (!historyRows.length) {
-    els.historyTableBody.innerHTML = "<tr><td colspan='23'>No history rows.</td></tr>";
+    els.historyTableBody.innerHTML = "<tr><td colspan='24'>No history rows.</td></tr>";
     updateDeleteControls();
     return;
   }
@@ -525,7 +562,8 @@ function renderTable() {
           <td>${escapeHtml(config.topologyHash || "-")}</td>
           <td>${formatNumber(metrics.latencyMs, 1)}</td>
           <td>${formatNumber(metrics.tokensPerSecond, 3)}</td>
-          <td>${formatNumber(metrics.transferComputeRatio, 3)}</td>
+          <td>${formatNumber(metrics.rpcComputeRatio ?? metrics.transferComputeRatio, 3)}</td>
+          <td>${formatNumber(metrics.trueCommComputeRatio ?? metrics.transferComputeRatio, 3)}</td>
           <td>${formatNumber(metrics.maxMemoryMb, 1)}</td>
           <td>${formatNumber(metrics.networkMib, 3)}</td>
           <td>${profileHtml}</td>

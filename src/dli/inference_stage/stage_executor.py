@@ -50,6 +50,8 @@ class StageExecutor:
         self._original_cache_layer_indices: list[int] = []
         self._llama_config = None
         self._rotary_embedding = None
+        self._cache_arg_name: Optional[str] = None
+        self._supports_cache_position = False
         self.thread_config = self._configure_torch_threads()
         self.lm_head_quantization = self._configure_lm_head_quantization()
 
@@ -79,6 +81,12 @@ class StageExecutor:
                 for parameter in signature.parameters.values()
             )
             self._layer_forward_signatures[id(layer)] = (parameter_names, has_var_keyword)
+            if "past_key_values" in parameter_names and self._cache_arg_name is None:
+                self._cache_arg_name = "past_key_values"
+            elif "past_key_value" in parameter_names and self._cache_arg_name is None:
+                self._cache_arg_name = "past_key_value"
+            if "cache_position" in parameter_names:
+                self._supports_cache_position = True
 
     @torch.no_grad()
     def forward(
@@ -239,7 +247,15 @@ class StageExecutor:
             "use_cache": use_cache,
         }
         if use_cache and past_key_values is not None:
-            kwargs["past_key_values"] = past_key_values
+            if self._cache_arg_name:
+                kwargs[self._cache_arg_name] = past_key_values
+            if self._supports_cache_position:
+                kwargs["cache_position"] = torch.arange(
+                    cache_position_start,
+                    cache_position_start + sequence_length,
+                    device=hidden_states.device,
+                    dtype=torch.long,
+                )
 
         return kwargs
 
@@ -291,6 +307,25 @@ class StageExecutor:
     @property
     def cache_config(self) -> Optional[Any]:
         return self._llama_config
+
+    @property
+    def has_transformer_layers(self) -> bool:
+        return bool(self.partition.layers)
+
+    @property
+    def cache_arg_name(self) -> Optional[str]:
+        return self._cache_arg_name
+
+    @property
+    def supports_cache_position(self) -> bool:
+        return self._supports_cache_position
+
+    def ensure_kv_cache_supported(self) -> None:
+        if self.partition.layers and self._cache_arg_name is None:
+            raise RuntimeError(
+                "KV cache mode is enabled, but transformer layers do not expose "
+                "past_key_values or past_key_value in their forward signatures."
+            )
 
     @property
     def first_cache_layer_idx(self) -> int:

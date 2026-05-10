@@ -44,7 +44,7 @@ class StageForwardCache:
 
     @staticmethod
     def is_enabled(flags: FeatureFlags) -> bool:
-        return flags.kv_cache_enabled
+        return bool(getattr(flags, "forward_dedupe_enabled", False))
 
     @staticmethod
     def build_key(

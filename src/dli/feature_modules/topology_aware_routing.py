@@ -87,7 +87,9 @@ class TopologyAwareRoutingModule:
             if not isinstance(url, str) or not url.strip():
                 continue
 
-            transfer_time_ms = float(metric.get("transfer_time_ms", 0.0) or 0.0)
+            transfer_time_ms = float(
+                metric.get("rpc_wall_time_ms", metric.get("transfer_time_ms", 0.0)) or 0.0
+            )
             estimated_link_mbps = float(metric.get("estimated_link_mbps", 0.0) or 0.0)
             if transfer_time_ms <= 0.0 and estimated_link_mbps <= 0.0:
                 continue

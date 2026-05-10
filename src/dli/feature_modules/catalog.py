@@ -23,8 +23,13 @@ FEATURE_MODULE_CATALOG = [
         "title": "Stage Transformer KV Cache",
         "summary": (
             "Run prefill once, then decode one token at a time with per-stage"
-            " past_key_values state and duplicate-forward idempotency."
+            " past_key_values state."
         ),
+    },
+    {
+        "key": "forward_dedupe_cache",
+        "title": "Forward Dedupe Cache",
+        "summary": "Optional retry/idempotency cache for duplicate forward requests.",
     },
     {
         "key": "rebalance",

@@ -65,23 +65,37 @@ class StageClient:
         if effective_input_tensor is None:
             effective_input_tensor = self.codec.decode_tensor(request.tensor_b64)
 
+        precision_start_ms = now_ms()
         encoded_tensor, compression_meta = ActivationPayloadPrecisionModule.prepare_tensor(
             effective_input_tensor,
             flags,
         )
+        precision_cast_ms = elapsed_ms(precision_start_ms)
 
-        transfer_start_ms = now_ms()
         transport_encoding = "json_base64"
         target_url = self.first_stage_url
+        encode_ms = 0.0
+        pack_ms = 0.0
+        http_roundtrip_ms = 0.0
+        unpack_ms = 0.0
+        decode_ms = 0.0
+        compression_time_ms = 0.0
+        decompression_time_ms = 0.0
+        tensor_wire_bytes = 0
+        payload_compression_meta: dict = {"mode": "none", "applied": False}
 
         if BinaryTransportModule.is_enabled(flags):
             transport_encoding = "binary_octet_stream"
             target_url = BinaryTransportModule.resolve_forward_url(self.first_stage_url)
-            tensor_blob = self.codec.encode_tensor_raw(encoded_tensor)
+            encode_start_ms = now_ms()
+            tensor_blob, tensor_metadata = BinaryTransportModule.encode_tensor_blob(encoded_tensor)
+            encode_ms = elapsed_ms(encode_start_ms)
             tensor_blob, payload_compression_meta = BinaryTransportModule.prepare_tensor_blob(
                 tensor_blob=tensor_blob,
                 flags=flags,
             )
+            compression_time_ms = float(payload_compression_meta.get("compression_time_ms", 0.0))
+            tensor_wire_bytes = len(tensor_blob)
             request_payload = request.model_dump()
             request_payload["tensor_b64"] = ""
             request_payload["tensor_dtype"] = str(encoded_tensor.dtype)
@@ -92,18 +106,26 @@ class StageClient:
                 "payload_compression": payload_compression_meta,
             }
 
+            pack_start_ms = now_ms()
             packed = BinaryTransportModule.pack_request(
                 request_dict=request_payload,
                 tensor_blob=tensor_blob,
+                tensor_metadata=tensor_metadata,
             )
+            pack_ms = elapsed_ms(pack_start_ms)
+            rpc_start_ms = now_ms()
             response = self._post(
                 url=target_url,
                 flags=flags,
                 binary_payload=packed,
             )
+            http_roundtrip_ms = elapsed_ms(rpc_start_ms)
             request_payload_bytes = len(packed)
         else:
+            encode_start_ms = now_ms()
             tensor_b64, tensor_dtype, tensor_shape = self.codec.encode_tensor(encoded_tensor)
+            encode_ms = elapsed_ms(encode_start_ms)
+            tensor_wire_bytes = len(tensor_b64.encode("utf-8"))
             request_payload = request.model_dump()
             request_payload["tensor_b64"] = tensor_b64
             request_payload["tensor_dtype"] = tensor_dtype
@@ -113,29 +135,46 @@ class StageClient:
                 "compression": compression_meta,
                 "payload_compression": {"mode": "none", "applied": False},
             }
-            request_payload_bytes = len(
-                json.dumps(
-                    request_payload,
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                ).encode("utf-8")
-            )
+            pack_start_ms = now_ms()
+            packed_json = json.dumps(
+                request_payload,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+            pack_ms = elapsed_ms(pack_start_ms)
+            request_payload_bytes = len(packed_json)
+            rpc_start_ms = now_ms()
             response = self._post(
                 url=target_url,
                 flags=flags,
                 json_payload=request_payload,
             )
+            http_roundtrip_ms = elapsed_ms(rpc_start_ms)
 
         response.raise_for_status()
-        transfer_time_ms = elapsed_ms(transfer_start_ms)
         response_payload_bytes = len(response.content)
 
+        unpack_start_ms = now_ms()
         if transport_encoding == "binary_octet_stream":
             stage_response = StageForwardResponse(
                 **BinaryTransportModule.unpack_response(response.content)
             )
         else:
             stage_response = StageForwardResponse(**response.json())
+        unpack_ms = elapsed_ms(unpack_start_ms)
+
+        remote_server_wall_ms = float(getattr(stage_response, "server_wall_ms", 0.0) or 0.0)
+        rpc_residual_ms = max(0.0, http_roundtrip_ms - remote_server_wall_ms)
+        true_comm_ms = (
+            precision_cast_ms
+            + encode_ms
+            + pack_ms
+            + compression_time_ms
+            + rpc_residual_ms
+            + unpack_ms
+            + decode_ms
+            + decompression_time_ms
+        )
 
         transport = {
             "url": target_url,
@@ -143,10 +182,30 @@ class StageClient:
             "encoding": transport_encoding,
             "request_payload_bytes": request_payload_bytes,
             "response_payload_bytes": response_payload_bytes,
-            "transfer_time_ms": transfer_time_ms,
+            "request_wire_bytes": request_payload_bytes,
+            "response_wire_bytes": response_payload_bytes,
+            "tensor_wire_bytes": tensor_wire_bytes,
+            "transfer_time_ms": http_roundtrip_ms,
+            "rpc_wall_time_ms": http_roundtrip_ms,
+            "http_roundtrip_ms": http_roundtrip_ms,
+            "remote_server_wall_ms": remote_server_wall_ms,
+            "rpc_residual_ms": rpc_residual_ms,
+            "true_comm_ms": true_comm_ms,
+            "precision_cast_ms": precision_cast_ms,
+            "encode_ms": encode_ms,
+            "pack_ms": pack_ms,
+            "compression_ms": compression_time_ms,
+            "unpack_ms": unpack_ms,
+            "decode_ms": decode_ms,
+            "decompression_ms": decompression_time_ms,
             "estimated_link_mbps": (
-                ((request_payload_bytes + response_payload_bytes) * 8.0 / (transfer_time_ms / 1000.0) / 1_000_000.0)
-                if transfer_time_ms > 0.0
+                (
+                    (request_payload_bytes + response_payload_bytes)
+                    * 8.0
+                    / (http_roundtrip_ms / 1000.0)
+                    / 1_000_000.0
+                )
+                if http_roundtrip_ms > 0.0
                 else 0.0
             ),
             "payload_compression": request_payload.get("transport", {}).get(

@@ -35,7 +35,11 @@ class FeatureFlags(BaseModel):
     )
     kv_cache_enabled: bool = Field(
         default=False,
-        description="Enable stage-side caching module (dedupe/retry cache).",
+        description="Enable request-local transformer KV cache for prefill/decode generation.",
+    )
+    forward_dedupe_enabled: bool = Field(
+        default=False,
+        description="Enable duplicate-forward retry cache. Disabled by default on latency benchmarks.",
     )
     rebalance_profile: RebalanceProfile = Field(
         default="baseline",
@@ -82,6 +86,8 @@ class FeatureFlags(BaseModel):
             keys.append("payload_compression")
         if self.kv_cache_enabled:
             keys.append("kv_cache")
+        if self.forward_dedupe_enabled:
+            keys.append("forward_dedupe_cache")
         if self.rebalance_profile != "baseline":
             keys.append("rebalance")
         if self.topology_aware_routing:

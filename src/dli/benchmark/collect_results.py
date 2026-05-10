@@ -38,6 +38,14 @@ def flatten_raw_result(row: Dict[str, Any]) -> Dict[str, Any]:
         metric.get("transfer_time_ms", 0.0)
         for metric in all_stage_metrics
     ]
+    rpc_wall_times = [
+        metric.get("rpc_wall_time_ms", metric.get("transfer_time_ms", 0.0))
+        for metric in all_stage_metrics
+    ]
+    true_comm_times = [
+        metric.get("true_comm_ms", 0.0)
+        for metric in all_stage_metrics
+    ]
 
     memory_values = [
         metric.get("process_memory_mb", 0.0)
@@ -62,6 +70,10 @@ def flatten_raw_result(row: Dict[str, Any]) -> Dict[str, Any]:
         metric.get("outbound_payload_b64_bytes", 0)
         for metric in all_stage_metrics
     ]
+    payload_bytes = [
+        metric.get("outbound_payload_bytes", metric.get("outbound_payload_b64_bytes", 0))
+        for metric in all_stage_metrics
+    ]
 
     return {
         "status": row.get("status"),
@@ -78,10 +90,17 @@ def flatten_raw_result(row: Dict[str, Any]) -> Dict[str, Any]:
         "mean_token_latency_ms": mean(per_token_latencies),
         "mean_stage_compute_time_ms": mean(compute_times),
         "mean_stage_transfer_time_ms": mean(transfer_times),
+        "mean_stage_rpc_wall_time_ms": mean(rpc_wall_times),
+        "mean_stage_true_comm_ms": mean(true_comm_times),
         "max_stage_memory_mb": max(memory_values) if memory_values else None,
         "max_stage_cpu_percent": max(cpu_values) if cpu_values else None,
-        "sum_network_delta_mb": (sum(network_delta_bytes) / (1024.0 * 1024.0)) if network_delta_bytes else None,
-        "sum_payload_b64_mb": (sum(payload_b64_bytes) / (1024.0 * 1024.0)) if payload_b64_bytes else None,
+        "sum_network_delta_mb": (
+            sum(network_delta_bytes) / (1024.0 * 1024.0)
+        ) if network_delta_bytes else None,
+        "sum_payload_b64_mb": (
+            sum(payload_b64_bytes) / (1024.0 * 1024.0)
+        ) if payload_b64_bytes else None,
+        "sum_payload_mb": (sum(payload_bytes) / (1024.0 * 1024.0)) if payload_bytes else None,
         "error": row.get("error"),
     }
 

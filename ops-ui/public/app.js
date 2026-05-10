@@ -36,6 +36,7 @@ const els = {
   featureRebalanceBaseline: document.getElementById("featureRebalanceBaseline"),
   featureRebalanceLatency: document.getElementById("featureRebalanceLatency"),
   featureKvCache: document.getElementById("featureKvCache"),
+  featureForwardDedupe: document.getElementById("featureForwardDedupe"),
   featureTopologyAware: document.getElementById("featureTopologyAware"),
   featurePersistentSessions: document.getElementById("featurePersistentSessions"),
   featureBackpressure: document.getElementById("featureBackpressure"),
@@ -103,6 +104,7 @@ const FEATURE_FLAG_DEFAULTS = Object.freeze({
   transport_mode: "json_base64",
   activation_precision: "fp32",
   kv_cache_enabled: false,
+  forward_dedupe_enabled: false,
   rebalance_profile: "baseline",
   topology_aware_routing: false,
   persistent_sessions_enabled: false,
@@ -133,9 +135,15 @@ const MODULE_FALLBACK_CATALOG = [
   },
   {
     key: "kv_cache",
-    title: "Stage KV/Forward Cache",
+    title: "Stage Transformer KV Cache",
     summary:
-      "Enable stage-side dedupe/forward cache; avoid repeated work for duplicate forward requests."
+      "Run prefill once, then decode one token at a time with per-stage transformer KV state."
+  },
+  {
+    key: "forward_dedupe_cache",
+    title: "Forward Dedupe Cache",
+    summary:
+      "Optional retry/idempotency cache for duplicate forward requests."
   },
   {
     key: "rebalance",
@@ -274,6 +282,7 @@ function deriveEnabledModules(featureFlags, explicitModules) {
     ["binary_transport", flags.transport_mode === "binary_octet_stream"],
     ["activation_precision", String(flags.activation_precision || "fp32") !== "fp32"],
     ["kv_cache", toBool(flags.kv_cache_enabled)],
+    ["forward_dedupe_cache", toBool(flags.forward_dedupe_enabled)],
     ["rebalance", String(flags.rebalance_profile || "baseline") !== "baseline"],
     ["topology_aware", toBool(flags.topology_aware_routing)],
     [
@@ -300,6 +309,7 @@ function getFeatureFlagProfileChips(featureFlags) {
     `transport=${safeText(flags.transport_mode || "json_base64")}`,
     `precision=${safeText(flags.activation_precision || "fp32")}`,
     `kv_cache=${toBool(flags.kv_cache_enabled) ? "on" : "off"}`,
+    `dedupe=${toBool(flags.forward_dedupe_enabled) ? "on" : "off"}`,
     `rebalance=${safeText(flags.rebalance_profile || "baseline")}`,
     `topology=${toBool(flags.topology_aware_routing) ? "on" : "off"}`,
     `sessions=${toBool(flags.persistent_sessions_enabled) ? "on" : "off"}`,
@@ -444,6 +454,7 @@ function normalizeFeatureFlags(rawFlags) {
     transport_mode: transportMode,
     activation_precision: precisionMode,
     kv_cache_enabled: toBool(flags.kv_cache_enabled),
+    forward_dedupe_enabled: toBool(flags.forward_dedupe_enabled),
     rebalance_profile: rebalanceProfile,
     topology_aware_routing: toBool(flags.topology_aware_routing),
     persistent_sessions_enabled: toBool(flags.persistent_sessions_enabled),
@@ -458,6 +469,7 @@ function isBaselineFeatureFlags(flags) {
     normalized.transport_mode === FEATURE_FLAG_DEFAULTS.transport_mode &&
     normalized.activation_precision === FEATURE_FLAG_DEFAULTS.activation_precision &&
     normalized.kv_cache_enabled === FEATURE_FLAG_DEFAULTS.kv_cache_enabled &&
+    normalized.forward_dedupe_enabled === FEATURE_FLAG_DEFAULTS.forward_dedupe_enabled &&
     normalized.rebalance_profile === FEATURE_FLAG_DEFAULTS.rebalance_profile &&
     normalized.topology_aware_routing === FEATURE_FLAG_DEFAULTS.topology_aware_routing &&
     normalized.persistent_sessions_enabled ===
@@ -482,6 +494,7 @@ function readFeatureFlagsFromControls() {
       FEATURE_FLAG_DEFAULTS.activation_precision
     ),
     kv_cache_enabled: toBool(els.featureKvCache?.checked),
+    forward_dedupe_enabled: toBool(els.featureForwardDedupe?.checked),
     rebalance_profile: getCheckedRadioValue(
       "feature-rebalance",
       FEATURE_FLAG_DEFAULTS.rebalance_profile
@@ -512,6 +525,9 @@ function applyFeatureFlagControls(flags) {
   );
   if (els.featureKvCache) {
     els.featureKvCache.checked = toBool(next.kv_cache_enabled);
+  }
+  if (els.featureForwardDedupe) {
+    els.featureForwardDedupe.checked = toBool(next.forward_dedupe_enabled);
   }
   if (els.featureTopologyAware) {
     els.featureTopologyAware.checked = toBool(next.topology_aware_routing);
@@ -1070,7 +1086,7 @@ function buildCriticalPathBreakdown(stageSamples, totalLatencyMs) {
   for (const sample of stageSamples) {
     const stageId = Number(sample?.stage_id ?? -1);
     const computeMs = Number(sample?.compute_time_ms || 0);
-    const transferMs = Number(sample?.transfer_time_ms || 0);
+    const transferMs = Number(sample?.rpc_wall_time_ms ?? sample?.transfer_time_ms ?? 0);
     if (stageId === 0) {
       gatewaySerializationMs += computeMs;
       gatewayWaitMs += transferMs;
@@ -1125,7 +1141,7 @@ function buildCriticalPathSankey(criticalPath, totalLatencyMs) {
       value: Number(criticalPath.stageComputeMs || 0)
     },
     {
-      key: "Stage Transfer",
+      key: "Stage RPC Wall",
       css: "stage-transfer",
       value: Number(criticalPath.stageTransferMs || 0)
     },
@@ -1177,7 +1193,9 @@ function buildStageTokenHeatmap(tokenMetrics) {
         stageId: Number(sample.stage_id || 0),
         byToken: new Map()
       };
-      const latencyValue = Number(sample.compute_time_ms || 0) + Number(sample.transfer_time_ms || 0);
+      const latencyValue =
+        Number(sample.compute_time_ms || 0) +
+        Number(sample.rpc_wall_time_ms ?? sample.transfer_time_ms ?? 0);
       stage.byToken.set(tokenIndex, (stage.byToken.get(tokenIndex) || 0) + latencyValue);
       stageMap.set(stageKey, stage);
     }
@@ -1228,13 +1246,13 @@ function buildInvokeAlerts({
   if (Number(transferP95Ms || 0) > ALERT_THRESHOLDS.transferP95Ms) {
     alerts.push({
       level: "warn",
-      message: `Transfer p95 is high (${formatNumber(transferP95Ms, 1)} ms). Network path dominates token latency.`
+      message: `RPC wall p95 is high (${formatNumber(transferP95Ms, 1)} ms). Blocking stage waits dominate token latency.`
     });
   }
   if (Number(transferComputeRatio || 0) > ALERT_THRESHOLDS.transferComputeRatio) {
     alerts.push({
       level: "warn",
-      message: `Communication/compute ratio ${formatNumber(
+      message: `True communication/compute ratio ${formatNumber(
         transferComputeRatio,
         3
       )} is above target (${ALERT_THRESHOLDS.transferComputeRatio}).`
@@ -1469,12 +1487,16 @@ function metricNetworkDeltaBytes(metric) {
 function metricPayloadBytes(metric) {
   const m = asObject(metric);
   const keys = [
-    "outbound_payload_b64_bytes",
-    "inbound_payload_b64_bytes",
+    "outbound_payload_bytes",
+    "inbound_payload_bytes",
+    "request_wire_bytes",
+    "response_wire_bytes",
     "stage1_request_payload_bytes",
     "stage1_response_payload_bytes",
     "request_payload_bytes",
-    "response_payload_bytes"
+    "response_payload_bytes",
+    "outbound_payload_b64_bytes",
+    "inbound_payload_b64_bytes"
   ];
   let total = 0;
   for (const key of keys) {
@@ -1566,8 +1588,9 @@ function aggregateStageMetrics(stageSamples, perStageSummary) {
       serviceName: safeText(s.service_name),
       samples: Number(s.samples || 0),
       computeMs: Number(s.compute_time_ms_sum || 0),
-      transferMs: Number(s.transfer_time_ms_sum || 0),
-      payloadBytes: Number(s.payload_b64_bytes_sum || 0),
+      transferMs: Number(s.rpc_wall_time_ms_sum ?? s.transfer_time_ms_sum ?? 0),
+      trueCommMs: Number(s.true_comm_ms_sum || 0),
+      payloadBytes: Number(s.payload_bytes_sum ?? s.payload_b64_bytes_sum ?? 0),
       networkBytes: Number(s.network_delta_bytes_sum || 0),
       maxMemMb: Number(s.max_process_memory_mb || 0),
       maxCpuPct: Number(s.max_cpu_percent || 0),
@@ -1587,6 +1610,7 @@ function aggregateStageMetrics(stageSamples, perStageSummary) {
       samples: 0,
       computeMs: 0,
       transferMs: 0,
+      trueCommMs: 0,
       payloadBytes: 0,
       networkBytes: 0,
       maxMemMb: 0,
@@ -1599,7 +1623,8 @@ function aggregateStageMetrics(stageSamples, perStageSummary) {
 
     curr.samples += 1;
     curr.computeMs += Number(sample.compute_time_ms || 0);
-    curr.transferMs += Number(sample.transfer_time_ms || 0);
+    curr.transferMs += Number(sample.rpc_wall_time_ms ?? sample.transfer_time_ms ?? 0);
+    curr.trueCommMs += Number(sample.true_comm_ms || 0);
     curr.payloadBytes += metricPayloadBytes(sample);
     curr.networkBytes += metricNetworkDeltaBytes(sample);
     curr.maxMemMb = Math.max(curr.maxMemMb, Number(sample.process_memory_mb || 0));
@@ -1651,6 +1676,7 @@ function aggregateNodeMetrics(stageSamples, podNodeMap = null) {
       samples: 0,
       computeMs: 0,
       transferMs: 0,
+      trueCommMs: 0,
       payloadBytes: 0,
       networkBytes: 0,
       maxMemMb: 0,
@@ -1670,7 +1696,8 @@ function aggregateNodeMetrics(stageSamples, podNodeMap = null) {
     }
     curr.samples += 1;
     curr.computeMs += Number(sample.compute_time_ms || 0);
-    curr.transferMs += Number(sample.transfer_time_ms || 0);
+    curr.transferMs += Number(sample.rpc_wall_time_ms ?? sample.transfer_time_ms ?? 0);
+    curr.trueCommMs += Number(sample.true_comm_ms || 0);
     curr.payloadBytes += metricPayloadBytes(sample);
     curr.networkBytes += metricNetworkDeltaBytes(sample);
     curr.maxMemMb = Math.max(curr.maxMemMb, Number(sample.process_memory_mb || 0));
@@ -1711,11 +1738,13 @@ function summarizeTokenRows(tokenMetrics) {
     const samples = asArray(tokenStep.stage_metrics);
     let computeMs = 0;
     let transferMs = 0;
+    let trueCommMs = 0;
     let maxMemMb = 0;
     let maxCpu = 0;
     for (const sample of samples) {
       computeMs += Number(sample.compute_time_ms || 0);
-      transferMs += Number(sample.transfer_time_ms || 0);
+      transferMs += Number(sample.rpc_wall_time_ms ?? sample.transfer_time_ms ?? 0);
+      trueCommMs += Number(sample.true_comm_ms || 0);
       maxMemMb = Math.max(maxMemMb, Number(sample.process_memory_mb || 0));
       maxCpu = Math.max(maxCpu, Number(sample.process_cpu_percent ?? sample.cpu_percent ?? 0));
     }
@@ -1727,6 +1756,7 @@ function summarizeTokenRows(tokenMetrics) {
       stageHopCount: samples.length,
       computeMs,
       transferMs,
+      trueCommMs,
       maxMemMb,
       maxCpu
     };
@@ -1748,11 +1778,17 @@ function buildInvokeRunSummary({
   const generatedTokens = Number(asArray(responseJson?.generated_token_ids).length || 0);
   const computeSumMs = tokenRows.reduce((sum, row) => sum + Number(row.computeMs || 0), 0);
   const transferSumMs = tokenRows.reduce((sum, row) => sum + Number(row.transferMs || 0), 0);
+  const trueCommSumMs = tokenRows.reduce((sum, row) => sum + Number(row.trueCommMs || 0), 0);
   const maxMemoryMb = tokenRows.reduce((max, row) => Math.max(max, Number(row.maxMemMb || 0)), 0);
   const tokenLatencies = tokenRows.map((row) => Number(row.latencyMs || 0));
   const transferLatencies = tokenRows.map((row) => Number(row.transferMs || 0));
   const aggregate = asObject(summary.aggregate);
-  const transferComputeRatio = transferSumMs / Math.max(1e-9, computeSumMs);
+  const rpcComputeRatio = Number(
+    aggregate.rpc_compute_ratio ?? transferSumMs / Math.max(1e-9, computeSumMs)
+  );
+  const trueCommComputeRatio = Number(
+    aggregate.true_comm_compute_ratio ?? trueCommSumMs / Math.max(1e-9, computeSumMs)
+  );
   return {
     timestamp: new Date().toISOString(),
     totalLatencyMs: Number(totalLatencyMs || 0),
@@ -1760,7 +1796,10 @@ function buildInvokeRunSummary({
     generatedTokens,
     computeSumMs,
     transferSumMs,
-    transferComputeRatio,
+    trueCommSumMs,
+    transferComputeRatio: trueCommComputeRatio,
+    rpcComputeRatio,
+    trueCommComputeRatio,
     maxMemoryMb,
     p50TokenLatencyMs: percentile(tokenLatencies, 0.5),
     p95TokenLatencyMs: percentile(tokenLatencies, 0.95),
@@ -1783,7 +1822,7 @@ function buildInvokeRunSummary({
       path: String(requestConfig?.path || "/generate"),
       target: String(requestConfig?.target || "gateway")
     },
-    payloadMib: Number(aggregate.payload_b64_mebibytes_sum || 0),
+    payloadMib: Number(aggregate.payload_mebibytes_sum ?? aggregate.payload_b64_mebibytes_sum ?? 0),
     networkMib: Number(aggregate.network_delta_mebibytes_sum || 0),
     perStage: stageRows.map((row) => ({
       stageKey: row.stageKey,
@@ -1792,6 +1831,7 @@ function buildInvokeRunSummary({
       samples: row.samples,
       computeMs: row.computeMs,
       transferMs: row.transferMs,
+      trueCommMs: row.trueCommMs,
       maxMemMb: row.maxMemMb,
       maxCpuPct: row.maxCpuPct,
       maxSystemCpuPct: row.maxSystemCpuPct,
@@ -1835,10 +1875,14 @@ function renderInvokeRunEvolution() {
   }
   const runs = invokeRuns.slice(-40);
   const latencySeries = [{ name: "Latency ms", values: runs.map((r) => Number(r.totalLatencyMs || 0)) }];
-  const transferSeries = [{ name: "Transfer ms", values: runs.map((r) => Number(r.transferSumMs || 0)) }];
+  const transferSeries = [{ name: "RPC wall ms", values: runs.map((r) => Number(r.transferSumMs || 0)) }];
+  const trueCommSeries = [{ name: "True comm ms", values: runs.map((r) => Number(r.trueCommSumMs || 0)) }];
   const computeSeries = [{ name: "Compute ms", values: runs.map((r) => Number(r.computeSumMs || 0)) }];
   const tpsSeries = [{ name: "Tokens/sec", values: runs.map((r) => Number(r.tokensPerSecond || 0)) }];
-  const ratioSeries = [{ name: "Comm/Compute", values: runs.map((r) => Number(r.transferComputeRatio || 0)) }];
+  const ratioSeries = [
+    { name: "RPC/Compute", values: runs.map((r) => Number(r.rpcComputeRatio || 0)) },
+    { name: "True Comm/Compute", values: runs.map((r) => Number(r.trueCommComputeRatio || 0)) }
+  ];
   const tokenPercentileSeries = [
     { name: "p50", values: runs.map((r) => Number(r.p50TokenLatencyMs || 0)) },
     { name: "p95", values: runs.map((r) => Number(r.p95TokenLatencyMs || 0)) },
@@ -1859,10 +1903,11 @@ function renderInvokeRunEvolution() {
           ${buildLineChartSvg(latencySeries, { yLabel: "Latency ms" })}
         </div>
         <div class="chart-card">
-          <h4>Transfer vs Compute per Run</h4>
+          <h4>RPC + True Comm vs Compute per Run</h4>
           ${buildLineChartSvg(
             [
-              { name: "Transfer ms", values: transferSeries[0].values },
+              { name: "RPC ms", values: transferSeries[0].values },
+              { name: "True comm ms", values: trueCommSeries[0].values },
               { name: "Compute ms", values: computeSeries[0].values }
             ],
             { yLabel: "ms" }
@@ -1873,7 +1918,7 @@ function renderInvokeRunEvolution() {
           ${buildLineChartSvg(tpsSeries, { yLabel: "tokens/sec" })}
         </div>
         <div class="chart-card">
-          <h4>Comm/Compute Ratio Trend</h4>
+          <h4>RPC/Compute + True Comm/Compute</h4>
           ${buildLineChartSvg(ratioSeries, { yLabel: "ratio" })}
         </div>
         <div class="chart-card">
@@ -1881,7 +1926,7 @@ function renderInvokeRunEvolution() {
           ${buildLineChartSvg(tokenPercentileSeries, { yLabel: "ms" })}
         </div>
         <div class="chart-card">
-          <h4>Transfer Latency p50/p95/p99</h4>
+          <h4>RPC Wall p50/p95/p99</h4>
           ${buildLineChartSvg(transferPercentileSeries, { yLabel: "ms" })}
         </div>
       </div>
@@ -1914,10 +1959,14 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
   const tokenTransferP95 = percentile(tokenRows.map((row) => row.transferMs), 0.95);
   const tokenTransferP99 = percentile(tokenRows.map((row) => row.transferMs), 0.99);
   const criticalPath = buildCriticalPathBreakdown(stageSamples, totalLatencyMs);
-  const transferComputeRatio =
-    Number(aggregate.transfer_time_ms_sum || 0) / Math.max(1e-9, Number(aggregate.compute_time_ms_sum || 0));
+  const rpcComputeRatio = Number(
+    aggregate.rpc_compute_ratio ??
+      Number(aggregate.transfer_time_ms_sum || 0) / Math.max(1e-9, Number(aggregate.compute_time_ms_sum || 0))
+  );
+  const trueCommComputeRatio = Number(aggregate.true_comm_compute_ratio ?? aggregate.comm_compute_ratio ?? 0);
+  const transferComputeRatio = trueCommComputeRatio;
   const networkBytesSum = Number(aggregate.network_delta_bytes_sum || 0);
-  const payloadBytesSum = Number(aggregate.payload_b64_bytes_sum || 0);
+  const payloadBytesSum = Number(aggregate.payload_bytes_sum ?? aggregate.payload_b64_bytes_sum ?? 0);
   const bytesPerGeneratedToken = networkBytesSum / Math.max(1, generatedTokenCount);
   const payloadBytesPerGeneratedToken = payloadBytesSum / Math.max(1, generatedTokenCount);
   const baselineRef = [...invokeRuns]
@@ -1948,12 +1997,17 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
     { k: "Tokens/sec", v: formatNumber(responseJson.tokens_per_second, 3) },
     { k: "Samples", v: String(stageSamples.length) },
     { k: "Compute Sum (ms)", v: formatNumber(aggregate.compute_time_ms_sum, 1) },
-    { k: "Transfer Sum (ms)", v: formatNumber(aggregate.transfer_time_ms_sum, 1) },
+    { k: "RPC Wall Sum (ms)", v: formatNumber(aggregate.rpc_wall_time_ms_sum ?? aggregate.transfer_time_ms_sum, 1) },
+    { k: "True Comm Sum (ms)", v: formatNumber(aggregate.true_comm_ms_sum, 1) },
     {
-      k: "Transfer/Compute Ratio",
-      v: formatNumber(transferComputeRatio, 3)
+      k: "RPC/Compute Ratio",
+      v: formatNumber(rpcComputeRatio, 3)
     },
-    { k: "Payload Sum (MiB)", v: formatNumber(aggregate.payload_b64_mebibytes_sum, 3) },
+    {
+      k: "True Comm/Compute Ratio",
+      v: formatNumber(trueCommComputeRatio, 3)
+    },
+    { k: "Payload Sum (MiB)", v: formatNumber(aggregate.payload_mebibytes_sum ?? aggregate.payload_b64_mebibytes_sum, 3) },
     { k: "Network Delta (MiB)", v: formatNumber(aggregate.network_delta_mebibytes_sum, 3) },
     { k: "Max Process Mem (MB)", v: formatNumber(aggregate.max_process_memory_mb, 1) },
     { k: "Max Process CPU (%)", v: formatNumber(maxProcessCpu, 1) },
@@ -1964,9 +2018,9 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
     { k: "Token Latency p50 (ms)", v: formatNumber(tokenLatencyP50, 1) },
     { k: "Token Latency p95 (ms)", v: formatNumber(tokenLatencyP95, 1) },
     { k: "Token Latency p99 (ms)", v: formatNumber(tokenLatencyP99, 1) },
-    { k: "Transfer Lat p50 (ms)", v: formatNumber(tokenTransferP50, 1) },
-    { k: "Transfer Lat p95 (ms)", v: formatNumber(tokenTransferP95, 1) },
-    { k: "Transfer Lat p99 (ms)", v: formatNumber(tokenTransferP99, 1) }
+    { k: "RPC Wall p50 (ms)", v: formatNumber(tokenTransferP50, 1) },
+    { k: "RPC Wall p95 (ms)", v: formatNumber(tokenTransferP95, 1) },
+    { k: "RPC Wall p99 (ms)", v: formatNumber(tokenTransferP99, 1) }
   ];
 
   const stageTableRows = stageRows
@@ -2065,12 +2119,12 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
       note: "Sum of compute_time_ms from stage-1..stage-4."
     },
     {
-      key: "Stage Transfer (subset of wait)",
+      key: "Stage RPC Wall (subset of wait)",
       ms: criticalPath.stageTransferMs,
-      note: "Inter-stage forward transfer_time_ms (stage->stage)."
+      note: "Inter-stage blocking RPC wall time (stage->stage)."
     },
     {
-      key: "Stage Residual (wait - compute - transfer)",
+      key: "Stage Residual (wait - compute - RPC wall)",
       ms: criticalPath.stageResidualMs,
       note: "Scheduling/serialization/other queue overhead inside wait window."
     },
@@ -2121,9 +2175,14 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
           : "Lower means better memory-vs-network tradeoff."
     },
     {
-      key: "Communication/compute ratio",
-      value: formatNumber(transferComputeRatio, 3),
-      note: "Transfer time divided by compute time."
+      key: "True communication/compute ratio",
+      value: formatNumber(trueCommComputeRatio, 3),
+      note: "Serialization, wire residual, and unpack/decode time divided by compute time."
+    },
+    {
+      key: "RPC/compute ratio",
+      value: formatNumber(rpcComputeRatio, 3),
+      note: "Blocking RPC wall time divided by compute time."
     }
   ]
     .map(
@@ -2191,7 +2250,10 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
         tokensPerSecond: runSummary.tokensPerSecond,
         computeMs: runSummary.computeSumMs,
         transferMs: runSummary.transferSumMs,
+        trueCommMs: runSummary.trueCommSumMs,
         transferComputeRatio: runSummary.transferComputeRatio,
+        rpcComputeRatio: runSummary.rpcComputeRatio,
+        trueCommComputeRatio: runSummary.trueCommComputeRatio,
         payloadMib: runSummary.payloadMib,
         networkMib: runSummary.networkMib,
         maxMemoryMb: runSummary.maxMemoryMb,
@@ -2239,7 +2301,7 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
     </div>
 
     <div class="invoke-subpanel">
-      <h3>Critical-path Sankey (gateway wait vs stage compute/transfer)</h3>
+      <h3>Critical-path Sankey (gateway wait vs stage compute/RPC wall)</h3>
       ${criticalPathSankey}
     </div>
 
@@ -2274,7 +2336,7 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
             <th>ID</th>
             <th>Samples</th>
             <th>Compute (ms)</th>
-            <th>Transfer (ms)</th>
+            <th>RPC Wall (ms)</th>
             <th>Max Mem (MB)</th>
             <th>Max Proc CPU (%)</th>
             <th>Max Sys CPU (%)</th>
@@ -2298,7 +2360,7 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
             <th>Stages</th>
             <th>Samples</th>
             <th>Compute (ms)</th>
-            <th>Transfer (ms)</th>
+            <th>RPC Wall (ms)</th>
             <th>Max Mem (MB)</th>
             <th>Max Proc CPU (%)</th>
             <th>Max Sys CPU (%)</th>
@@ -2326,7 +2388,7 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
             <th>Latency (ms)</th>
             <th>Hops</th>
             <th>Compute (ms)</th>
-            <th>Transfer (ms)</th>
+            <th>RPC Wall (ms)</th>
             <th>Max Mem (MB)</th>
             <th>Max CPU (%)</th>
           </tr>
@@ -2561,6 +2623,8 @@ function summarizeTurnMetrics(response, requestConfig = {}) {
       samples: row.samples,
       compute_time_ms_sum: row.computeMs,
       transfer_time_ms_sum: row.transferMs,
+      rpc_wall_time_ms_sum: row.transferMs,
+      true_comm_ms_sum: row.trueCommMs,
       max_process_memory_mb: row.maxMemMb,
       max_cpu_percent: row.maxCpuPct,
       max_system_cpu_percent: row.maxSystemCpuPct,
@@ -2585,19 +2649,29 @@ function summarizeTurnMetrics(response, requestConfig = {}) {
     total_latency_ms: totalLatencyMs,
     tokens_per_second: Number(response.tokens_per_second || 0),
     compute_ms_sum: Number(aggregate.compute_time_ms_sum || 0),
-    transfer_ms_sum: Number(aggregate.transfer_time_ms_sum || 0),
+    transfer_ms_sum: Number(aggregate.rpc_wall_time_ms_sum ?? aggregate.transfer_time_ms_sum ?? 0),
+    rpc_wall_ms_sum: Number(aggregate.rpc_wall_time_ms_sum ?? aggregate.transfer_time_ms_sum ?? 0),
+    true_comm_ms_sum: Number(aggregate.true_comm_ms_sum || 0),
     max_memory_mb: Number(aggregate.max_process_memory_mb || 0),
     network_mib_sum: Number(aggregate.network_delta_mebibytes_sum || 0),
-    payload_mib_sum: Number(aggregate.payload_b64_mebibytes_sum || 0),
+    payload_mib_sum: Number(aggregate.payload_mebibytes_sum ?? aggregate.payload_b64_mebibytes_sum ?? 0),
     token_latency_p50_ms: percentile(tokenRows.map((row) => row.latencyMs), 0.5),
     token_latency_p95_ms: percentile(tokenRows.map((row) => row.latencyMs), 0.95),
     token_latency_p99_ms: percentile(tokenRows.map((row) => row.latencyMs), 0.99),
     transfer_latency_p50_ms: percentile(tokenRows.map((row) => row.transferMs), 0.5),
     transfer_latency_p95_ms: percentile(tokenRows.map((row) => row.transferMs), 0.95),
     transfer_latency_p99_ms: percentile(tokenRows.map((row) => row.transferMs), 0.99),
-    transfer_compute_ratio:
-      Number(aggregate.transfer_time_ms_sum || 0) /
-      Math.max(1e-9, Number(aggregate.compute_time_ms_sum || 0)),
+    transfer_compute_ratio: Number(
+      aggregate.true_comm_compute_ratio ?? aggregate.comm_compute_ratio ?? 0
+    ),
+    rpc_compute_ratio: Number(
+      aggregate.rpc_compute_ratio ??
+        Number(aggregate.transfer_time_ms_sum || 0) /
+          Math.max(1e-9, Number(aggregate.compute_time_ms_sum || 0))
+    ),
+    true_comm_compute_ratio: Number(
+      aggregate.true_comm_compute_ratio ?? aggregate.comm_compute_ratio ?? 0
+    ),
     config: {
       promptChars: Number(requestConfig.promptChars || 0),
       maxNewTokens: Number(requestConfig.maxNewTokens || 0),
@@ -2654,6 +2728,7 @@ function renderChatMetricsTimeline() {
   );
   const totalCompute = chatTurns.reduce((sum, turn) => sum + Number(turn.compute_ms_sum || 0), 0);
   const totalTransfer = chatTurns.reduce((sum, turn) => sum + Number(turn.transfer_ms_sum || 0), 0);
+  const totalTrueComm = chatTurns.reduce((sum, turn) => sum + Number(turn.true_comm_ms_sum || 0), 0);
   const peakMemory = chatTurns.reduce((max, turn) => Math.max(max, Number(turn.max_memory_mb || 0)), 0);
   const totalNetwork = chatTurns.reduce((sum, turn) => sum + Number(turn.network_mib_sum || 0), 0);
   const totalPayload = chatTurns.reduce((sum, turn) => sum + Number(turn.payload_mib_sum || 0), 0);
@@ -2714,6 +2789,7 @@ function renderChatMetricsTimeline() {
         samples: 0,
         computeMs: 0,
         transferMs: 0,
+        trueCommMs: 0,
         maxMemMb: 0,
         maxCpuPct: 0,
         networkMib: 0,
@@ -2721,11 +2797,13 @@ function renderChatMetricsTimeline() {
       };
       curr.samples += Number(stage.samples || 0);
       curr.computeMs += Number(stage.compute_time_ms_sum || 0);
-      curr.transferMs += Number(stage.transfer_time_ms_sum || 0);
+      curr.transferMs += Number(stage.rpc_wall_time_ms_sum ?? stage.transfer_time_ms_sum ?? 0);
+      curr.trueCommMs += Number(stage.true_comm_ms_sum || 0);
       curr.maxMemMb = Math.max(curr.maxMemMb, Number(stage.max_process_memory_mb || 0));
       curr.maxCpuPct = Math.max(curr.maxCpuPct, Number(stage.max_cpu_percent || 0));
       curr.networkMib += Number(stage.network_delta_bytes_sum || 0) / (1024 * 1024);
-      curr.payloadMib += Number(stage.payload_b64_bytes_sum || 0) / (1024 * 1024);
+      curr.payloadMib +=
+        Number(stage.payload_bytes_sum ?? stage.payload_b64_bytes_sum ?? 0) / (1024 * 1024);
       stageRollup.set(stageKey, curr);
     }
 
@@ -2741,6 +2819,7 @@ function renderChatMetricsTimeline() {
         samples: 0,
         computeMs: 0,
         transferMs: 0,
+        trueCommMs: 0,
         maxMemMb: 0,
         maxCpuPct: 0,
         maxSystemCpuPct: 0,
@@ -2783,7 +2862,8 @@ function renderChatMetricsTimeline() {
 
       curr.samples += Number(node.samples || 0);
       curr.computeMs += Number(node.compute_time_ms_sum || 0);
-      curr.transferMs += Number(node.transfer_time_ms_sum || 0);
+      curr.transferMs += Number(node.rpc_wall_time_ms_sum ?? node.transfer_time_ms_sum ?? 0);
+      curr.trueCommMs += Number(node.true_comm_ms_sum || 0);
       curr.maxMemMb = Math.max(curr.maxMemMb, Number(node.max_process_memory_mb || 0));
       curr.maxCpuPct = Math.max(curr.maxCpuPct, Number(node.max_cpu_percent || 0));
       curr.maxSystemCpuPct = Math.max(
@@ -2811,10 +2891,15 @@ function renderChatMetricsTimeline() {
     { k: "Avg Latency (ms)", v: formatNumber(avgLatency, 1) },
     { k: "Avg Tok/s", v: formatNumber(avgTps, 3) },
     { k: "Compute Sum (ms)", v: formatNumber(totalCompute, 1) },
-    { k: "Transfer Sum (ms)", v: formatNumber(totalTransfer, 1) },
+    { k: "RPC Wall Sum (ms)", v: formatNumber(totalTransfer, 1) },
+    { k: "True Comm Sum (ms)", v: formatNumber(totalTrueComm, 1) },
     {
-      k: "Transfer/Compute Ratio",
+      k: "RPC/Compute Ratio",
       v: formatNumber(totalTransfer / Math.max(1e-9, totalCompute), 3)
+    },
+    {
+      k: "True Comm/Compute Ratio",
+      v: formatNumber(totalTrueComm / Math.max(1e-9, totalCompute), 3)
     },
     { k: "Peak Mem (MB)", v: formatNumber(peakMemory, 1) },
     { k: "Network Total (MiB)", v: formatNumber(totalNetwork, 3) },
@@ -2822,9 +2907,9 @@ function renderChatMetricsTimeline() {
     { k: "Avg Token p50 (ms)", v: formatNumber(avgTokenP50, 1) },
     { k: "Avg Token p95 (ms)", v: formatNumber(avgTokenP95, 1) },
     { k: "Avg Token p99 (ms)", v: formatNumber(avgTokenP99, 1) },
-    { k: "Avg Transfer p50 (ms)", v: formatNumber(avgTransferP50, 1) },
-    { k: "Avg Transfer p95 (ms)", v: formatNumber(avgTransferP95, 1) },
-    { k: "Avg Transfer p99 (ms)", v: formatNumber(avgTransferP99, 1) }
+    { k: "Avg RPC Wall p50 (ms)", v: formatNumber(avgTransferP50, 1) },
+    { k: "Avg RPC Wall p95 (ms)", v: formatNumber(avgTransferP95, 1) },
+    { k: "Avg RPC Wall p99 (ms)", v: formatNumber(avgTransferP99, 1) }
   ];
 
   const rows = chatTurns
@@ -2897,7 +2982,10 @@ function renderChatMetricsTimeline() {
 
   const nodeMemorySeries = buildPerNodeSeries(chatTurns, (node) => node.max_process_memory_mb);
   const nodeNetworkSeries = buildPerNodeSeries(chatTurns, (node) => node.network_delta_mib_sum);
-  const nodeTransferSeries = buildPerNodeSeries(chatTurns, (node) => node.transfer_time_ms_sum);
+  const nodeTransferSeries = buildPerNodeSeries(
+    chatTurns,
+    (node) => node.rpc_wall_time_ms_sum ?? node.transfer_time_ms_sum
+  );
   const nodeComputeSeries = buildPerNodeSeries(chatTurns, (node) => node.compute_time_ms_sum);
   const turnLatencySeries = [
     { name: "Latency ms", values: chatTurns.map((turn) => Number(turn.total_latency_ms || 0)) }
@@ -2907,8 +2995,12 @@ function renderChatMetricsTimeline() {
   ];
   const turnRatioSeries = [
     {
-      name: "Comm/Compute",
-      values: chatTurns.map((turn) => Number(turn.transfer_compute_ratio || 0))
+      name: "RPC/Compute",
+      values: chatTurns.map((turn) => Number(turn.rpc_compute_ratio || 0))
+    },
+    {
+      name: "True Comm/Compute",
+      values: chatTurns.map((turn) => Number(turn.true_comm_compute_ratio || 0))
     }
   ];
   const turnTokenPercentileSeries = [
@@ -2929,7 +3021,7 @@ function renderChatMetricsTimeline() {
       values: chatTurns.map((turn) => Number(asObject(turn.critical_path).gatewaySerializationMs || 0))
     },
     { name: "Stage Compute", values: chatTurns.map((turn) => Number(asObject(turn.critical_path).stageComputeMs || 0)) },
-    { name: "Stage Transfer", values: chatTurns.map((turn) => Number(asObject(turn.critical_path).stageTransferMs || 0)) }
+    { name: "Stage RPC Wall", values: chatTurns.map((turn) => Number(asObject(turn.critical_path).stageTransferMs || 0)) }
   ];
 
   els.chatMetricsTimeline.innerHTML = `
@@ -2957,7 +3049,7 @@ function renderChatMetricsTimeline() {
           ${buildLineChartSvg(turnThroughputSeries, { yLabel: "tokens/sec" })}
         </div>
         <div class="chart-card">
-          <h4>Communication/Compute Ratio</h4>
+          <h4>RPC/Compute + True Comm/Compute</h4>
           ${buildLineChartSvg(turnRatioSeries, { yLabel: "ratio" })}
         </div>
         <div class="chart-card">
@@ -2965,7 +3057,7 @@ function renderChatMetricsTimeline() {
           ${buildLineChartSvg(turnTokenPercentileSeries, { yLabel: "ms" })}
         </div>
         <div class="chart-card">
-          <h4>Transfer Latency p50/p95/p99</h4>
+          <h4>RPC Wall p50/p95/p99</h4>
           ${buildLineChartSvg(turnTransferPercentileSeries, { yLabel: "ms" })}
         </div>
       </div>
@@ -2991,7 +3083,7 @@ function renderChatMetricsTimeline() {
               <tr><td>Gateway Wait</td><td>${formatNumber(criticalGatewayWait, 1)}</td><td>${formatNumber(criticalGatewayWait / Math.max(1, totalTurns), 1)}</td></tr>
               <tr><td>Gateway Serialization</td><td>${formatNumber(criticalGatewaySerialization, 1)}</td><td>${formatNumber(criticalGatewaySerialization / Math.max(1, totalTurns), 1)}</td></tr>
               <tr><td>Stage Compute</td><td>${formatNumber(criticalStageCompute, 1)}</td><td>${formatNumber(criticalStageCompute / Math.max(1, totalTurns), 1)}</td></tr>
-              <tr><td>Stage Transfer</td><td>${formatNumber(criticalStageTransfer, 1)}</td><td>${formatNumber(criticalStageTransfer / Math.max(1, totalTurns), 1)}</td></tr>
+              <tr><td>Stage RPC Wall</td><td>${formatNumber(criticalStageTransfer, 1)}</td><td>${formatNumber(criticalStageTransfer / Math.max(1, totalTurns), 1)}</td></tr>
             </tbody>
           </table>
         </div>
@@ -3009,7 +3101,7 @@ function renderChatMetricsTimeline() {
           ${buildLineChartSvg(nodeNetworkSeries, { yLabel: "MiB" })}
         </div>
         <div class="chart-card">
-          <h4>Node Transfer Time (ms)</h4>
+          <h4>Node RPC Wall Time (ms)</h4>
           ${buildLineChartSvg(nodeTransferSeries, { yLabel: "ms" })}
         </div>
         <div class="chart-card">
@@ -3028,7 +3120,7 @@ function renderChatMetricsTimeline() {
             <th>ID</th>
             <th>Samples</th>
             <th>Compute (ms)</th>
-            <th>Transfer (ms)</th>
+            <th>RPC Wall (ms)</th>
             <th>Max Mem (MB)</th>
             <th>Max CPU (%)</th>
             <th>Net Delta (MiB)</th>
@@ -3049,7 +3141,7 @@ function renderChatMetricsTimeline() {
             <th>Stages</th>
             <th>Samples</th>
             <th>Compute (ms)</th>
-            <th>Transfer (ms)</th>
+            <th>RPC Wall (ms)</th>
             <th>Max Mem (MB)</th>
             <th>Max CPU (%)</th>
             <th>Max Sys CPU (%)</th>
@@ -3077,7 +3169,7 @@ function renderChatMetricsTimeline() {
           <th>Tok p95 (ms)</th>
           <th>Xfer p95 (ms)</th>
           <th>Compute Sum (ms)</th>
-          <th>Transfer Sum (ms)</th>
+          <th>RPC Wall Sum (ms)</th>
           <th>Max Mem (MB)</th>
           <th>Net Delta (MiB)</th>
           <th>Payload (MiB)</th>
@@ -3215,7 +3307,10 @@ async function sendChatTurn() {
           tokensPerSecond: turnSummary.tokens_per_second,
           computeMs: turnSummary.compute_ms_sum,
           transferMs: turnSummary.transfer_ms_sum,
+          trueCommMs: turnSummary.true_comm_ms_sum,
           transferComputeRatio: turnSummary.transfer_compute_ratio,
+          rpcComputeRatio: turnSummary.rpc_compute_ratio,
+          trueCommComputeRatio: turnSummary.true_comm_compute_ratio,
           payloadMib: turnSummary.payload_mib_sum,
           networkMib: turnSummary.network_mib_sum,
           maxMemoryMb: turnSummary.max_memory_mb,
