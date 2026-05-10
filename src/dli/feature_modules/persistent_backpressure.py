@@ -12,6 +12,8 @@ from dli.common.feature_flags import FeatureFlags
 class PersistentSessionPool:
     KEY = "persistent_sessions_backpressure"
     _sessions: Dict[str, requests.Session] = {}
+    _created_count = 0
+    _reuse_count = 0
     _lock = threading.Lock()
 
     @staticmethod
@@ -23,13 +25,24 @@ class PersistentSessionPool:
         with cls._lock:
             session = cls._sessions.get(key)
             if session is not None:
+                cls._reuse_count += 1
                 return session
             session = requests.Session()
             adapter = requests.adapters.HTTPAdapter(pool_connections=32, pool_maxsize=64)
             session.mount("http://", adapter)
             session.mount("https://", adapter)
             cls._sessions[key] = session
+            cls._created_count += 1
             return session
+
+    @classmethod
+    def snapshot(cls) -> Dict[str, int]:
+        with cls._lock:
+            return {
+                "sessions": len(cls._sessions),
+                "created_count": cls._created_count,
+                "reuse_count": cls._reuse_count,
+            }
 
 
 @dataclass

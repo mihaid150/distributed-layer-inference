@@ -9,6 +9,9 @@ inference_stages:
   service_name: inference-stage-1
   physical_node: pinode7
   partition_file: /app/models/stage_1.pt
+  partition_profiles:
+    baseline: /app/models/stage_1.pt
+    latency_balanced_v1: /app/models/latency_balanced_v1/stage_1.pt
   components:
     embedding: true
     layers:
@@ -21,10 +24,15 @@ inference_stages:
     norm: false
     lm_head: false
   next_stage_url: http://inference-stage-2:8000/forward
+  route_candidates:
+  - http://inference-stage-2:8000/forward
 - stage_id: 2
   service_name: inference-stage-2
   physical_node: pinode8
   partition_file: /app/models/stage_2.pt
+  partition_profiles:
+    baseline: /app/models/stage_2.pt
+    latency_balanced_v1: /app/models/latency_balanced_v1/stage_2.pt
   components:
     embedding: false
     layers:
@@ -37,10 +45,15 @@ inference_stages:
     norm: false
     lm_head: false
   next_stage_url: http://inference-stage-3:8000/forward
+  route_candidates:
+  - http://inference-stage-3:8000/forward
 - stage_id: 3
   service_name: inference-stage-3
   physical_node: pinode9
   partition_file: /app/models/stage_3.pt
+  partition_profiles:
+    baseline: /app/models/stage_3.pt
+    latency_balanced_v1: /app/models/latency_balanced_v1/stage_3.pt
   components:
     embedding: false
     layers:
@@ -52,10 +65,15 @@ inference_stages:
     norm: false
     lm_head: false
   next_stage_url: http://inference-stage-4:8000/forward
+  route_candidates:
+  - http://inference-stage-4:8000/forward
 - stage_id: 4
   service_name: inference-stage-4
   physical_node: pinode10
   partition_file: /app/models/stage_4.pt
+  partition_profiles:
+    baseline: /app/models/stage_4.pt
+    latency_balanced_v1: /app/models/latency_balanced_v1/stage_4.pt
   components:
     embedding: false
     layers:
@@ -67,3 +85,12 @@ inference_stages:
     norm: true
     lm_head: true
   next_stage_url: null
+topology:
+  probe_timeout_seconds: 0.25
+  route_candidates:
+    "1":
+    - http://inference-stage-2:8000/forward
+    "2":
+    - http://inference-stage-3:8000/forward
+    "3":
+    - http://inference-stage-4:8000/forward

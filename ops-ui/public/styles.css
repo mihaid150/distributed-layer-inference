@@ -865,6 +865,25 @@ button:hover {
   border-radius: 8px;
 }
 
+.history-output-details summary {
+  cursor: pointer;
+  color: var(--fg);
+  line-height: 1.3;
+}
+
+.history-output-pre {
+  margin: 8px 0 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #0d1430;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .history-a-b {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -888,6 +907,26 @@ button:hover {
 .history-badge.modules {
   color: var(--ok);
   border-color: rgba(36, 195, 142, 0.5);
+}
+
+.danger-button {
+  border-color: #7f1d1d;
+  background: #2a1116;
+  color: #fecaca;
+}
+
+.danger-button:hover:not(:disabled) {
+  background: #3f151d;
+  border-color: #ef4444;
+}
+
+.danger-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.history-row-select {
+  cursor: pointer;
 }
 
 @media (max-width: 1050px) {

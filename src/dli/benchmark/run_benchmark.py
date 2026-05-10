@@ -14,6 +14,38 @@ import requests
 from dli.benchmark.prompt_sets import BenchmarkPrompt, get_all_prompts
 
 
+FEATURE_PROFILES: Dict[str, Dict[str, Any]] = {
+    "baseline": {},
+    "stage4-fastpath": {},
+    "binary-fp16": {
+        "transport_mode": "binary_octet_stream",
+        "activation_precision": "fp16",
+        "persistent_sessions_enabled": True,
+    },
+    "binary-fp16-kv": {
+        "transport_mode": "binary_octet_stream",
+        "activation_precision": "fp16",
+        "kv_cache_enabled": True,
+        "persistent_sessions_enabled": True,
+    },
+    "binary-fp16-kv-rebalance": {
+        "transport_mode": "binary_octet_stream",
+        "activation_precision": "fp16",
+        "kv_cache_enabled": True,
+        "rebalance_profile": "latency_balanced_v1",
+        "persistent_sessions_enabled": True,
+    },
+    "binary-fp16-kv-rebalance-topology": {
+        "transport_mode": "binary_octet_stream",
+        "activation_precision": "fp16",
+        "kv_cache_enabled": True,
+        "rebalance_profile": "latency_balanced_v1",
+        "topology_aware_routing": True,
+        "persistent_sessions_enabled": True,
+    },
+}
+
+
 def utc_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
@@ -28,6 +60,7 @@ def call_gateway(
     prompt: str,
     max_new_tokens: int,
     temperature: float,
+    feature_flags: Dict[str, Any],
     timeout_seconds: float,
 ) -> Dict[str, Any]:
     response = requests.post(
@@ -35,7 +68,9 @@ def call_gateway(
         json={
             "prompt": prompt,
             "max_new_tokens": max_new_tokens,
+            "min_new_tokens": max_new_tokens,
             "temperature": temperature,
+            "feature_flags": feature_flags,
         },
         timeout=timeout_seconds,
     )
@@ -49,6 +84,8 @@ def run_single_case(
     prompt_item: BenchmarkPrompt,
     max_new_tokens: int,
     temperature: float,
+    profile_name: str,
+    feature_flags: Dict[str, Any],
     run_index: int,
     timeout_seconds: float,
 ) -> Dict[str, Any]:
@@ -60,6 +97,7 @@ def run_single_case(
             prompt=prompt_item.prompt,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
+            feature_flags=feature_flags,
             timeout_seconds=timeout_seconds,
         )
 
@@ -74,6 +112,8 @@ def run_single_case(
             "prompt": prompt_item.prompt,
             "max_new_tokens": max_new_tokens,
             "temperature": temperature,
+            "profile_name": profile_name,
+            "feature_flags": feature_flags,
             "wall_latency_ms": wall_latency_ms,
             "gateway_response": response,
             "error": None,
@@ -91,6 +131,8 @@ def run_single_case(
             "prompt": prompt_item.prompt,
             "max_new_tokens": max_new_tokens,
             "temperature": temperature,
+            "profile_name": profile_name,
+            "feature_flags": feature_flags,
             "wall_latency_ms": wall_latency_ms,
             "gateway_response": None,
             "error": str(exc),
@@ -118,8 +160,12 @@ def summarize_case(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     generated_tokens = [
         len(item["gateway_response"]["generated_token_ids"]) for item in successful
     ]
+    aggregates = [
+        item["gateway_response"].get("summary_metrics", {}).get("aggregate", {})
+        for item in successful
+    ]
 
-    return {
+    summary = {
         "num_runs": len(results),
         "num_successful": len(successful),
         "num_failed": len(results) - len(successful),
@@ -137,6 +183,24 @@ def summarize_case(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         else 0.0,
         "generated_tokens_mean": statistics.mean(generated_tokens),
     }
+
+    for source_key, output_key in {
+        "comm_compute_ratio": "comm_compute_ratio_mean",
+        "payload_mebibytes_sum": "payload_mebibytes_mean",
+        "network_delta_mebibytes_sum": "network_mebibytes_mean",
+        "stage4_compute_time_ms_per_token": "stage4_compute_ms_per_token_mean",
+        "token_latency_ms_p50": "token_latency_ms_p50_mean",
+        "token_latency_ms_p95": "token_latency_ms_p95_mean",
+        "token_latency_ms_p99": "token_latency_ms_p99_mean",
+    }.items():
+        values = [
+            float(aggregate.get(source_key, 0.0))
+            for aggregate in aggregates
+            if source_key in aggregate
+        ]
+        summary[output_key] = statistics.mean(values) if values else 0.0
+
+    return summary
 
 
 def write_jsonl(path: Path, rows: List[Dict[str, Any]]) -> None:
@@ -171,6 +235,24 @@ def main() -> None:
         default=0.0,
     )
     parser.add_argument(
+        "--profiles",
+        nargs="+",
+        default=["baseline"],
+        choices=sorted(FEATURE_PROFILES.keys()),
+        help="Named feature profiles to compare.",
+    )
+    parser.add_argument(
+        "--feature-flags-json",
+        default=None,
+        help="Optional JSON object merged into each selected profile.",
+    )
+    parser.add_argument(
+        "--warmup-runs",
+        type=int,
+        default=1,
+        help="Warmup runs per case/profile. Warmups are discarded from output files.",
+    )
+    parser.add_argument(
         "--timeout-seconds",
         type=float,
         default=600.0,
@@ -191,46 +273,74 @@ def main() -> None:
     summary_rows: List[Dict[str, Any]] = []
 
     prompts = get_all_prompts()
+    feature_flag_override = (
+        json.loads(args.feature_flags_json) if args.feature_flags_json else {}
+    )
 
     for prompt_item in prompts:
         for max_new_tokens in args.max_new_tokens:
-            case_rows: List[Dict[str, Any]] = []
-
-            print(
-                f"Running case prompt_id={prompt_item.prompt_id} "
-                f"max_new_tokens={max_new_tokens}"
-            )
-
-            for run_index in range(args.runs_per_case):
-                result = run_single_case(
-                    gateway_url=args.gateway_url,
-                    prompt_item=prompt_item,
-                    max_new_tokens=max_new_tokens,
-                    temperature=args.temperature,
-                    run_index=run_index,
-                    timeout_seconds=args.timeout_seconds,
-                )
-
-                case_rows.append(result)
-                all_rows.append(result)
+            for profile_name in args.profiles:
+                feature_flags = dict(FEATURE_PROFILES[profile_name])
+                feature_flags.update(feature_flag_override)
+                case_rows: List[Dict[str, Any]] = []
 
                 print(
-                    f"  run={run_index} status={result['status']} "
-                    f"wall_latency_ms={result['wall_latency_ms']:.2f}"
+                    f"Running case profile={profile_name} prompt_id={prompt_item.prompt_id} "
+                    f"max_new_tokens={max_new_tokens}"
                 )
 
-            case_summary = summarize_case(case_rows)
-            case_summary.update(
-                {
-                    "experiment_id": experiment_id,
-                    "prompt_id": prompt_item.prompt_id,
-                    "prompt_category": prompt_item.category,
-                    "prompt_length": prompt_item.approximate_length,
-                    "max_new_tokens": max_new_tokens,
-                    "temperature": args.temperature,
-                }
-            )
-            summary_rows.append(case_summary)
+                for warmup_index in range(max(0, args.warmup_runs)):
+                    warmup = run_single_case(
+                        gateway_url=args.gateway_url,
+                        prompt_item=prompt_item,
+                        max_new_tokens=max_new_tokens,
+                        temperature=args.temperature,
+                        profile_name=profile_name,
+                        feature_flags=feature_flags,
+                        run_index=-(warmup_index + 1),
+                        timeout_seconds=args.timeout_seconds,
+                    )
+                    print(
+                        f"  warmup={warmup_index} status={warmup['status']} "
+                        f"wall_latency_ms={warmup['wall_latency_ms']:.2f}"
+                    )
+
+                for run_index in range(args.runs_per_case):
+                    result = run_single_case(
+                        gateway_url=args.gateway_url,
+                        prompt_item=prompt_item,
+                        max_new_tokens=max_new_tokens,
+                        temperature=args.temperature,
+                        profile_name=profile_name,
+                        feature_flags=feature_flags,
+                        run_index=run_index,
+                        timeout_seconds=args.timeout_seconds,
+                    )
+
+                    case_rows.append(result)
+                    all_rows.append(result)
+
+                    print(
+                        f"  run={run_index} status={result['status']} "
+                        f"wall_latency_ms={result['wall_latency_ms']:.2f}"
+                    )
+
+                case_summary = summarize_case(case_rows)
+                case_summary.update(
+                    {
+                        "experiment_id": experiment_id,
+                        "profile_name": profile_name,
+                        "feature_flags": feature_flags,
+                        "prompt_id": prompt_item.prompt_id,
+                        "prompt_category": prompt_item.category,
+                        "prompt_length": prompt_item.approximate_length,
+                        "max_new_tokens": max_new_tokens,
+                        "min_new_tokens": max_new_tokens,
+                        "temperature": args.temperature,
+                        "warmup_runs_discarded": max(0, args.warmup_runs),
+                    }
+                )
+                summary_rows.append(case_summary)
 
     raw_path = output_dir / f"{experiment_id}.jsonl"
     summary_path = output_dir / f"{experiment_id}_summary.jsonl"

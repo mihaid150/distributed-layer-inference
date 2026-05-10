@@ -511,6 +511,82 @@ function toSafeIsoDate(rawValue, fallbackIso) {
   return parsed.toISOString();
 }
 
+function sanitizeHistoryText(rawValue, maxLen = 24000) {
+  const text = String(rawValue == null ? "" : rawValue);
+  if (!text) {
+    return "";
+  }
+  return text.length > maxLen ? text.slice(0, maxLen) : text;
+}
+
+function normalizeHistoryFeatureFlags(rawFlags) {
+  const input =
+    rawFlags && typeof rawFlags === "object" && !Array.isArray(rawFlags) ? rawFlags : {};
+  const result = {};
+  const keys = [
+    "transport_mode",
+    "activation_precision",
+    "kv_cache_enabled",
+    "rebalance_profile",
+    "topology_aware_routing",
+    "persistent_sessions_enabled",
+    "backpressure_enabled",
+    "backpressure_queue_size"
+  ];
+  for (const key of keys) {
+    if (!(key in input)) {
+      continue;
+    }
+    const value = input[key];
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
+function deriveHistoryModuleVariants(featureFlags, rawVariants) {
+  const variants = new Set();
+  for (const variant of Array.isArray(rawVariants) ? rawVariants : []) {
+    const text = String(variant || "").trim();
+    if (text) {
+      variants.add(text);
+    }
+  }
+
+  const flags = normalizeHistoryFeatureFlags(featureFlags);
+  const pushPair = (key, value) => {
+    variants.add(`${key}=${String(value)}`);
+  };
+
+  if (Object.prototype.hasOwnProperty.call(flags, "transport_mode")) {
+    pushPair("transport", flags.transport_mode);
+  }
+  if (Object.prototype.hasOwnProperty.call(flags, "activation_precision")) {
+    pushPair("precision", flags.activation_precision);
+  }
+  if (Object.prototype.hasOwnProperty.call(flags, "rebalance_profile")) {
+    pushPair("rebalance", flags.rebalance_profile);
+  }
+  if (Object.prototype.hasOwnProperty.call(flags, "kv_cache_enabled")) {
+    pushPair("kv_cache", flags.kv_cache_enabled ? "on" : "off");
+  }
+  if (Object.prototype.hasOwnProperty.call(flags, "topology_aware_routing")) {
+    pushPair("topology", flags.topology_aware_routing ? "on" : "off");
+  }
+  if (Object.prototype.hasOwnProperty.call(flags, "persistent_sessions_enabled")) {
+    pushPair("sessions", flags.persistent_sessions_enabled ? "on" : "off");
+  }
+  if (Object.prototype.hasOwnProperty.call(flags, "backpressure_enabled")) {
+    pushPair("backpressure", flags.backpressure_enabled ? "on" : "off");
+  }
+  if (Object.prototype.hasOwnProperty.call(flags, "backpressure_queue_size")) {
+    pushPair("queue", flags.backpressure_queue_size);
+  }
+
+  return [...variants].slice(0, 64);
+}
+
 function normalizeHistoryStageRows(rows) {
   return (Array.isArray(rows) ? rows : [])
     .slice(0, 32)
@@ -581,6 +657,21 @@ function normalizeHistoryEntry(input) {
   const profile = input.profile && typeof input.profile === "object" && !Array.isArray(input.profile)
     ? input.profile
     : {};
+  const output = input.output && typeof input.output === "object" && !Array.isArray(input.output)
+    ? input.output
+    : {};
+  const normalizedFeatureFlags = normalizeHistoryFeatureFlags(profile.featureFlags);
+  const moduleVariants = deriveHistoryModuleVariants(
+    normalizedFeatureFlags,
+    profile.moduleVariants
+  );
+  const generatedText = sanitizeHistoryText(output.generatedText, 24000);
+  const assistantMessage = sanitizeHistoryText(output.assistantMessage, 24000);
+  const terminationReason = sanitizeHistoryText(output.terminationReason, 256);
+  const outputPreview = sanitizeHistoryText(
+    generatedText || assistantMessage || output.preview,
+    320
+  );
 
   const record = {
     id: Number(nextHistorySeq++),
@@ -605,9 +696,8 @@ function normalizeHistoryEntry(input) {
       enabledModules: Array.isArray(profile.enabledModules)
         ? profile.enabledModules.map((item) => String(item)).slice(0, 32)
         : [],
-      featureFlags: profile.featureFlags && typeof profile.featureFlags === "object" && !Array.isArray(profile.featureFlags)
-        ? profile.featureFlags
-        : {}
+      featureFlags: normalizedFeatureFlags,
+      moduleVariants
     },
     metrics: {
       generatedTokens: Math.max(0, Math.round(toFiniteNumber(metrics.generatedTokens, 0))),
@@ -630,6 +720,12 @@ function normalizeHistoryEntry(input) {
         : {},
       perStage: normalizeHistoryStageRows(metrics.perStage),
       perNode: normalizeHistoryNodeRows(metrics.perNode)
+    },
+    output: {
+      generatedText,
+      assistantMessage,
+      terminationReason,
+      preview: outputPreview
     }
   };
 
@@ -701,6 +797,48 @@ async function appendHistoryRecords(records) {
   });
   await historyWriteChain;
   return normalized;
+}
+
+async function deleteHistoryRecords({ ids = [], all = false } = {}) {
+  await ensureHistoryLoaded();
+
+  const normalizedIds = new Set(
+    (Array.isArray(ids) ? ids : [])
+      .map((id) => Number.parseInt(String(id), 10))
+      .filter((id) => Number.isFinite(id) && id > 0)
+  );
+
+  if (!all && normalizedIds.size === 0) {
+    return {
+      deleted: 0,
+      remaining: historyEntries.length,
+      totalStored: historyEntries.length
+    };
+  }
+
+  historyWriteChain = historyWriteChain.then(async () => {
+    if (all) {
+      historyEntries.splice(0, historyEntries.length);
+    } else {
+      for (let i = historyEntries.length - 1; i >= 0; i -= 1) {
+        const entryId = Number.parseInt(String(historyEntries[i]?.id || 0), 10);
+        if (normalizedIds.has(entryId)) {
+          historyEntries.splice(i, 1);
+        }
+      }
+    }
+    await compactHistoryFile();
+  });
+
+  const before = historyEntries.length;
+  await historyWriteChain;
+  const after = historyEntries.length;
+
+  return {
+    deleted: Math.max(0, before - after),
+    remaining: after,
+    totalStored: after
+  };
 }
 
 function sendJson(res, statusCode, payload) {
@@ -1582,19 +1720,26 @@ function handleRuntime(req, res, query) {
 
 async function handleHistory(req, res, query) {
   const method = (req.method || "GET").toUpperCase();
+
   if (method === "GET") {
     const typeFilter = String(query.get("type") || "").trim().toLowerCase();
     const namespaceFilter = String(query.get("namespace") || "").trim();
     const limit = clampNumber(query.get("limit"), 1, 5000, 300);
+
     await ensureHistoryLoaded();
+
     let rows = historyEntries;
+
     if (typeFilter === "endpoint" || typeFilter === "chat") {
       rows = rows.filter((row) => String(row.type || "") === typeFilter);
     }
+
     if (namespaceFilter) {
       rows = rows.filter((row) => String(row.namespace || "") === namespaceFilter);
     }
+
     const selected = rows.slice(-limit).reverse();
+
     sendJson(res, 200, {
       generatedAt: new Date().toISOString(),
       totalStored: historyEntries.length,
@@ -1604,12 +1749,39 @@ async function handleHistory(req, res, query) {
     return;
   }
 
+  if (method === "DELETE") {
+    let payload = {};
+
+    try {
+      payload = await readJsonBody(req, { maxBytes: 64 * 1024 });
+    } catch (error) {
+      sendJson(res, 400, {
+        ok: false,
+        error: String(error.message || error)
+      });
+      return;
+    }
+
+    const result = await deleteHistoryRecords({
+      ids: payload.ids,
+      all: payload.all === true
+    });
+
+    sendJson(res, 200, {
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      ...result
+    });
+    return;
+  }
+
   if (method !== "POST") {
-    sendJson(res, 405, { error: "Use GET or POST for /api/history." });
+    sendJson(res, 405, { error: "Use GET, POST, or DELETE for /api/history." });
     return;
   }
 
   let payload = {};
+
   try {
     payload = await readJsonBody(req, { maxBytes: 4 * 1024 * 1024 });
   } catch (error) {
@@ -1622,16 +1794,19 @@ async function handleHistory(req, res, query) {
     : payload.entry
     ? [payload.entry]
     : [];
+
   if (!rawEntries.length) {
     sendJson(res, 400, { error: "Missing history entry payload." });
     return;
   }
+
   if (rawEntries.length > 50) {
     sendJson(res, 400, { error: "Too many entries in one request (max 50)." });
     return;
   }
 
   const saved = await appendHistoryRecords(rawEntries);
+
   sendJson(res, 200, {
     saved: saved.length,
     ids: saved.map((entry) => entry.id)

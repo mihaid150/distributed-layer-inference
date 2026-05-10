@@ -11,11 +11,15 @@ const els = {
   historyTableBody: document.getElementById("historyTableBody"),
   compareA: document.getElementById("compareA"),
   compareB: document.getElementById("compareB"),
-  compareSummary: document.getElementById("compareSummary")
+  compareSummary: document.getElementById("compareSummary"),
+  historyDeleteSelectedBtn: document.getElementById("historyDeleteSelectedBtn"),
+  historyClearAllBtn: document.getElementById("historyClearAllBtn"),
+  historySelectAll: document.getElementById("historySelectAll"),
 };
 
 const CHART_PALETTE = ["#5db2ff", "#24c38e", "#f0b429", "#f05c7a", "#9a7cff"];
 let historyRows = [];
+let selectedHistoryIds = new Set();
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -38,6 +42,143 @@ function formatNumber(value, digits = 2) {
     return "-";
   }
   return n.toFixed(digits);
+}
+
+function describeFeatureVariants(profileValue) {
+  const profile = asObject(profileValue);
+  const explicit = asArray(profile.moduleVariants)
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+  if (explicit.length) {
+    return explicit.join(", ");
+  }
+  const flags = asObject(profile.featureFlags);
+  const pairs = [];
+  if ("transport_mode" in flags) {
+    pairs.push(`transport=${String(flags.transport_mode)}`);
+  }
+  if ("activation_precision" in flags) {
+    pairs.push(`precision=${String(flags.activation_precision)}`);
+  }
+  if ("rebalance_profile" in flags) {
+    pairs.push(`rebalance=${String(flags.rebalance_profile)}`);
+  }
+  if ("kv_cache_enabled" in flags) {
+    pairs.push(`kv_cache=${flags.kv_cache_enabled ? "on" : "off"}`);
+  }
+  if ("topology_aware_routing" in flags) {
+    pairs.push(`topology=${flags.topology_aware_routing ? "on" : "off"}`);
+  }
+  if ("persistent_sessions_enabled" in flags) {
+    pairs.push(`sessions=${flags.persistent_sessions_enabled ? "on" : "off"}`);
+  }
+  if ("backpressure_enabled" in flags) {
+    pairs.push(`backpressure=${flags.backpressure_enabled ? "on" : "off"}`);
+  }
+  if ("backpressure_queue_size" in flags) {
+    pairs.push(`queue=${String(flags.backpressure_queue_size)}`);
+  }
+  return pairs.join(", ");
+}
+
+function getOutputText(rowValue) {
+  const output = asObject(asObject(rowValue).output);
+  const generated = String(output.generatedText || "").trim();
+  const assistant = String(output.assistantMessage || "").trim();
+  const preview = String(output.preview || "").trim();
+  return generated || assistant || preview || "";
+}
+
+function getOutputTermination(rowValue) {
+  const output = asObject(asObject(rowValue).output);
+  return String(output.terminationReason || "").trim();
+}
+
+function formatOutputPreview(text, maxLen = 180) {
+  const clean = String(text || "").trim();
+  if (!clean) {
+    return "-";
+  }
+  if (clean.length <= maxLen) {
+    return clean;
+  }
+  return `${clean.slice(0, maxLen - 1)}…`;
+}
+
+function updateDeleteControls() {
+  if (els.historyDeleteSelectedBtn) {
+    els.historyDeleteSelectedBtn.disabled = selectedHistoryIds.size === 0;
+    els.historyDeleteSelectedBtn.textContent =
+      selectedHistoryIds.size > 0
+        ? `Delete selected (${selectedHistoryIds.size})`
+        : "Delete selected";
+  }
+
+  if (els.historySelectAll) {
+    const visibleIds = historyRows.map((row) => Number(row.id)).filter(Number.isFinite);
+    const allSelected =
+      visibleIds.length > 0 && visibleIds.every((id) => selectedHistoryIds.has(id));
+
+    els.historySelectAll.checked = allSelected;
+    els.historySelectAll.indeterminate =
+      !allSelected && visibleIds.some((id) => selectedHistoryIds.has(id));
+  }
+}
+
+async function deleteHistory(ids, { all = false } = {}) {
+  const payload = all ? { all: true } : { ids };
+
+  const res = await fetch("/api/history", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`${res.status} ${res.statusText}: ${text}`);
+  }
+
+  return res.json();
+}
+
+async function deleteSelectedHistoryRuns() {
+  const ids = [...selectedHistoryIds];
+  if (!ids.length) {
+    return;
+  }
+
+  const confirmed = window.confirm(
+    `Delete ${ids.length} selected history run${ids.length === 1 ? "" : "s"}?`
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    await deleteHistory(ids);
+    selectedHistoryIds.clear();
+    await refreshHistory();
+  } catch (error) {
+    els.historyMeta.textContent = `Delete error: ${error.message}`;
+  }
+}
+
+async function clearAllHistoryRuns() {
+  const confirmed = window.confirm(
+    "Clear all stored history runs? This cannot be undone."
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    await deleteHistory([], { all: true });
+    selectedHistoryIds.clear();
+    await refreshHistory();
+  } catch (error) {
+    els.historyMeta.textContent = `Clear error: ${error.message}`;
+  }
 }
 
 function buildLineChartSvg(series, { width = 920, height = 210 } = {}) {
@@ -187,6 +328,12 @@ function renderCompareSummary() {
   const cB = asObject(runB.config);
   const pA = asObject(runA.profile);
   const pB = asObject(runB.profile);
+  const variantA = describeFeatureVariants(pA) || "-";
+  const variantB = describeFeatureVariants(pB) || "-";
+  const outputA = getOutputText(runA);
+  const outputB = getOutputText(runB);
+  const outputTermA = getOutputTermination(runA);
+  const outputTermB = getOutputTermination(runB);
 
   const deltas = [
     ["Latency (ms)", mB.latencyMs, mA.latencyMs],
@@ -248,6 +395,13 @@ function renderCompareSummary() {
           <tr><td>Profile</td><td>${pA.baseline ? "baseline" : "modules"}</td><td>${pB.baseline ? "baseline" : "modules"}</td></tr>
           <tr><td>Modules</td><td>${escapeHtml(asArray(pA.enabledModules).join(", ") || "-")}</td><td>${escapeHtml(
             asArray(pB.enabledModules).join(", ") || "-"
+          )}</td></tr>
+          <tr><td>Feature Variants</td><td>${escapeHtml(variantA)}</td><td>${escapeHtml(variantB)}</td></tr>
+          <tr><td>Output Preview</td><td>${escapeHtml(formatOutputPreview(outputA, 220))}</td><td>${escapeHtml(
+            formatOutputPreview(outputB, 220)
+          )}</td></tr>
+          <tr><td>Termination</td><td>${escapeHtml(outputTermA || "-")}</td><td>${escapeHtml(
+            outputTermB || "-"
           )}</td></tr>
         </tbody>
       </table>
@@ -312,7 +466,8 @@ function renderCharts() {
 
 function renderTable() {
   if (!historyRows.length) {
-    els.historyTableBody.innerHTML = "<tr><td colspan='20'>No history rows.</td></tr>";
+    els.historyTableBody.innerHTML = "<tr><td colspan='23'>No history rows.</td></tr>";
+    updateDeleteControls();
     return;
   }
 
@@ -322,11 +477,38 @@ function renderTable() {
       const metrics = asObject(row.metrics);
       const profile = asObject(row.profile);
       const modules = asArray(profile.enabledModules);
+      const variantText = describeFeatureVariants(profile) || "-";
+      const outputText = getOutputText(row);
+      const outputPreview = formatOutputPreview(outputText, 180);
+      const outputTermination = getOutputTermination(row);
       const profileHtml = profile.baseline
         ? `<span class="history-badge baseline">baseline</span>`
         : `<span class="history-badge modules">${escapeHtml(modules.join(", ") || "modules")}</span>`;
+      const outputHtml = outputText
+        ? `
+          <details class="history-output-details">
+            <summary>${escapeHtml(outputPreview)}</summary>
+            <pre class="history-output-pre">${escapeHtml(outputText)}</pre>
+            ${
+              outputTermination
+                ? `<div class="muted">stop: ${escapeHtml(outputTermination)}</div>`
+                : ""
+            }
+          </details>
+        `
+        : "-";
+
       return `
         <tr>
+          <td>
+            <input
+              class="history-row-select"
+              type="checkbox"
+              data-history-id="${row.id}"
+              ${selectedHistoryIds.has(Number(row.id)) ? "checked" : ""}
+              title="Select run #${row.id}"
+            />
+          </td>
           <td>${row.id}</td>
           <td>${escapeHtml(new Date(row.createdAt).toLocaleString())}</td>
           <td>${escapeHtml(row.type)}</td>
@@ -347,10 +529,31 @@ function renderTable() {
           <td>${formatNumber(metrics.maxMemoryMb, 1)}</td>
           <td>${formatNumber(metrics.networkMib, 3)}</td>
           <td>${profileHtml}</td>
+          <td>${escapeHtml(variantText)}</td>
+          <td>${outputHtml}</td>
         </tr>
       `;
     })
     .join("");
+
+  document.querySelectorAll(".history-row-select").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const id = Number.parseInt(String(checkbox.dataset.historyId || ""), 10);
+      if (!Number.isFinite(id)) {
+        return;
+      }
+
+      if (checkbox.checked) {
+        selectedHistoryIds.add(id);
+      } else {
+        selectedHistoryIds.delete(id);
+      }
+
+      updateDeleteControls();
+    });
+  });
+
+  updateDeleteControls();
 }
 
 async function fetchJson(url) {
@@ -377,6 +580,10 @@ async function refreshHistory() {
   try {
     const payload = await fetchJson(`/api/history?${query.toString()}`);
     historyRows = asArray(payload.entries).filter((row) => row && typeof row === "object");
+    const visibleIds = new Set(historyRows.map((row) => Number(row.id)));
+    selectedHistoryIds = new Set(
+        [...selectedHistoryIds].filter((id) => visibleIds.has(Number(id)))
+    );
     els.historyMeta.textContent = `stored=${payload.totalStored} shown=${payload.returned} updated=${new Date(
       payload.generatedAt
     ).toLocaleString()}`;
@@ -402,6 +609,24 @@ els.historyNamespace.addEventListener("change", refreshHistory);
 els.historyLimit.addEventListener("change", refreshHistory);
 els.compareA.addEventListener("change", renderCompareSummary);
 els.compareB.addEventListener("change", renderCompareSummary);
+els.historyDeleteSelectedBtn.addEventListener("click", deleteSelectedHistoryRuns);
+els.historyClearAllBtn.addEventListener("click", clearAllHistoryRuns);
+
+els.historySelectAll.addEventListener("change", () => {
+  const visibleIds = historyRows.map((row) => Number(row.id)).filter(Number.isFinite);
+
+  if (els.historySelectAll.checked) {
+    for (const id of visibleIds) {
+      selectedHistoryIds.add(id);
+    }
+  } else {
+    for (const id of visibleIds) {
+      selectedHistoryIds.delete(id);
+    }
+  }
+
+  renderTable();
+});
 
 const initialNs = new URLSearchParams(window.location.search).get("namespace");
 if (initialNs) {

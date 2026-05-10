@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException
 from requests import RequestException
 from transformers import AutoTokenizer
 
+from dli.common.feature_flags import FeatureFlags
 from dli.common.logging_config import configure_logging
 from dli.feature_modules.catalog import FEATURE_MODULE_CATALOG
 from dli.feature_modules.persistent_backpressure import GatewayBackpressureGuard
@@ -42,7 +43,50 @@ def load_gateway_config() -> GatewayConfig:
         service_name=gateway_data.get("service_name", "inference-gateway"),
         first_stage_url=first_stage_url,
         model_name=model_name,
+        topology_route_candidates=_load_topology_route_candidates(config_data),
+        topology_probe_timeout_seconds=float(
+            (config_data.get("topology") or {}).get("probe_timeout_seconds", 0.25)
+        ),
     )
+
+
+def _load_topology_route_candidates(config_data: Dict[str, Any]) -> Dict[str, list[str]]:
+    route_candidates: Dict[str, list[str]] = {}
+
+    for stage in config_data.get("inference_stages", []) or []:
+        stage_id = str(stage.get("stage_id", ""))
+        if not stage_id:
+            continue
+
+        candidates = stage.get("route_candidates")
+        if candidates is None:
+            candidates = [stage.get("next_stage_url")] if stage.get("next_stage_url") else []
+        if isinstance(candidates, str):
+            candidates = [candidates]
+        if not isinstance(candidates, list):
+            continue
+
+        route_candidates[stage_id] = [
+            str(url).strip()
+            for url in candidates
+            if isinstance(url, str) and str(url).strip()
+        ]
+
+    topology_data = config_data.get("topology") or {}
+    explicit_candidates = topology_data.get("route_candidates") or {}
+    if isinstance(explicit_candidates, dict):
+        for stage_id, candidates in explicit_candidates.items():
+            if isinstance(candidates, str):
+                candidates = [candidates]
+            if not isinstance(candidates, list):
+                continue
+            route_candidates[str(stage_id)] = [
+                str(url).strip()
+                for url in candidates
+                if isinstance(url, str) and str(url).strip()
+            ]
+
+    return route_candidates
 
 
 gateway_config = load_gateway_config()
@@ -56,6 +100,8 @@ stage_client = StageClient(first_stage_url=gateway_config.first_stage_url)
 generation_loop = GenerationLoop(
     tokenizer=tokenizer,
     stage_client=stage_client,
+    topology_route_candidates=gateway_config.topology_route_candidates,
+    topology_probe_timeout_seconds=gateway_config.topology_probe_timeout_seconds,
 )
 backpressure_guard = GatewayBackpressureGuard()
 
@@ -80,6 +126,8 @@ def config() -> Dict[str, Any]:
         "service_name": gateway_config.service_name,
         "model_name": gateway_config.model_name,
         "first_stage_url": gateway_config.first_stage_url,
+        "topology_route_candidates": gateway_config.topology_route_candidates,
+        "optimized_module_profile": FeatureFlags.optimized_module_profile(),
         "feature_modules": FEATURE_MODULE_CATALOG,
     }
 

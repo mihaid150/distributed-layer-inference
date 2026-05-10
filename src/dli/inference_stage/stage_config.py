@@ -21,6 +21,7 @@ class StageConfig:
     service_name: str
     physical_node: str
     partition_file: str
+    partition_profiles: Dict[str, str]
     components: StageComponents
     next_stage_url: Optional[str]
 
@@ -44,6 +45,12 @@ def load_stage_config(stage_id: Optional[int] = None) -> StageConfig:
             components = stage["components"]
 
             next_stage_url = os.getenv("NEXT_STAGE_URL", stage.get("next_stage_url"))
+            partition_file = os.getenv(
+                "PARTITION_FILE",
+                os.getenv("STAGE_PARTITION_FILE", stage["partition_file"]),
+            )
+            partition_profiles = dict(stage.get("partition_profiles") or {})
+            partition_profiles.setdefault("baseline", partition_file)
 
             if next_stage_url == "":
                 next_stage_url = None
@@ -52,7 +59,8 @@ def load_stage_config(stage_id: Optional[int] = None) -> StageConfig:
                 stage_id=stage_id,
                 service_name=stage["service_name"],
                 physical_node=stage["physical_node"],
-                partition_file=stage["partition_file"],
+                partition_file=partition_file,
+                partition_profiles=partition_profiles,
                 components=StageComponents(
                     embedding=bool(components.get("embedding", False)),
                     layers=list(components.get("layers", [])),

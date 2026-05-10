@@ -267,6 +267,9 @@ def write_stage_map_yaml(
                 "service_name": f"{stage_service_prefix}-{stage_id}",
                 "physical_node": physical_node,
                 "partition_file": f"{container_model_dir}/stage_{stage_id}.pt",
+                "partition_profiles": {
+                    "baseline": f"{container_model_dir}/stage_{stage_id}.pt",
+                },
                 "components": {
                     "embedding": stage.include_embedding,
                     "layers": stage.layer_indices,
@@ -274,6 +277,7 @@ def write_stage_map_yaml(
                     "lm_head": stage.include_lm_head,
                 },
                 "next_stage_url": next_url,
+                "route_candidates": [next_url] if next_url else [],
             }
         )
 
@@ -286,6 +290,16 @@ def write_stage_map_yaml(
             "first_stage_url": f"http://{stage_service_prefix}-1:{stage_port}/forward",
         },
         "inference_stages": stages,
+        "topology": {
+            "probe_timeout_seconds": 0.25,
+            "route_candidates": {
+                str(stage.stage_id): [
+                    f"http://{stage_service_prefix}-{stage.stage_id + 1}:{stage_port}/forward"
+                ]
+                for stage in plan.stages
+                if stage.stage_id < plan.num_stages
+            },
+        },
     }
 
     output_file.parent.mkdir(parents=True, exist_ok=True)

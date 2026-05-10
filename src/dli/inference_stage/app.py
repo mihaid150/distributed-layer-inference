@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import requests
 import torch
@@ -14,7 +14,7 @@ from dli.common.schemas import HealthResponse, StageForwardRequest, StageForward
 from dli.common.timing import elapsed_ms, now_ms
 from dli.feature_modules.activation_payload_precision import ActivationPayloadPrecisionModule
 from dli.feature_modules.activation_transport_binary import BinaryTransportModule
-from dli.feature_modules.kv_cache_stage import StageForwardCache
+from dli.feature_modules.kv_cache_stage import StageForwardCache, StageKVCacheManager
 from dli.feature_modules.partition_rebalance import PartitionRebalanceModule
 from dli.feature_modules.persistent_backpressure import PersistentSessionPool
 from dli.feature_modules.topology_aware_routing import TopologyAwareRoutingModule
@@ -31,15 +31,57 @@ STAGE_CACHE_ENTRIES = int(os.getenv("STAGE_KV_CACHE_MAX_ENTRIES", "64"))
 stage_config: StageConfig = load_stage_config()
 logger = configure_logging(stage_config.service_name)
 
-loader = ModelPartitionLoader(
-    partition_file=stage_config.partition_file,
-    device=DEVICE,
-)
 
-partition = loader.load()
-executor = StageExecutor(partition=partition, device=DEVICE)
+class StageExecutorRegistry:
+    def __init__(self, config: StageConfig, device: str) -> None:
+        self.config = config
+        self.device = device
+        self._executors: Dict[str, tuple[StageExecutor, str, bool]] = {}
+
+    def get(self, profile: str) -> tuple[StageExecutor, str, bool]:
+        partition_file, runtime_applied = PartitionRebalanceModule.resolve_partition_file(
+            profile=profile,
+            partition_profiles=self.config.partition_profiles,
+            baseline_partition_file=self.config.partition_file,
+        )
+        selected_profile = profile if runtime_applied or profile == "baseline" else "baseline"
+
+        if not os.path.exists(partition_file):
+            logger.warning(
+                "Partition profile %s points to missing file %s; falling back to baseline.",
+                profile,
+                partition_file,
+            )
+            selected_profile = "baseline"
+            partition_file = self.config.partition_file
+            runtime_applied = False
+
+        cached = self._executors.get(selected_profile)
+        if cached is not None and cached[1] == partition_file:
+            return cached
+
+        loader = ModelPartitionLoader(partition_file=partition_file, device=self.device)
+        partition = loader.load()
+        executor = StageExecutor(
+            partition=partition,
+            device=self.device,
+            stage_id=self.config.stage_id,
+        )
+        record = (executor, partition_file, runtime_applied)
+        self._executors[selected_profile] = record
+        logger.info(
+            "Loaded partition profile=%s file=%s layers=%s",
+            selected_profile,
+            partition_file,
+            partition.metadata.get("layer_indices"),
+        )
+        return record
+
+
+executor_registry = StageExecutorRegistry(stage_config, DEVICE)
 codec = ActivationCodec()
 stage_forward_cache = StageForwardCache(max_entries=STAGE_CACHE_ENTRIES)
+stage_kv_cache = StageKVCacheManager(max_entries=STAGE_CACHE_ENTRIES)
 
 app = FastAPI(
     title=f"Inference Stage {stage_config.stage_id}",
@@ -102,7 +144,11 @@ async def forward_binary(raw_request: Request) -> Response:
             raise TypeError("Binary envelope is missing tensor blob.")
 
         request = StageForwardRequest(**request_dict)
-        input_tensor = codec.decode_tensor_raw(bytes(tensor_blob))
+        tensor_blob = BinaryTransportModule.restore_tensor_blob(
+            tensor_blob=bytes(tensor_blob),
+            metadata=request.transport.get("payload_compression", {}),
+        )
+        input_tensor = codec.decode_tensor_raw(tensor_blob)
         compression_meta = request.transport.get("compression", {})
         input_tensor = ActivationPayloadPrecisionModule.restore_tensor(
             input_tensor,
@@ -130,26 +176,64 @@ def _run_forward_flow(
     inbound_payload_bytes: int,
 ) -> StageForwardResponse:
     feature_flags = request.feature_flags
+    rebalance_profile = PartitionRebalanceModule.profile(feature_flags)
+    executor, partition_file, rebalance_runtime_applied = executor_registry.get(
+        rebalance_profile
+    )
+    generation_mode = str(request.metadata.get("generation_mode") or "legacy")
+    cache_position_start = _optional_int(request.metadata.get("cache_position_start"))
+    use_transformer_kv_cache = (
+        StageKVCacheManager.is_enabled(feature_flags)
+        and generation_mode in {"prefill", "decode"}
+    )
 
     compute_start = now_ms()
-    cache_hit = False
+    forward_dedupe_hit = False
     cache_key = None
+    kv_cache_created = False
+    kv_cache_present = False
+    kv_cache_seq_before = 0
+    kv_cache_seq_after = 0
 
     if StageForwardCache.is_enabled(feature_flags):
         cache_key = StageForwardCache.build_key(
             request_id=request.request_id,
             token_index=request.token_index,
             tensor=input_tensor,
+            generation_mode=generation_mode,
+            cache_position_start=cache_position_start,
         )
         cached = stage_forward_cache.get(cache_key)
         if cached is not None:
-            cache_hit = True
+            forward_dedupe_hit = True
             output_tensor = cached
         else:
-            output_tensor = _execute_stage_forward(input_tensor)
+            output_tensor, kv_cache_created, kv_cache_present, kv_cache_seq_before, kv_cache_seq_after = _execute_stage_forward_with_cache_policy(
+                input_tensor=input_tensor,
+                executor=executor,
+                request=request,
+                use_transformer_kv_cache=use_transformer_kv_cache,
+                generation_mode=generation_mode,
+                cache_position_start=cache_position_start,
+            )
             stage_forward_cache.put(cache_key, output_tensor)
     else:
-        output_tensor = _execute_stage_forward(input_tensor)
+        output_tensor, kv_cache_created, kv_cache_present, kv_cache_seq_before, kv_cache_seq_after = _execute_stage_forward_with_cache_policy(
+            input_tensor=input_tensor,
+            executor=executor,
+            request=request,
+            use_transformer_kv_cache=use_transformer_kv_cache,
+            generation_mode=generation_mode,
+            cache_position_start=cache_position_start,
+        )
+
+    if forward_dedupe_hit and use_transformer_kv_cache:
+        kv_cache_present = stage_kv_cache.get(request.request_id) is not None
+        kv_cache_seq_after = stage_kv_cache.seq_length(
+            request_id=request.request_id,
+            layer_idx=executor.first_cache_layer_idx,
+        )
+        kv_cache_seq_before = kv_cache_seq_after
 
     compute_time_ms = elapsed_ms(compute_start)
     input_tensor_bytes = int(input_tensor.numel() * input_tensor.element_size())
@@ -170,10 +254,26 @@ def _run_forward_flow(
             "inbound_payload_b64_bytes": inbound_payload_bytes,
             "inbound_payload_bytes": inbound_payload_bytes,
             "kv_cache_enabled": feature_flags.kv_cache_enabled,
-            "kv_cache_hit": cache_hit,
-            "kv_cache_entries": stage_forward_cache.size() if feature_flags.kv_cache_enabled else 0,
-            "rebalance_profile": PartitionRebalanceModule.profile(feature_flags),
+            "kv_cache_mode": generation_mode,
+            "kv_cache_present": kv_cache_present,
+            "kv_cache_created": kv_cache_created,
+            "kv_cache_seq_before": kv_cache_seq_before,
+            "kv_cache_seq_after": kv_cache_seq_after,
+            "kv_cache_entries": stage_kv_cache.size() if feature_flags.kv_cache_enabled else 0,
+            "kv_forward_dedupe_hit": forward_dedupe_hit,
+            "kv_forward_dedupe_entries": stage_forward_cache.size()
+            if feature_flags.kv_cache_enabled
+            else 0,
+            "rebalance_profile": rebalance_profile,
+            "rebalance_runtime_applied": rebalance_runtime_applied,
+            "partition_file": partition_file,
             "transport_encoding": request.transport.get("encoding", "json_base64"),
+            "payload_compression": request.transport.get(
+                "payload_compression",
+                {"mode": "none", "applied": False},
+            ),
+            "torch_threads": executor.thread_config,
+            "lm_head_quantization": executor.lm_head_quantization,
             "feature_modules": feature_flags.enabled_module_keys(),
         },
     )
@@ -190,15 +290,86 @@ def _run_forward_flow(
 
     return _finalize_response(
         request=request,
+        executor=executor,
         hidden_states=output_tensor,
         accumulated_metrics=accumulated_metrics,
     )
 
 
-def _execute_stage_forward(input_tensor: torch.Tensor) -> torch.Tensor:
+def _optional_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _execute_stage_forward_with_cache_policy(
+    *,
+    input_tensor: torch.Tensor,
+    executor: StageExecutor,
+    request: StageForwardRequest,
+    use_transformer_kv_cache: bool,
+    generation_mode: str,
+    cache_position_start: Optional[int],
+) -> tuple[torch.Tensor, bool, bool, int, int]:
+    if not use_transformer_kv_cache:
+        output_tensor = _execute_stage_forward(input_tensor=input_tensor, executor=executor)
+        return output_tensor, False, False, 0, 0
+
+    if executor.cache_config is None:
+        raise HTTPException(
+            status_code=400,
+            detail="KV cache mode is enabled, but this stage partition does not expose a cache-compatible config.",
+        )
+
+    if generation_mode == "prefill":
+        stage_kv_cache.reset(request.request_id)
+    elif generation_mode == "decode" and stage_kv_cache.get(request.request_id) is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Decode request arrived before a prefill KV cache existed for "
+                f"request_id={request.request_id}."
+            ),
+        )
+
+    kv_entry, kv_cache_created = stage_kv_cache.get_or_create(
+        request_id=request.request_id,
+        config=executor.cache_config,
+    )
+
+    with kv_entry.lock:
+        kv_cache_seq_before = executor.get_cache_seq_length(kv_entry.cache)
+        output_tensor = _execute_stage_forward(
+            input_tensor=input_tensor,
+            executor=executor,
+            past_key_values=kv_entry.cache,
+            use_cache=True,
+            cache_position_start=cache_position_start,
+        )
+        kv_cache_seq_after = executor.get_cache_seq_length(kv_entry.cache)
+
+    return output_tensor, kv_cache_created, True, kv_cache_seq_before, kv_cache_seq_after
+
+
+def _execute_stage_forward(
+    *,
+    input_tensor: torch.Tensor,
+    executor: StageExecutor,
+    past_key_values: Optional[Any] = None,
+    use_cache: bool = False,
+    cache_position_start: Optional[int] = None,
+) -> torch.Tensor:
     try:
         with torch.no_grad():
-            return executor.forward(input_tensor)
+            return executor.forward(
+                input_tensor,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                cache_position_start=cache_position_start,
+            )
     except Exception as exc:
         logger.exception("Stage execution failed.")
         raise HTTPException(
@@ -238,6 +409,10 @@ def _forward_to_next_stage(
     try:
         if BinaryTransportModule.is_enabled(feature_flags):
             tensor_blob = codec.encode_tensor_raw(encoded_tensor)
+            tensor_blob, payload_compression_meta = BinaryTransportModule.prepare_tensor_blob(
+                tensor_blob=tensor_blob,
+                flags=feature_flags,
+            )
             next_request = StageForwardRequest(
                 request_id=request.request_id,
                 token_index=request.token_index,
@@ -249,6 +424,7 @@ def _forward_to_next_stage(
                 transport={
                     "encoding": "binary_octet_stream",
                     "compression": compression_meta,
+                    "payload_compression": payload_compression_meta,
                 },
                 feature_flags=feature_flags,
             )
@@ -276,6 +452,7 @@ def _forward_to_next_stage(
                 transport={
                     "encoding": "json_base64",
                     "compression": compression_meta,
+                    "payload_compression": {"mode": "none", "applied": False},
                 },
                 feature_flags=feature_flags,
             )
@@ -332,6 +509,12 @@ def _forward_to_next_stage(
             )
             response_metrics[local_metric_index]["next_stage_url"] = next_stage_url
             response_metrics[local_metric_index]["next_stage_response_payload_bytes"] = response_payload_bytes
+            response_metrics[local_metric_index]["payload_compression"] = (
+                next_request.transport.get("payload_compression", {})
+            )
+            response_metrics[local_metric_index]["persistent_session_pool"] = (
+                PersistentSessionPool.snapshot()
+            )
     response_payload["metrics"] = response_metrics
 
     return StageForwardResponse(**response_payload)
@@ -340,13 +523,15 @@ def _forward_to_next_stage(
 def _finalize_response(
     *,
     request: StageForwardRequest,
+    executor: StageExecutor,
     hidden_states: torch.Tensor,
     accumulated_metrics: list[Dict[str, Any]],
 ) -> StageForwardResponse:
     finalize_start = now_ms()
 
     try:
-        logits = executor.finalize_logits(hidden_states)
+        finalize_result = executor.finalize_logits_profiled(hidden_states)
+        logits = finalize_result.logits
 
         temperature = float(request.metadata.get("temperature", 0.0))
         top_k = request.metadata.get("top_k")
@@ -367,6 +552,7 @@ def _finalize_response(
                 forbidden_token_ids.append(int(eos_token_id))
             forbidden_token_ids = sorted(set(forbidden_token_ids))
 
+        select_start = now_ms()
         next_token_id = executor.select_next_token(
             logits=logits,
             temperature=temperature,
@@ -374,6 +560,7 @@ def _finalize_response(
             top_p=top_p,
             forbidden_token_ids=forbidden_token_ids,
         )
+        select_time_ms = elapsed_ms(select_start)
 
     except Exception as exc:
         logger.exception("Final stage failed.")
@@ -393,8 +580,15 @@ def _finalize_response(
         extra={
             "operation": "finalize_logits",
             "logits_shape": list(logits.shape),
+            "hidden_states_shape": list(hidden_states.shape),
+            "stage4_norm_ms": finalize_result.profile.norm_time_ms,
+            "stage4_lm_head_ms": finalize_result.profile.lm_head_time_ms,
+            "stage4_select_ms": select_time_ms,
+            "stage4_last_token_only": finalize_result.profile.last_token_only,
             "next_token_id": next_token_id,
             "transport_encoding": request.transport.get("encoding", "json_base64"),
+            "torch_threads": executor.thread_config,
+            "lm_head_quantization": executor.lm_head_quantization,
             "feature_modules": request.feature_flags.enabled_module_keys(),
         },
     )

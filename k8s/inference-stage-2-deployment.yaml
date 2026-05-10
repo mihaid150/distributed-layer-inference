@@ -23,44 +23,54 @@ spec:
           args:
             - |
               set -eu
-              FILE="stage_${STAGE_ID}.pt"
-              URL="https://huggingface.co/${HF_STAGE_REPO}/resolve/${HF_STAGE_REVISION}/${FILE}"
-              echo "Downloading ${URL}"
-              export FILE URL HF_TOKEN
+              FILES="stage_${STAGE_ID}.pt"
+              if [ "${FETCH_REBALANCE_PARTITIONS:-true}" = "true" ]; then
+                FILES="${FILES} latency_balanced_v1/stage_${STAGE_ID}.pt"
+              fi
+              export FILES HF_STAGE_REPO HF_STAGE_REVISION HF_TOKEN REBALANCE_PARTITIONS_REQUIRED
               python - <<'PY'
               import os
               import pathlib
               import time
               import urllib.request
 
-              file_name = os.environ["FILE"]
-              url = os.environ["URL"]
+              file_names = [item for item in os.environ["FILES"].split() if item]
+              repo = os.environ["HF_STAGE_REPO"]
+              revision = os.environ["HF_STAGE_REVISION"]
               token = os.environ["HF_TOKEN"]
+              require_optional = os.environ.get("REBALANCE_PARTITIONS_REQUIRED", "false").lower() == "true"
               timeout_seconds = float(os.environ.get("HF_DOWNLOAD_TIMEOUT_SECONDS", "900"))
-              output_path = pathlib.Path("/models") / file_name
               headers = {"Authorization": f"Bearer {token}"}
 
-              last_error = None
-              for attempt in range(1, 7):
-                  try:
-                      request = urllib.request.Request(url, headers=headers)
-                      with urllib.request.urlopen(request, timeout=timeout_seconds) as response, output_path.open("wb") as handle:
-                          while True:
-                              chunk = response.read(1024 * 1024)
-                              if not chunk:
-                                  break
-                              handle.write(chunk)
-                      print(f"Downloaded {output_path}")
-                      break
-                  except Exception as exc:
-                      last_error = exc
-                      print(f"Attempt {attempt}/6 failed: {exc}", flush=True)
-                      if attempt < 6:
-                          time.sleep(3)
-              else:
-                  raise SystemExit(f"Download failed after 6 attempts: {last_error}")
+              for file_name in file_names:
+                  url = f"https://huggingface.co/{repo}/resolve/{revision}/{file_name}"
+                  output_path = pathlib.Path("/models") / file_name
+                  output_path.parent.mkdir(parents=True, exist_ok=True)
+                  print(f"Downloading {url}")
+                  last_error = None
+                  for attempt in range(1, 7):
+                      try:
+                          request = urllib.request.Request(url, headers=headers)
+                          with urllib.request.urlopen(request, timeout=timeout_seconds) as response, output_path.open("wb") as handle:
+                              while True:
+                                  chunk = response.read(1024 * 1024)
+                                  if not chunk:
+                                      break
+                                  handle.write(chunk)
+                          print(f"Downloaded {output_path}")
+                          break
+                      except Exception as exc:
+                          last_error = exc
+                          print(f"Attempt {attempt}/6 failed for {file_name}: {exc}", flush=True)
+                          if attempt < 6:
+                              time.sleep(3)
+                  else:
+                      if "/" in file_name and not require_optional:
+                          print(f"Optional partition {file_name} unavailable: {last_error}", flush=True)
+                          continue
+                      raise SystemExit(f"Download failed after 6 attempts for {file_name}: {last_error}")
               PY
-              ls -lh "/models/${FILE}"
+              find /models -maxdepth 2 -type f -name "stage_${STAGE_ID}.pt" -exec ls -lh {} \;
           env:
             - name: STAGE_ID
               value: "2"
@@ -86,7 +96,7 @@ spec:
               mountPath: /models
       containers:
         - name: inference-stage-2
-          image: mipeda150/distributed-layer-inference-stage:v2026-08-05-2300
+          image: mipeda150/distributed-layer-inference-stage:v2026-10-05-1200
           imagePullPolicy: Always
           env:
             - name: STAGE_ID

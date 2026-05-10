@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 TransportMode = Literal["json_base64", "binary_octet_stream"]
 ActivationPrecision = Literal["fp32", "fp16", "bf16", "int8"]
 RebalanceProfile = Literal["baseline", "latency_balanced_v1"]
+PayloadCompression = Literal["none", "zlib"]
 
 
 class FeatureFlags(BaseModel):
@@ -23,7 +24,14 @@ class FeatureFlags(BaseModel):
     )
     activation_precision: ActivationPrecision = Field(
         default="fp32",
-        description="Tensor precision/compression for inter-stage activations.",
+        description=(
+            "Tensor precision/compression for inter-stage activations. FP16 is the"
+            " optimized module-profile default; INT8 is experimental."
+        ),
+    )
+    payload_compression: PayloadCompression = Field(
+        default="none",
+        description="Optional lightweight compression for binary activation payloads.",
     )
     kv_cache_enabled: bool = Field(
         default=False,
@@ -55,12 +63,23 @@ class FeatureFlags(BaseModel):
         ),
     )
 
+    @staticmethod
+    def optimized_module_profile() -> dict[str, object]:
+        return {
+            "transport_mode": "binary_octet_stream",
+            "activation_precision": "fp16",
+            "payload_compression": "none",
+            "persistent_sessions_enabled": True,
+        }
+
     def enabled_module_keys(self) -> list[str]:
         keys: list[str] = []
         if self.transport_mode != "json_base64":
             keys.append("binary_transport")
         if self.activation_precision != "fp32":
             keys.append("activation_precision")
+        if self.payload_compression != "none":
+            keys.append("payload_compression")
         if self.kv_cache_enabled:
             keys.append("kv_cache")
         if self.rebalance_profile != "baseline":

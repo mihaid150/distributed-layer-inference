@@ -13,6 +13,7 @@ class ModelPartition:
     layers: List[nn.Module]
     norm: Optional[nn.Module]
     lm_head: Optional[nn.Module]
+    metadata: dict
 
 
 class ModelPartitionLoader:
@@ -48,6 +49,7 @@ class ModelPartitionLoader:
         layers = checkpoint.get("layers", [])
         norm = checkpoint.get("norm")
         lm_head = checkpoint.get("lm_head")
+        metadata = checkpoint.get("metadata") or {}
 
         if embedding is not None:
             embedding = embedding.to(self.device)
@@ -72,4 +74,5 @@ class ModelPartitionLoader:
             layers=prepared_layers,
             norm=norm,
             lm_head=lm_head,
+            metadata=dict(metadata),
         )

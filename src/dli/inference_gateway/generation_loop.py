@@ -16,6 +16,7 @@ from dli.common.schemas import (
 )
 from dli.common.timing import elapsed_ms, now_ms
 from dli.feature_modules.partition_rebalance import PartitionRebalanceModule
+from dli.feature_modules.topology_aware_routing import TopologyAwareRoutingModule
 from dli.inference_stage.activation_codec import ActivationCodec
 from dli.inference_gateway.stage_client import StageClient
 
@@ -35,10 +36,14 @@ class GenerationLoop:
         *,
         tokenizer: AutoTokenizer,
         stage_client: StageClient,
+        topology_route_candidates: Optional[Dict[str, List[str]]] = None,
+        topology_probe_timeout_seconds: float = 0.25,
     ) -> None:
         self.tokenizer = tokenizer
         self.stage_client = stage_client
         self.codec = ActivationCodec()
+        self.topology_route_candidates = topology_route_candidates or {}
+        self.topology_probe_timeout_seconds = topology_probe_timeout_seconds
 
     def generate(self, request: GenerateRequest) -> GenerateResponse:
         request_id = str(uuid.uuid4())
@@ -67,11 +72,30 @@ class GenerationLoop:
 
         for token_index in range(request.max_new_tokens):
             step_start = now_ms()
+            use_prefill_decode = bool(feature_flags.kv_cache_enabled)
+            current_sequence_length = int(input_ids.shape[-1])
+
+            if use_prefill_decode and token_index > 0:
+                stage_input_tensor = input_ids[:, -1:].contiguous()
+                generation_mode = "decode"
+                cache_position_start: Optional[int] = current_sequence_length - 1
+            else:
+                stage_input_tensor = input_ids
+                generation_mode = "prefill" if use_prefill_decode else "legacy"
+                cache_position_start = 0 if use_prefill_decode else None
+
+            topology_route_overrides = TopologyAwareRoutingModule.build_route_overrides(
+                flags=feature_flags,
+                route_candidates=self.topology_route_candidates,
+                probe_timeout_seconds=self.topology_probe_timeout_seconds,
+            )
 
             encode_start = now_ms()
-            tensor_b64, tensor_dtype, tensor_shape = self.codec.encode_tensor(input_ids)
+            tensor_b64, tensor_dtype, tensor_shape = self.codec.encode_tensor(stage_input_tensor)
             encode_time_ms = elapsed_ms(encode_start)
-            input_tensor_bytes = int(input_ids.numel() * input_ids.element_size())
+            input_tensor_bytes = int(
+                stage_input_tensor.numel() * stage_input_tensor.element_size()
+            )
             outbound_payload_b64_bytes = len(tensor_b64.encode("utf-8"))
 
             stage_request = StageForwardRequest(
@@ -89,7 +113,13 @@ class GenerationLoop:
                     "forbidden_token_ids_before_min": special_token_ids,
                     "top_k": request.top_k,
                     "top_p": request.top_p,
-                    "current_sequence_length": int(input_ids.shape[-1]),
+                    "current_sequence_length": current_sequence_length,
+                    "prompt_token_count": prompt_token_count,
+                    "generation_mode": generation_mode,
+                    "use_transformer_kv_cache": use_prefill_decode,
+                    "cache_position_start": cache_position_start,
+                    "stage_input_token_count": int(stage_input_tensor.shape[-1]),
+                    "topology_route_overrides": topology_route_overrides,
                 },
                 metrics=[],
                 transport={"encoding": "json_base64"},
@@ -98,7 +128,7 @@ class GenerationLoop:
 
             stage_result = self.stage_client.forward_with_transport(
                 stage_request,
-                input_tensor=input_ids,
+                input_tensor=stage_input_tensor,
             )
             stage_response = stage_result.response
 
@@ -124,6 +154,14 @@ class GenerationLoop:
                     "input_tensor_bytes": input_tensor_bytes,
                     "outbound_payload_b64_bytes": outbound_payload_b64_bytes,
                     "outbound_payload_mebibytes": outbound_payload_b64_bytes / (1024.0 * 1024.0),
+                    "outbound_payload_bytes": int(
+                        stage_result.transport.get("request_payload_bytes", 0)
+                    ),
+                    "generation_mode": generation_mode,
+                    "current_sequence_length": current_sequence_length,
+                    "stage_input_shape": list(stage_input_tensor.shape),
+                    "stage_input_token_count": int(stage_input_tensor.shape[-1]),
+                    "cache_position_start": cache_position_start,
                     "stage1_request_payload_bytes": int(
                         stage_result.transport.get("request_payload_bytes", 0)
                     ),
@@ -135,11 +173,17 @@ class GenerationLoop:
                     ),
                     "stage1_url": stage_result.transport.get("url"),
                     "transport_encoding": stage_result.transport.get("encoding"),
+                    "payload_compression": stage_result.transport.get("payload_compression"),
+                    "persistent_session_pool": stage_result.transport.get(
+                        "persistent_session_pool"
+                    ),
+                    "topology_route_overrides": topology_route_overrides,
                     "feature_modules": feature_flags.enabled_module_keys(),
                 },
             )
             stage_metrics = list(stage_response.metrics)
             stage_metrics.append(gateway_metric)
+            TopologyAwareRoutingModule.observe_stage_metrics(stage_metrics)
 
             token_metrics.append(
                 TokenStepMetric(
@@ -267,8 +311,10 @@ class GenerationLoop:
         total_compute_ms = 0.0
         total_transfer_ms = 0.0
         total_payload_b64_bytes = 0
+        total_payload_bytes = 0
         total_network_delta_bytes = 0
         max_process_memory_mb = 0.0
+        token_latencies_ms = [float(item.latency_ms) for item in token_metrics]
 
         for token_metric in token_metrics:
             for metric in token_metric.stage_metrics:
@@ -287,15 +333,22 @@ class GenerationLoop:
                         "compute_time_ms_sum": 0.0,
                         "transfer_time_ms_sum": 0.0,
                         "payload_b64_bytes_sum": 0,
+                        "payload_bytes_sum": 0,
                         "network_delta_bytes_sum": 0,
                         "max_process_memory_mb": 0.0,
                         "max_cpu_percent": 0.0,
+                        "stage4_norm_ms_sum": 0.0,
+                        "stage4_lm_head_ms_sum": 0.0,
+                        "stage4_select_ms_sum": 0.0,
                     },
                 )
 
                 compute_time = float(metric.get("compute_time_ms", 0.0))
                 transfer_time = float(metric.get("transfer_time_ms", 0.0))
                 payload_b64_bytes = int(metric.get("outbound_payload_b64_bytes", 0))
+                payload_bytes = int(
+                    metric.get("outbound_payload_bytes", payload_b64_bytes)
+                )
                 network_delta = metric.get("network_delta", {}) or {}
                 network_delta_bytes = int(
                     network_delta.get(
@@ -311,21 +364,33 @@ class GenerationLoop:
                 bucket["compute_time_ms_sum"] += compute_time
                 bucket["transfer_time_ms_sum"] += transfer_time
                 bucket["payload_b64_bytes_sum"] += payload_b64_bytes
+                bucket["payload_bytes_sum"] += payload_bytes
                 bucket["network_delta_bytes_sum"] += network_delta_bytes
                 bucket["max_process_memory_mb"] = max(
                     float(bucket["max_process_memory_mb"]), process_memory_mb
                 )
                 bucket["max_cpu_percent"] = max(float(bucket["max_cpu_percent"]), cpu_percent)
+                bucket["stage4_norm_ms_sum"] += float(metric.get("stage4_norm_ms", 0.0))
+                bucket["stage4_lm_head_ms_sum"] += float(metric.get("stage4_lm_head_ms", 0.0))
+                bucket["stage4_select_ms_sum"] += float(metric.get("stage4_select_ms", 0.0))
 
                 total_compute_ms += compute_time
                 total_transfer_ms += transfer_time
                 total_payload_b64_bytes += payload_b64_bytes
+                total_payload_bytes += payload_bytes
                 total_network_delta_bytes += network_delta_bytes
                 max_process_memory_mb = max(max_process_memory_mb, process_memory_mb)
 
+        stage4_bucket = per_stage.get("stage_4") or {}
+        generated_token_count = len(token_metrics)
+        stage4_compute_sum = float(stage4_bucket.get("compute_time_ms_sum", 0.0))
+        comm_compute_ratio = (
+            total_transfer_ms / total_compute_ms if total_compute_ms > 0.0 else 0.0
+        )
+
         return {
             "prompt_token_count": prompt_token_count,
-            "generated_token_count": len(token_metrics),
+            "generated_token_count": generated_token_count,
             "total_latency_ms": total_latency_ms,
             "feature_flags": feature_flags,
             "enabled_modules": [
@@ -333,6 +398,7 @@ class GenerationLoop:
                 for name, enabled in {
                     "binary_transport": feature_flags.get("transport_mode") == "binary_octet_stream",
                     "activation_precision": feature_flags.get("activation_precision") != "fp32",
+                    "payload_compression": feature_flags.get("payload_compression") != "none",
                     "kv_cache": bool(feature_flags.get("kv_cache_enabled")),
                     "rebalance": feature_flags.get("rebalance_profile") != "baseline",
                     "topology_aware": bool(feature_flags.get("topology_aware_routing")),
@@ -346,11 +412,41 @@ class GenerationLoop:
             "aggregate": {
                 "compute_time_ms_sum": total_compute_ms,
                 "transfer_time_ms_sum": total_transfer_ms,
+                "comm_compute_ratio": comm_compute_ratio,
                 "payload_b64_bytes_sum": total_payload_b64_bytes,
                 "payload_b64_mebibytes_sum": total_payload_b64_bytes / (1024.0 * 1024.0),
+                "payload_bytes_sum": total_payload_bytes,
+                "payload_mebibytes_sum": total_payload_bytes / (1024.0 * 1024.0),
                 "network_delta_bytes_sum": total_network_delta_bytes,
                 "network_delta_mebibytes_sum": total_network_delta_bytes / (1024.0 * 1024.0),
                 "max_process_memory_mb": max_process_memory_mb,
+                "stage4_compute_time_ms_sum": stage4_compute_sum,
+                "stage4_compute_time_ms_per_token": (
+                    stage4_compute_sum / generated_token_count
+                    if generated_token_count > 0
+                    else 0.0
+                ),
+                "stage4_norm_ms_sum": float(stage4_bucket.get("stage4_norm_ms_sum", 0.0)),
+                "stage4_lm_head_ms_sum": float(
+                    stage4_bucket.get("stage4_lm_head_ms_sum", 0.0)
+                ),
+                "stage4_select_ms_sum": float(stage4_bucket.get("stage4_select_ms_sum", 0.0)),
+                "token_latency_ms_p50": self._percentile(token_latencies_ms, 50.0),
+                "token_latency_ms_p95": self._percentile(token_latencies_ms, 95.0),
+                "token_latency_ms_p99": self._percentile(token_latencies_ms, 99.0),
             },
             "per_stage": per_stage,
         }
+
+    @staticmethod
+    def _percentile(values: List[float], percentile: float) -> float:
+        if not values:
+            return 0.0
+        ordered = sorted(values)
+        if len(ordered) == 1:
+            return ordered[0]
+        rank = (percentile / 100.0) * (len(ordered) - 1)
+        lower = int(rank)
+        upper = min(lower + 1, len(ordered) - 1)
+        weight = rank - lower
+        return (ordered[lower] * (1.0 - weight)) + (ordered[upper] * weight)

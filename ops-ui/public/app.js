@@ -43,6 +43,7 @@ const els = {
   featureFlagsResetBtn: document.getElementById("featureFlagsResetBtn"),
   endpointBody: document.getElementById("endpointBody"),
   invokeEndpointBtn: document.getElementById("invokeEndpointBtn"),
+  invokeClearRunsBtn: document.getElementById("invokeClearRunsBtn"),
   invokeMeta: document.getElementById("invokeMeta"),
   invokeMetricsDashboard: document.getElementById("invokeMetricsDashboard"),
   invokeOutput: document.getElementById("invokeOutput"),
@@ -305,6 +306,18 @@ function getFeatureFlagProfileChips(featureFlags) {
     `backpressure=${toBool(flags.backpressure_enabled) ? "on" : "off"}`,
     `queue=${safeText(flags.backpressure_queue_size ?? "-")}`
   ];
+}
+
+function buildHistoryOutputPayload(responseJson) {
+  const response = asObject(responseJson);
+  const generatedText = String(response.generated_text || "");
+  const assistantMessage = String(response.assistant_message || "");
+  const terminationReason = String(response.termination_reason || "");
+  return {
+    generatedText,
+    assistantMessage,
+    terminationReason
+  };
 }
 
 function buildTopologyHash() {
@@ -2169,7 +2182,8 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
       profile: {
         baseline: runSummary.isBaseline,
         enabledModules: runSummary.enabled_modules,
-        featureFlags: runSummary.feature_flags
+        featureFlags: runSummary.feature_flags,
+        moduleVariants: getFeatureFlagProfileChips(runSummary.feature_flags)
       },
       metrics: {
         generatedTokens: runSummary.generatedTokens,
@@ -2190,7 +2204,8 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
         criticalPath: runSummary.criticalPath,
         perStage: runSummary.perStage,
         perNode: runSummary.perNode
-      }
+      },
+      output: buildHistoryOutputPayload(responseJson)
     }
   ]);
 
@@ -3191,7 +3206,8 @@ async function sendChatTurn() {
         profile: {
           baseline: turnSummary.is_baseline,
           enabledModules: turnSummary.enabled_modules,
-          featureFlags: turnSummary.feature_flags
+          featureFlags: turnSummary.feature_flags,
+          moduleVariants: getFeatureFlagProfileChips(turnSummary.feature_flags)
         },
         metrics: {
           generatedTokens: turnSummary.generated_tokens,
@@ -3215,7 +3231,8 @@ async function sendChatTurn() {
             ...asObject(stage)
           })),
           perNode: Object.values(asObject(turnSummary.per_node)).map((node) => asObject(node))
-        }
+        },
+        output: buildHistoryOutputPayload(response)
       }
     ]);
 
@@ -3245,6 +3262,18 @@ function clearChatSession() {
   renderArchitectureGuide();
   persistSessionState();
   els.chatMeta.innerHTML = `<div class="log-pill">Chat session cleared.</div>`;
+}
+
+function clearEndpointRunSession() {
+  invokeRuns = [];
+  latestInvokeFeatureFlags = null;
+  latestInvokeEnabledModules = [];
+  persistSessionState();
+  renderArchitectureGuide();
+  els.invokeMeta.innerHTML = `<div class="log-pill">Endpoint session results cleared.</div>`;
+  els.invokeMetricsDashboard.innerHTML =
+    `<div class="muted">No endpoint run history in this browser session yet.</div>`;
+  els.invokeOutput.textContent = "";
 }
 
 function exportChatMetrics() {
@@ -3356,6 +3385,9 @@ if (els.featureFlagsResetBtn) {
   });
 }
 els.invokeEndpointBtn.addEventListener("click", invokeEndpoint);
+if (els.invokeClearRunsBtn) {
+  els.invokeClearRunsBtn.addEventListener("click", clearEndpointRunSession);
+}
 els.chatSendBtn.addEventListener("click", sendChatTurn);
 els.chatClearBtn.addEventListener("click", clearChatSession);
 els.chatExportBtn.addEventListener("click", exportChatMetrics);

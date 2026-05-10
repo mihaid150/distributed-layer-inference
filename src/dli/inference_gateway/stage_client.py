@@ -78,6 +78,10 @@ class StageClient:
             transport_encoding = "binary_octet_stream"
             target_url = BinaryTransportModule.resolve_forward_url(self.first_stage_url)
             tensor_blob = self.codec.encode_tensor_raw(encoded_tensor)
+            tensor_blob, payload_compression_meta = BinaryTransportModule.prepare_tensor_blob(
+                tensor_blob=tensor_blob,
+                flags=flags,
+            )
             request_payload = request.model_dump()
             request_payload["tensor_b64"] = ""
             request_payload["tensor_dtype"] = str(encoded_tensor.dtype)
@@ -85,6 +89,7 @@ class StageClient:
             request_payload["transport"] = {
                 "encoding": transport_encoding,
                 "compression": compression_meta,
+                "payload_compression": payload_compression_meta,
             }
 
             packed = BinaryTransportModule.pack_request(
@@ -106,6 +111,7 @@ class StageClient:
             request_payload["transport"] = {
                 "encoding": transport_encoding,
                 "compression": compression_meta,
+                "payload_compression": {"mode": "none", "applied": False},
             }
             request_payload_bytes = len(
                 json.dumps(
@@ -143,6 +149,11 @@ class StageClient:
                 if transfer_time_ms > 0.0
                 else 0.0
             ),
+            "payload_compression": request_payload.get("transport", {}).get(
+                "payload_compression",
+                {"mode": "none", "applied": False},
+            ),
+            "persistent_session_pool": PersistentSessionPool.snapshot(),
         }
 
         return StageForwardResult(response=stage_response, transport=transport)

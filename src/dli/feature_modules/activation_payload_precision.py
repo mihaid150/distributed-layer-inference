@@ -68,10 +68,28 @@ class ActivationPayloadPrecisionModule:
             return tensor.to(torch.float32) * scale
 
         if mode == "fp16":
-            return tensor.to(torch.float16)
+            return tensor.to(
+                ActivationPayloadPrecisionModule._dtype_from_name(
+                    str((metadata or {}).get("source_dtype") or "torch.float32")
+                )
+            )
 
         if mode == "bf16":
-            return tensor.to(torch.bfloat16)
+            return tensor.to(
+                ActivationPayloadPrecisionModule._dtype_from_name(
+                    str((metadata or {}).get("source_dtype") or "torch.float32")
+                )
+            )
 
         return tensor
 
+    @staticmethod
+    def _dtype_from_name(dtype_name: str) -> torch.dtype:
+        normalized = dtype_name.replace("torch.", "").lower()
+        if normalized in {"float16", "fp16", "half"}:
+            return torch.float16
+        if normalized in {"bfloat16", "bf16"}:
+            return torch.bfloat16
+        if normalized in {"float64", "double"}:
+            return torch.float64
+        return torch.float32

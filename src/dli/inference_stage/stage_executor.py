@@ -1,13 +1,29 @@
 from __future__ import annotations
 
 import inspect
-from typing import Iterable, Optional
+import os
+from dataclasses import dataclass
+from typing import Any, Iterable, Optional
 
 import torch
 from torch import nn
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, create_causal_mask
 
+from dli.common.timing import elapsed_ms, now_ms
 from dli.inference_stage.model_partition_loader import ModelPartition
+
+
+@dataclass(frozen=True)
+class FinalizeLogitsProfile:
+    norm_time_ms: float
+    lm_head_time_ms: float
+    last_token_only: bool
+
+
+@dataclass(frozen=True)
+class FinalizeLogitsResult:
+    logits: torch.Tensor
+    profile: FinalizeLogitsProfile
 
 
 class StageExecutor:
@@ -19,12 +35,23 @@ class StageExecutor:
     Final stage applies remaining layers, norm, lm_head, and produces logits.
     """
 
-    def __init__(self, partition: ModelPartition, device: str = "cpu") -> None:
+    def __init__(
+        self,
+        partition: ModelPartition,
+        device: str = "cpu",
+        *,
+        stage_id: Optional[int] = None,
+    ) -> None:
         self.partition = partition
         self.device = torch.device(device)
+        self.stage_id = stage_id
         self._layer_forward_signatures: dict[int, tuple[set[str], bool]] = {}
+        self._cache_layer_indices: list[int] = []
+        self._original_cache_layer_indices: list[int] = []
         self._llama_config = None
         self._rotary_embedding = None
+        self.thread_config = self._configure_torch_threads()
+        self.lm_head_quantization = self._configure_lm_head_quantization()
 
         if self.partition.layers:
             first_layer = self.partition.layers[0]
@@ -37,7 +64,14 @@ class StageExecutor:
                 )
                 self._rotary_embedding.eval()
 
-        for layer in self.partition.layers:
+        for local_layer_idx, layer in enumerate(self.partition.layers):
+            self_attn = getattr(layer, "self_attn", None)
+            layer_idx = getattr(self_attn, "layer_idx", None)
+            if layer_idx is not None:
+                self._original_cache_layer_indices.append(int(layer_idx))
+                setattr(self_attn, "layer_idx", local_layer_idx)
+                self._cache_layer_indices.append(local_layer_idx)
+
             signature = inspect.signature(layer.forward)
             parameter_names = set(signature.parameters.keys())
             has_var_keyword = any(
@@ -47,14 +81,26 @@ class StageExecutor:
             self._layer_forward_signatures[id(layer)] = (parameter_names, has_var_keyword)
 
     @torch.no_grad()
-    def forward(self, input_tensor: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input_tensor: torch.Tensor,
+        *,
+        past_key_values: Optional[Any] = None,
+        use_cache: bool = False,
+        cache_position_start: Optional[int] = None,
+    ) -> torch.Tensor:
         x = input_tensor.to(self.device)
 
         if self.partition.embedding is not None:
             x = x.long()
             x = self.partition.embedding(x)
 
-        layer_kwargs = self._build_llama_layer_kwargs(x)
+        layer_kwargs = self._build_llama_layer_kwargs(
+            x,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            cache_position_start=cache_position_start,
+        )
 
         for layer in self.partition.layers:
             x = self._run_transformer_layer(layer, x, layer_kwargs)
@@ -63,6 +109,10 @@ class StageExecutor:
 
     @torch.no_grad()
     def finalize_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.finalize_logits_profiled(hidden_states).logits
+
+    @torch.no_grad()
+    def finalize_logits_profiled(self, hidden_states: torch.Tensor) -> FinalizeLogitsResult:
         x = hidden_states.to(self.device)
 
         if self.partition.norm is None:
@@ -71,10 +121,25 @@ class StageExecutor:
         if self.partition.lm_head is None:
             raise RuntimeError("Final stage requires lm_head, but lm_head is missing.")
 
-        x = self.partition.norm(x)
-        logits = self.partition.lm_head(x)
+        if x.ndim == 3 and x.shape[1] > 0:
+            x = x[:, -1:, :].contiguous()
 
-        return logits
+        norm_start = now_ms()
+        x = self.partition.norm(x)
+        norm_time_ms = elapsed_ms(norm_start)
+
+        lm_head_start = now_ms()
+        logits = self.partition.lm_head(x)
+        lm_head_time_ms = elapsed_ms(lm_head_start)
+
+        return FinalizeLogitsResult(
+            logits=logits,
+            profile=FinalizeLogitsProfile(
+                norm_time_ms=norm_time_ms,
+                lm_head_time_ms=lm_head_time_ms,
+                last_token_only=True,
+            ),
+        )
 
     @staticmethod
     def select_next_token(
@@ -129,7 +194,14 @@ class StageExecutor:
 
         return int(selected.item())
 
-    def _build_llama_layer_kwargs(self, hidden_states: torch.Tensor) -> dict[str, object]:
+    def _build_llama_layer_kwargs(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        past_key_values: Optional[Any],
+        use_cache: bool,
+        cache_position_start: Optional[int],
+    ) -> dict[str, object]:
         if self._rotary_embedding is None or self._llama_config is None:
             return {}
 
@@ -137,8 +209,16 @@ class StageExecutor:
             return {}
 
         batch_size, sequence_length, _ = hidden_states.shape
+        if cache_position_start is None:
+            cache_position_start = self.get_cache_seq_length(past_key_values)
+
         position_ids = (
-            torch.arange(sequence_length, device=hidden_states.device, dtype=torch.long)
+            torch.arange(
+                cache_position_start,
+                cache_position_start + sequence_length,
+                device=hidden_states.device,
+                dtype=torch.long,
+            )
             .unsqueeze(0)
             .expand(batch_size, -1)
         )
@@ -147,17 +227,21 @@ class StageExecutor:
             config=self._llama_config,
             inputs_embeds=hidden_states,
             attention_mask=None,
-            past_key_values=None,
+            past_key_values=past_key_values if use_cache else None,
             position_ids=position_ids,
         )
         position_embeddings = self._rotary_embedding(hidden_states, position_ids=position_ids)
 
-        return {
+        kwargs: dict[str, object] = {
             "attention_mask": attention_mask,
             "position_ids": position_ids,
             "position_embeddings": position_embeddings,
-            "use_cache": False,
+            "use_cache": use_cache,
         }
+        if use_cache and past_key_values is not None:
+            kwargs["past_key_values"] = past_key_values
+
+        return kwargs
 
     def _filter_layer_kwargs(
         self,
@@ -193,3 +277,113 @@ class StageExecutor:
             return output[0]
 
         return output
+
+    def get_cache_seq_length(self, past_key_values: Optional[Any]) -> int:
+        if past_key_values is None:
+            return 0
+
+        layer_idx = self._cache_layer_indices[0] if self._cache_layer_indices else 0
+        try:
+            return int(past_key_values.get_seq_length(layer_idx))
+        except Exception:
+            return 0
+
+    @property
+    def cache_config(self) -> Optional[Any]:
+        return self._llama_config
+
+    @property
+    def first_cache_layer_idx(self) -> int:
+        return self._cache_layer_indices[0] if self._cache_layer_indices else 0
+
+    def _configure_torch_threads(self) -> dict[str, Optional[int]]:
+        requested_num_threads = self._read_thread_setting("TORCH_NUM_THREADS")
+        if requested_num_threads is None:
+            requested_num_threads = self._read_thread_setting("OMP_NUM_THREADS")
+        requested_interop_threads = self._read_thread_setting("TORCH_INTEROP_NUM_THREADS")
+
+        if requested_num_threads is not None and requested_num_threads > 0:
+            torch.set_num_threads(requested_num_threads)
+
+        if requested_interop_threads is not None and requested_interop_threads > 0:
+            try:
+                torch.set_num_interop_threads(requested_interop_threads)
+            except RuntimeError:
+                pass
+
+        return {
+            "requested_num_threads": requested_num_threads,
+            "actual_num_threads": int(torch.get_num_threads()),
+            "requested_interop_threads": requested_interop_threads,
+            "actual_interop_threads": int(torch.get_num_interop_threads()),
+            "omp_num_threads_env": self._read_thread_setting("OMP_NUM_THREADS"),
+        }
+
+    def _read_thread_setting(self, suffix: str) -> Optional[int]:
+        keys = []
+        if self.stage_id is not None:
+            keys.append(f"STAGE_{self.stage_id}_{suffix}")
+            keys.append(f"STAGE{self.stage_id}_{suffix}")
+        keys.extend([f"STAGE_{suffix}", f"DLI_{suffix}", suffix])
+
+        for key in keys:
+            raw_value = os.getenv(key)
+            if raw_value is None or raw_value.strip() == "":
+                continue
+            try:
+                return int(raw_value)
+            except ValueError:
+                continue
+        return None
+
+    def _configure_lm_head_quantization(self) -> dict[str, object]:
+        mode = self._read_string_setting("LM_HEAD_QUANTIZATION") or "none"
+        result: dict[str, object] = {
+            "mode": mode,
+            "applied": False,
+        }
+
+        if mode in {"", "none", "off", "false"}:
+            result["mode"] = "none"
+            return result
+
+        if self.partition.lm_head is None:
+            result["skipped_reason"] = "lm_head_missing"
+            return result
+
+        if self.device.type != "cpu":
+            result["skipped_reason"] = "dynamic_quantization_cpu_only"
+            return result
+
+        if mode not in {"dynamic_int8", "int8"}:
+            result["skipped_reason"] = f"unsupported_mode:{mode}"
+            return result
+
+        try:
+            self.partition.lm_head = torch.quantization.quantize_dynamic(
+                self.partition.lm_head,
+                {nn.Linear},
+                dtype=torch.qint8,
+            )
+            self.partition.lm_head.eval()
+            result.update({"mode": "dynamic_int8", "applied": True})
+        except Exception as exc:
+            result["skipped_reason"] = str(exc)
+
+        return result
+
+    def _read_string_setting(self, suffix: str) -> Optional[str]:
+        keys = []
+        if self.stage_id is not None:
+            keys.append(f"STAGE_{self.stage_id}_{suffix}")
+            keys.append(f"STAGE{self.stage_id}_{suffix}")
+        keys.extend([f"STAGE_{suffix}", f"DLI_{suffix}", suffix])
+
+        for key in keys:
+            raw_value = os.getenv(key)
+            if raw_value is None:
+                continue
+            value = raw_value.strip().lower()
+            if value:
+                return value
+        return None
