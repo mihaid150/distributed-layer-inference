@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1.7
+
+ARG BASE_IMAGE=debian:bookworm-slim
+
+FROM ${BASE_IMAGE} AS build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+COPY src/native/ ./native/
+
+RUN cmake -S native -B out -DCMAKE_BUILD_TYPE=Release
+RUN cmake --build out --target dli-gateway-cpp -j"$(nproc)"
+
+FROM debian:bookworm-slim AS runtime
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /build/out/bin/dli-gateway-cpp /app/bin/dli-gateway-cpp
+COPY configs/ ./configs/
+
+ENV DLI_GATEWAY_RUNTIME=cpp-native
+ENV STAGE_MAP_PATH=/app/configs/stage_map.yaml
+
+EXPOSE 8000
+
+CMD ["/app/bin/dli-gateway-cpp", "--config", "/app/configs/stage_map.yaml", "--port", "8000"]

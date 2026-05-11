@@ -1,32 +1,16 @@
-cmake_minimum_required(VERSION 3.20)
-
-project(dli_stage_cpp LANGUAGES CXX)
-
-add_library(dli-stage-core STATIC
-    src/metadata.cpp
-    src/protocol.cpp
+add_executable(dli-stage-cpp
+    src/main.cpp
     src/server.cpp
     src/runtimes/stub_runtime.cpp
+    src/runtimes/llama_partial_runtime.cpp
 )
 
-target_include_directories(dli-stage-core PUBLIC
+target_include_directories(dli-stage-cpp PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-target_compile_features(dli-stage-core PUBLIC cxx_std_17)
-
-target_compile_options(dli-stage-core PRIVATE
-    -Wall
-    -Wextra
-    -Wpedantic
-)
-
-add_executable(dli-stage-cpp
-    src/main.cpp
-)
-
 target_link_libraries(dli-stage-cpp PRIVATE
-    dli-stage-core
+    dli-common-cpp
 )
 
 target_compile_features(dli-stage-cpp PRIVATE cxx_std_17)
@@ -37,45 +21,10 @@ target_compile_options(dli-stage-cpp PRIVATE
     -Wpedantic
 )
 
-add_executable(test-protocol
-    tests/test_protocol.cpp
-)
-
-target_link_libraries(test-protocol PRIVATE
-    dli-stage-core
-)
-
-target_compile_features(test-protocol PRIVATE cxx_std_17)
-
-target_compile_options(test-protocol PRIVATE
-    -Wall
-    -Wextra
-    -Wpedantic
-)
-
-add_executable(test-metadata
-    tests/test_metadata.cpp
-)
-
-target_link_libraries(test-metadata PRIVATE
-    dli-stage-core
-)
-
-target_compile_features(test-metadata PRIVATE cxx_std_17)
-
-target_compile_options(test-metadata PRIVATE
-    -Wall
-    -Wextra
-    -Wpedantic
-)
-
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
-    target_compile_options(dli-stage-core PRIVATE -O3)
     target_compile_options(dli-stage-cpp PRIVATE -O3)
-    target_compile_options(test-protocol PRIVATE -O3)
-    target_compile_options(test-metadata PRIVATE -O3)
 endif()
 
-enable_testing()
-add_test(NAME test-protocol COMMAND test-protocol)
-add_test(NAME test-metadata COMMAND test-metadata)
+set_target_properties(dli-stage-cpp PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)

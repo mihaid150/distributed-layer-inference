@@ -116,9 +116,14 @@ fi
 STAGE_RUNTIME=""
 case "${SERVICE}" in
   gateway|gw|master|inference-gateway|dli-gateway)
-    SERVICE="gateway"
-    DOCKERFILE="docker/Dockerfile.gateway"
-    DEFAULT_IMAGE_REPO="${DOCKERHUB_NAMESPACE}/distributed-layer-inference-gateway"
+    SERVICE="gateway-python"
+    DOCKERFILE="docker/Dockerfile.gateway-python"
+    DEFAULT_IMAGE_REPO="${DOCKERHUB_NAMESPACE}/distributed-layer-inference-gateway-python"
+    ;;
+  gateway-cpp|gateway-native|cpp-gateway|native-gateway|dli-gateway-cpp)
+    SERVICE="gateway-cpp"
+    DOCKERFILE="docker/Dockerfile.gateway-cpp"
+    DEFAULT_IMAGE_REPO="${DOCKERHUB_NAMESPACE}/distributed-layer-inference-gateway-cpp"
     ;;
   stage|stage-python|stage-pytorch|stage-legacy|client|worker|inference-stage|dli-stage)
     SERVICE="stage-python"

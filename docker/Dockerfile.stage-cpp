@@ -29,7 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=build /build/out/dli-stage-cpp /app/bin/dli-stage-cpp
+COPY --from=build /build/out/bin/dli-stage-cpp /app/bin/dli-stage-cpp
 COPY configs/ ./configs/
 
 ENV DLI_STAGE_RUNTIME=cpp-native
