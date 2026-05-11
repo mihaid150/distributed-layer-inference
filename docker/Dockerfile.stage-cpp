@@ -7,22 +7,18 @@
 ARG BASE_IMAGE=debian:bookworm-slim
 FROM ${BASE_IMAGE}
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake git ca-certificates curl
+
+WORKDIR /build
+COPY src/native/dli_stage_cpp/ ./dli_stage_cpp/
+RUN cmake -S dli_stage_cpp -B out -DCMAKE_BUILD_TYPE=Release
+RUN cmake --build out -j$(nproc)
+
+FROM debian:bookworm-slim
 WORKDIR /app
-
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    rm -f /etc/apt/apt.conf.d/docker-clean \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
-      ca-certificates \
-      curl \
-      libstdc++6 \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY stage-runtimes/cpp/ ./stage-runtimes/cpp/
+COPY --from=build /build/out/dli-stage-cpp /app/bin/dli-stage-cpp
 COPY configs/ ./configs/
-
 ENV DLI_STAGE_RUNTIME=cpp-native
 EXPOSE 8000
-
-CMD ["/bin/sh", "-lc", "echo 'dli-stage-cpp is a runtime skeleton. Implement the native /forward-binary server before deployment.' >&2; exit 64"]
+CMD ["/app/bin/dli-stage-cpp", "--config", "/app/configs/stage_map.yaml"]

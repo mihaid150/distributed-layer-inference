@@ -123,8 +123,8 @@ case "${SERVICE}" in
   stage|stage-python|stage-pytorch|stage-legacy|client|worker|inference-stage|dli-stage)
     SERVICE="stage-python"
     STAGE_RUNTIME="python-pytorch-legacy"
-    DOCKERFILE="docker/Dockerfile.stage"
-    DEFAULT_IMAGE_REPO="${DOCKERHUB_NAMESPACE}/distributed-layer-inference-stage"
+    DOCKERFILE="docker/Dockerfile.stage-python"
+    DEFAULT_IMAGE_REPO="${DOCKERHUB_NAMESPACE}/distributed-layer-inference-stage-python"
     ;;
   stage-cpp|stage-native|cpp-stage|native-stage|dli-stage-cpp)
     SERVICE="stage-cpp"

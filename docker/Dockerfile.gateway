@@ -21,16 +21,13 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-gateway.txt
 
 # Copy only runtime packages needed by the gateway process.
-COPY src/dli/__init__.py ./src/dli/__init__.py
-COPY src/dli/common/ ./src/dli/common/
-COPY src/dli/feature_modules/ ./src/dli/feature_modules/
-COPY src/dli/inference_gateway/ ./src/dli/inference_gateway/
+COPY src/python/dli/__init__.py ./src/dli/__init__.py
+COPY src/python/dli/common/ ./src/dli/common/
+COPY src/python/dli/feature_modules/ ./src/dli/feature_modules/
+COPY src/python/dli/inference_gateway/ ./src/dli/inference_gateway/
 # Gateway generation uses the shared activation codec module.
-COPY src/dli/inference_stage/__init__.py ./src/dli/inference_stage/__init__.py
-COPY src/dli/inference_stage/activation_codec.py ./src/dli/inference_stage/activation_codec.py
-COPY src/dli/stage_runtimes/__init__.py ./src/dli/stage_runtimes/__init__.py
-COPY src/dli/stage_runtimes/python_legacy/__init__.py ./src/dli/stage_runtimes/python_legacy/__init__.py
-COPY src/dli/stage_runtimes/python_legacy/activation_codec.py ./src/dli/stage_runtimes/python_legacy/activation_codec.py
+COPY src/python/dli/inference_stage/__init__.py ./src/dli/inference_stage/__init__.py
+COPY src/python/dli/inference_stage/activation_codec.py ./src/dli/inference_stage/activation_codec.py
 
 COPY configs/ ./configs/
 

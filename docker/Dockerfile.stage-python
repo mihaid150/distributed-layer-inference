@@ -21,16 +21,15 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-stage.txt
 
 # Copy only the runtime code needed by legacy Python/PyTorch stage containers.
-COPY src/dli/__init__.py ./src/dli/__init__.py
-COPY src/dli/common/ ./src/dli/common/
-COPY src/dli/feature_modules/ ./src/dli/feature_modules/
-COPY src/dli/stage_runtimes/ ./src/dli/stage_runtimes/
-COPY src/dli/inference_stage/ ./src/dli/inference_stage/
+COPY src/python/dli/__init__.py ./src/dli/__init__.py
+COPY src/python/dli/common/ ./src/dli/common/
+COPY src/python/dli/feature_modules/ ./src/dli/feature_modules/
+COPY src/python/dli/stage_runtimes/ ./src/dli/stage_runtimes/
+COPY src/python/dli/inference_stage/ ./src/dli/inference_stage/
 
 # Stage config (includes stage map).
 COPY configs/ ./configs/
 
 ENV PYTHONPATH=/app/src
-ENV DLI_STAGE_RUNTIME=python-pytorch-legacy
 
-CMD ["uvicorn", "dli.stage_runtimes.python_legacy.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "dli.inference_stage.app:app", "--host", "0.0.0.0", "--port", "8000"]
