@@ -1,11 +1,12 @@
-#include "dli_stage/server.hpp"
 #include "dli_stage/runtimes/stub_runtime.hpp"
+#include "dli_stage/server.hpp"
+
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
-#include <memory>
 
 namespace {
 
@@ -113,7 +114,7 @@ CliOptions parse_args(int argc, char** argv) {
     return options;
 }
 
-}  // namespace
+} // namespace
 
 int main(int argc, char** argv) {
     try {

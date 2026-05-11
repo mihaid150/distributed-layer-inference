@@ -1,5 +1,6 @@
 #include "dli_stage/server.hpp"
 
+#include "dli_stage/metadata.hpp"
 #include "dli_stage/protocol.hpp"
 #include "dli_stage/runtime.hpp"
 
@@ -362,6 +363,21 @@ std::string metrics_json(const StageMetrics& metrics) {
     return out.str();
 }
 
+std::string shape_json(const std::vector<std::int64_t>& shape) {
+    std::ostringstream out;
+    out << "[";
+
+    for (std::size_t i = 0; i < shape.size(); ++i) {
+        if (i > 0) {
+            out << ",";
+        }
+        out << shape[i];
+    }
+
+    out << "]";
+    return out.str();
+}
+
 std::string runtime_response_metadata_json(
     const RuntimeResponse& response,
     const ServerConfig& config,
@@ -378,11 +394,20 @@ std::string runtime_response_metadata_json(
         << "\"stage_id\":" << config.stage_id << ","
         << "\"request_id\":\"" << json_escape(request.request_id) << "\","
         << "\"token_index\":" << request.token_index << ","
+        << "\"generation_mode\":\"" << json_escape(request.generation_mode) << "\","
         << "\"input_metadata_bytes\":" << request.input_metadata_json.size() << ","
         << "\"input_tensor_bytes\":" << request.input_tensor.bytes.size() << ","
         << "\"output_tensor_bytes\":" << response.output_tensor.bytes.size() << ","
         << "\"is_final_stage\":" << (response.is_final_stage ? "true" : "false") << ","
         << "\"next_token_id\":" << response.next_token_id << ","
+        << "\"tensor\":{"
+        << "\"dtype\":\"" << json_escape(request.input_tensor.metadata.dtype) << "\","
+        << "\"shape\":" << shape_json(request.input_tensor.metadata.shape) << ","
+        << "\"byte_order\":\"" << json_escape(request.input_tensor.metadata.byte_order) << "\""
+        << "},"
+        << "\"feature_flags\":{"
+        << "\"kv_cache_enabled\":" << (request.kv_cache_enabled ? "true" : "false")
+        << "},"
         << "\"metrics\":" << metrics_json(response.metrics)
         << "}";
 
@@ -431,18 +456,28 @@ RuntimeRequest make_runtime_request(
     const DliFrame& input,
     const ServerConfig& config
 ) {
+    const ParsedRequestMetadata parsed = parse_request_metadata(input.metadata_json);
+
     RuntimeRequest request;
     request.stage_id = config.stage_id;
     request.input_metadata_json = input.metadata_json;
     request.input_tensor.bytes = input.tensor_bytes;
 
-    // Full JSON parsing comes later. For now we keep the metadata opaque and
-    // expose enough fields for stub/runtime plumbing.
-    request.request_id = "";
-    request.token_index = 0;
-    request.generation_mode = "unknown";
-    request.input_tensor.metadata.dtype = "opaque";
-    request.input_tensor.metadata.byte_order = "little";
+    request.request_id = parsed.request_id;
+    request.token_index = parsed.token_index;
+    request.generation_mode = parsed.generation_mode;
+    request.input_tensor.metadata = parsed.tensor;
+
+    request.kv_cache_enabled = parsed.kv_cache_enabled;
+
+    request.has_temperature = parsed.has_temperature;
+    request.temperature = parsed.temperature;
+
+    request.has_top_k = parsed.has_top_k;
+    request.top_k = parsed.top_k;
+
+    request.has_top_p = parsed.has_top_p;
+    request.top_p = parsed.top_p;
 
     return request;
 }

@@ -1,5 +1,7 @@
 #include "dli_stage/runtimes/stub_runtime.hpp"
 
+#include "dli_stage/metadata.hpp"
+
 #include <chrono>
 
 namespace dli_stage {
@@ -27,11 +29,16 @@ RuntimeResponse StubRuntime::forward(const RuntimeRequest& request) {
 
     const auto end = std::chrono::steady_clock::now();
 
+    const int input_seq = infer_sequence_length_from_shape(request.input_tensor.metadata.shape);
+
     response.metrics.backend = backend_name();
     response.metrics.status = "stub_echo";
     response.metrics.compute_time_ms = elapsed_ms(start, end);
     response.metrics.input_tensor_bytes = request.input_tensor.bytes.size();
     response.metrics.output_tensor_bytes = response.output_tensor.bytes.size();
+    response.metrics.stage_input_token_count = input_seq;
+    response.metrics.stage_output_token_count = input_seq;
+    response.metrics.kv_cache_step_valid = true;
 
     return response;
 }

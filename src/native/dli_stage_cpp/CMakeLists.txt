@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 project(dli_stage_cpp LANGUAGES CXX)
 
 add_library(dli-stage-core STATIC
+    src/metadata.cpp
     src/protocol.cpp
     src/server.cpp
     src/runtimes/stub_runtime.cpp
@@ -52,11 +53,29 @@ target_compile_options(test-protocol PRIVATE
     -Wpedantic
 )
 
+add_executable(test-metadata
+    tests/test_metadata.cpp
+)
+
+target_link_libraries(test-metadata PRIVATE
+    dli-stage-core
+)
+
+target_compile_features(test-metadata PRIVATE cxx_std_17)
+
+target_compile_options(test-metadata PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
     target_compile_options(dli-stage-core PRIVATE -O3)
     target_compile_options(dli-stage-cpp PRIVATE -O3)
     target_compile_options(test-protocol PRIVATE -O3)
+    target_compile_options(test-metadata PRIVATE -O3)
 endif()
 
 enable_testing()
 add_test(NAME test-protocol COMMAND test-protocol)
+add_test(NAME test-metadata COMMAND test-metadata)

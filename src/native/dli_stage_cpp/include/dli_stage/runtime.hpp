@@ -15,6 +15,17 @@ struct RuntimeRequest {
 
     std::string input_metadata_json;
     TensorBuffer input_tensor;
+
+    bool kv_cache_enabled = false;
+
+    bool has_temperature = false;
+    double temperature = 0.0;
+
+    bool has_top_k = false;
+    int top_k = 0;
+
+    bool has_top_p = false;
+    double top_p = 0.0;
 };
 
 struct RuntimeResponse {
