@@ -102,26 +102,35 @@ cat <<EOF
 Distributed Layer Inference image builder
 -----------------------------------------
 Services:
-  gateway  -> runs on the master/control-plane node
-  stage    -> runs on worker/client nodes
+  gateway      -> runs on the master/control-plane node
+  stage-python -> legacy Python/PyTorch stage runtime
+  stage-cpp    -> native C++ stage runtime skeleton
 EOF
 
-SERVICE="$(prompt "Service to build (gateway | stage)" | lower)"
+SERVICE="$(prompt "Service to build (gateway | stage-python | stage-cpp)" | lower)"
 if [[ -z "${SERVICE}" ]]; then
   echo "Service is required." >&2
   exit 1
 fi
 
+STAGE_RUNTIME=""
 case "${SERVICE}" in
   gateway|gw|master|inference-gateway|dli-gateway)
     SERVICE="gateway"
     DOCKERFILE="docker/Dockerfile.gateway"
     DEFAULT_IMAGE_REPO="${DOCKERHUB_NAMESPACE}/distributed-layer-inference-gateway"
     ;;
-  stage|client|worker|inference-stage|dli-stage)
-    SERVICE="stage"
+  stage|stage-python|stage-pytorch|stage-legacy|client|worker|inference-stage|dli-stage)
+    SERVICE="stage-python"
+    STAGE_RUNTIME="python-pytorch-legacy"
     DOCKERFILE="docker/Dockerfile.stage"
     DEFAULT_IMAGE_REPO="${DOCKERHUB_NAMESPACE}/distributed-layer-inference-stage"
+    ;;
+  stage-cpp|stage-native|cpp-stage|native-stage|dli-stage-cpp)
+    SERVICE="stage-cpp"
+    STAGE_RUNTIME="cpp-native"
+    DOCKERFILE="docker/Dockerfile.stage-cpp"
+    DEFAULT_IMAGE_REPO="${DOCKERHUB_NAMESPACE}/distributed-layer-inference-stage-cpp"
     ;;
   *)
     echo "Unknown service: ${SERVICE}" >&2
@@ -281,8 +290,13 @@ Dockerfile     : ${DOCKERFILE}
 Build context  : ${REPO_ROOT}
 EOF
 
-if [[ "${SERVICE}" == "stage" ]]; then
-  echo "Model source   : runtime download from Hugging Face (initContainer)"
+if [[ "${SERVICE}" == stage-* ]]; then
+  echo "Stage runtime  : ${STAGE_RUNTIME}"
+fi
+if [[ "${SERVICE}" == "stage-python" ]]; then
+  echo "Model source   : PyTorch .pt partitions from Hugging Face (initContainer)"
+elif [[ "${SERVICE}" == "stage-cpp" ]]; then
+  echo "Model source   : future DLI GGUF stage shards; image is currently a skeleton"
 fi
 
 for arch in "${ARCH_SUFFIXES[@]}"; do

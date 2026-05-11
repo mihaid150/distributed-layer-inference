@@ -1,0 +1,5 @@
+# Native C++ stage runtime placeholder.
+#
+# The planned ggml/llama.cpp stage does not use Python runtime dependencies.
+# Keep build/runtime dependencies in docker/Dockerfile.stage-cpp and the future
+# CMake toolchain files.

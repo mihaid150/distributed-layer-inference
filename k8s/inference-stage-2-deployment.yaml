@@ -74,6 +74,8 @@ spec:
           env:
             - name: STAGE_ID
               value: "2"
+            - name: DLI_STAGE_RUNTIME
+              value: "python-pytorch-legacy"
             - name: HF_STAGE_REPO
               valueFrom:
                 configMapKeyRef:
@@ -101,6 +103,8 @@ spec:
           env:
             - name: STAGE_ID
               value: "2"
+            - name: DLI_STAGE_RUNTIME
+              value: "python-pytorch-legacy"
             - name: NEXT_STAGE_URL
               value: "http://inference-stage-3:8000/forward"
             - name: STAGE_MAP_PATH

@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1.7
+# Native C++ DLI stage image skeleton.
+#
+# This Dockerfile intentionally does not compile a stage server yet. It exists
+# so image/build scripts have a separate target while the C++ runtime is
+# designed under stage-runtimes/cpp.
+ARG BASE_IMAGE=debian:bookworm-slim
+FROM ${BASE_IMAGE}
+
+WORKDIR /app
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+      libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY stage-runtimes/cpp/ ./stage-runtimes/cpp/
+COPY configs/ ./configs/
+
+ENV DLI_STAGE_RUNTIME=cpp-native
+EXPOSE 8000
+
+CMD ["/bin/sh", "-lc", "echo 'dli-stage-cpp is a runtime skeleton. Implement the native /forward-binary server before deployment.' >&2; exit 64"]

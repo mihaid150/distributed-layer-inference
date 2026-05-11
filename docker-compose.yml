@@ -21,6 +21,7 @@ services:
     container_name: inference-stage-1
     environment:
       STAGE_ID: "1"
+      DLI_STAGE_RUNTIME: python-pytorch-legacy
       STAGE_MAP_PATH: /app/configs/stage_map.yaml
       NEXT_STAGE_URL: http://inference-stage-2:8000/forward
 
@@ -29,6 +30,7 @@ services:
     container_name: inference-stage-2
     environment:
       STAGE_ID: "2"
+      DLI_STAGE_RUNTIME: python-pytorch-legacy
       STAGE_MAP_PATH: /app/configs/stage_map.yaml
       NEXT_STAGE_URL: http://inference-stage-3:8000/forward
     depends_on:
@@ -39,6 +41,7 @@ services:
     container_name: inference-stage-3
     environment:
       STAGE_ID: "3"
+      DLI_STAGE_RUNTIME: python-pytorch-legacy
       STAGE_MAP_PATH: /app/configs/stage_map.yaml
       NEXT_STAGE_URL: http://inference-stage-4:8000/forward
     depends_on:
@@ -49,6 +52,7 @@ services:
     container_name: inference-stage-4
     environment:
       STAGE_ID: "4"
+      DLI_STAGE_RUNTIME: python-pytorch-legacy
       STAGE_MAP_PATH: /app/configs/stage_map.yaml
       NEXT_STAGE_URL: ""
     depends_on:

@@ -1,9 +1,2 @@
-fastapi
-uvicorn[standard]
-pydantic
-pyyaml
-requests
-numpy
-torch
-transformers
-psutil
+# Compatibility alias for the legacy Python/PyTorch stage runtime.
+-r requirements-stage-python.txt

@@ -1,0 +1,10 @@
+# Legacy Python/PyTorch inference stage runtime.
+fastapi
+uvicorn[standard]
+pydantic
+pyyaml
+requests
+numpy
+torch
+transformers
+psutil
