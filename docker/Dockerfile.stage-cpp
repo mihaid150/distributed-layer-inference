@@ -1,24 +1,39 @@
 # syntax=docker/dockerfile:1.7
 # Native C++ DLI stage image skeleton.
-#
-# This Dockerfile intentionally does not compile a stage server yet. It exists
-# so image/build scripts have a separate target while the C++ runtime is
-# designed under stage-runtimes/cpp.
+
 ARG BASE_IMAGE=debian:bookworm-slim
-FROM ${BASE_IMAGE}
+
+FROM ${BASE_IMAGE} AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential cmake git ca-certificates curl
+    build-essential \
+    cmake \
+    git \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-COPY src/native/dli_stage_cpp/ ./dli_stage_cpp/
-RUN cmake -S dli_stage_cpp -B out -DCMAKE_BUILD_TYPE=Release
-RUN cmake --build out -j$(nproc)
 
-FROM debian:bookworm-slim
+COPY src/native/dli_stage_cpp/ ./dli_stage_cpp/
+
+RUN cmake -S dli_stage_cpp -B out -DCMAKE_BUILD_TYPE=Release
+RUN cmake --build out -j"$(nproc)"
+
+FROM debian:bookworm-slim AS runtime
+
 WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=build /build/out/dli-stage-cpp /app/bin/dli-stage-cpp
 COPY configs/ ./configs/
+
 ENV DLI_STAGE_RUNTIME=cpp-native
+
 EXPOSE 8000
+
 CMD ["/app/bin/dli-stage-cpp", "--config", "/app/configs/stage_map.yaml"]
