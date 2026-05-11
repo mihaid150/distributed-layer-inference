@@ -25,13 +25,13 @@ namespace dli_stage {
 
 namespace {
 
-std::string health_json(const ServerConfig& config) {
+std::string health_json(const StageConfig& config) {
     std::ostringstream out;
     out
         << "{"
         << "\"ok\":true,"
-        << "\"service\":\"dli-stage-cpp\","
-        << "\"runtime\":\"" << dli::common::json_escape(config.runtime) << "\","
+        << "\"service\":\"" << dli::common::json_escape(config.service_name) << "\","
+        << "\"runtime\":\"cpp-native-stub\","
         << "\"status\":\"stub\","
         << "\"stage_id\":" << config.stage_id << ","
         << "\"protocol\":\"DLI2\""
@@ -76,7 +76,7 @@ std::string shape_json(const std::vector<std::int64_t>& shape) {
 
 std::string runtime_response_metadata_json(
     const RuntimeResponse& response,
-    const ServerConfig& config,
+    const StageConfig& config,
     const RuntimeRequest& request
 ) {
     std::ostringstream out;
@@ -84,7 +84,7 @@ std::string runtime_response_metadata_json(
         << "{"
         << "\"ok\":true,"
         << "\"service\":\"dli-stage-cpp\","
-        << "\"runtime\":\"" << dli::common::json_escape(config.runtime) << "\","
+        << "\"runtime\":\"cpp-native-stub\","
         << "\"backend\":\"" << dli::common::json_escape(response.metrics.backend) << "\","
         << "\"status\":\"" << dli::common::json_escape(response.metrics.status) << "\","
         << "\"stage_id\":" << config.stage_id << ","
@@ -110,17 +110,41 @@ std::string runtime_response_metadata_json(
     return out.str();
 }
 
-std::string config_json(const ServerConfig& config) {
+std::string layers_json(const std::vector<int>& layers) {
+    std::ostringstream out;
+    out << "[";
+
+    for (std::size_t i = 0; i < layers.size(); ++i) {
+        if (i > 0) {
+            out << ",";
+        }
+        out << layers[i];
+    }
+
+    out << "]";
+    return out.str();
+}
+
+std::string config_json(const StageConfig& config) {
     std::ostringstream out;
     out
         << "{"
         << "\"ok\":true,"
-        << "\"service\":\"dli-stage-cpp\","
-        << "\"runtime\":\"" << dli::common::json_escape(config.runtime) << "\","
+        << "\"service\":\"" << dli::common::json_escape(config.service_name) << "\","
+        << "\"runtime\":\"cpp-native-stub\","
         << "\"status\":\"stub\","
         << "\"stage_id\":" << config.stage_id << ","
         << "\"port\":" << config.port << ","
         << "\"config_path\":\"" << dli::common::json_escape(config.config_path) << "\","
+        << "\"physical_node\":\"" << dli::common::json_escape(config.physical_node) << "\","
+        << "\"partition_file\":\"" << dli::common::json_escape(config.partition_file) << "\","
+        << "\"next_stage_url\":\"" << dli::common::json_escape(config.next_stage_url) << "\","
+        << "\"components\":{"
+        << "\"embedding\":" << (config.components.embedding ? "true" : "false") << ","
+        << "\"layers\":" << layers_json(config.components.layers) << ","
+        << "\"norm\":" << (config.components.norm ? "true" : "false") << ","
+        << "\"lm_head\":" << (config.components.lm_head ? "true" : "false")
+        << "},"
         << "\"routes\":["
         << "\"GET /health\","
         << "\"GET /config\","
@@ -146,7 +170,7 @@ std::string not_found_json(const dli::common::HttpRequest& request) {
 
 RuntimeRequest make_runtime_request(
     const dli::common::DliFrame& input,
-    const ServerConfig& config
+    const StageConfig& config
 ) {
     const dli::common::ParsedRequestMetadata parsed =
         dli::common::parse_request_metadata(input.metadata_json);
@@ -177,7 +201,7 @@ RuntimeRequest make_runtime_request(
 
 dli::common::HttpResponse handle_forward_binary(
     const dli::common::HttpRequest& request,
-    const ServerConfig& config,
+    const StageConfig& config,
     StageRuntime& runtime
 ) {
     try {
@@ -209,7 +233,7 @@ dli::common::HttpResponse handle_forward_binary(
 
 dli::common::HttpResponse handle_request(
     const dli::common::HttpRequest& request,
-    const ServerConfig& config,
+    const StageConfig& config,
     StageRuntime& runtime
 ) {
     if (request.method == "GET" && request.path == "/health") {
@@ -236,7 +260,7 @@ void close_fd(int fd) {
 
 } // namespace
 
-HttpServer::HttpServer(ServerConfig config, std::unique_ptr<StageRuntime> runtime)
+HttpServer::HttpServer(StageConfig config, std::unique_ptr<StageRuntime> runtime)
     : config_(std::move(config)),
       runtime_(std::move(runtime)) {
     if (!runtime_) {

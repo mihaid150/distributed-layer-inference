@@ -1,3 +1,4 @@
+#include "dli_stage/config.hpp"
 #include "dli_stage/runtimes/stub_runtime.hpp"
 #include "dli_stage/server.hpp"
 
@@ -12,7 +13,7 @@ namespace {
 
 struct CliOptions {
     std::string config_path = "/app/configs/stage_map.yaml";
-    int port = 8000;
+    int port = 0;
     int stage_id = 0;
 };
 
@@ -35,8 +36,8 @@ void print_usage(const char* program_name) {
         << "Usage: " << program_name << " [options]\n\n"
         << "Options:\n"
         << "  --config <path>      Path to stage_map.yaml. Default: /app/configs/stage_map.yaml\n"
-        << "  --port <port>        HTTP port for the native stage server. Default: 8000\n"
-        << "  --stage-id <id>      Stage id. If omitted, STAGE_ID env is used when available.\n"
+        << "  --port <port>        HTTP port for the native stage server.\n"
+        << "  --stage-id <id>      Stage id. If omitted, STAGE_ID env is used.\n"
         << "  --help               Show this help message.\n";
 }
 
@@ -100,8 +101,8 @@ CliOptions parse_args(int argc, char** argv) {
             }
 
             int parsed_stage_id = 0;
-            if (!parse_int(argv[++i], parsed_stage_id) || parsed_stage_id < 0) {
-                throw std::runtime_error("--stage-id must be a non-negative integer");
+            if (!parse_int(argv[++i], parsed_stage_id) || parsed_stage_id <= 0) {
+                throw std::runtime_error("--stage-id must be a positive integer");
             }
 
             options.stage_id = parsed_stage_id;
@@ -109,6 +110,10 @@ CliOptions parse_args(int argc, char** argv) {
         }
 
         throw std::runtime_error("unknown argument: " + arg);
+    }
+
+    if (options.stage_id <= 0) {
+        throw std::runtime_error("stage id is required; pass --stage-id or set STAGE_ID");
     }
 
     return options;
@@ -120,17 +125,27 @@ int main(int argc, char** argv) {
     try {
         const CliOptions options = parse_args(argc, argv);
 
-        dli_stage::ServerConfig config;
-        config.config_path = options.config_path;
-        config.port = options.port;
-        config.stage_id = options.stage_id;
-        config.runtime = "cpp-native-stub";
+        dli_stage::StageConfig file_config =
+            dli_stage::load_stage_config_from_file(options.config_path, options.stage_id);
+
+        dli_stage::StageConfig override_config;
+        override_config.service_name.clear();
+        override_config.config_path = options.config_path;
+        override_config.stage_id = options.stage_id;
+        override_config.port = options.port;
+
+        dli_stage::StageConfig config =
+            dli_stage::merge_stage_config(file_config, override_config);
 
         std::cerr << "[dli-stage-cpp] native C++ stage runtime\n";
         std::cerr << "[dli-stage-cpp] config_path=" << config.config_path << "\n";
+        std::cerr << "[dli-stage-cpp] service_name=" << config.service_name << "\n";
+        std::cerr << "[dli-stage-cpp] physical_node=" << config.physical_node << "\n";
+        std::cerr << "[dli-stage-cpp] partition_file=" << config.partition_file << "\n";
+        std::cerr << "[dli-stage-cpp] next_stage_url=" << config.next_stage_url << "\n";
         std::cerr << "[dli-stage-cpp] port=" << config.port << "\n";
         std::cerr << "[dli-stage-cpp] stage_id=" << config.stage_id << "\n";
-        std::cerr << "[dli-stage-cpp] runtime=" << config.runtime << "\n";
+        std::cerr << "[dli-stage-cpp] runtime=cpp-native-stub\n";
 
         auto runtime = std::make_unique<dli_stage::StubRuntime>();
         dli_stage::HttpServer server(config, std::move(runtime));

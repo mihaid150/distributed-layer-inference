@@ -1,5 +1,6 @@
 add_executable(dli-stage-cpp
     src/main.cpp
+    src/config.cpp
     src/server.cpp
     src/runtimes/stub_runtime.cpp
     src/runtimes/llama_partial_runtime.cpp
