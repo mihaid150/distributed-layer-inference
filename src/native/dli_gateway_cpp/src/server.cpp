@@ -1,5 +1,5 @@
 #include "dli/gateway/server.hpp"
-#include "dli/gateway/stage_client.hpp"
+#include "dli/gateway/generation_loop.hpp"
 #include "dli/common/http.hpp"
 #include "dli/common/json_escape.hpp"
 
@@ -10,6 +10,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <regex>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -19,6 +20,30 @@
 namespace dli::gateway {
 
 namespace {
+
+int parse_int_field_or_default(
+    const std::string& json,
+    const std::string& field_name,
+    int default_value,
+    int min_value,
+    int max_value
+) {
+    const std::regex pattern(
+        "\"" + field_name + R"dli("\s*:\s*(-?\d+))dli"
+    );
+
+    std::smatch match;
+    if (!std::regex_search(json, match, pattern)) {
+        return default_value;
+    }
+
+    try {
+        const int parsed = std::stoi(match[1].str());
+        return std::max(min_value, std::min(max_value, parsed));
+    } catch (const std::exception&) {
+        return default_value;
+    }
+}
 
 std::string health_json(const GatewayConfig& config) {
     std::ostringstream out;
@@ -55,32 +80,31 @@ std::string config_json(const GatewayConfig& config) {
     return out.str();
 }
 
-std::string generate_stub_json(
+std::string generate_loop_json(
     const dli::common::HttpRequest& request,
-    const StageClientResult& stage_result
+    const GatewayConfig& config
 ) {
-    std::ostringstream out;
-    out
-        << "{"
-        << "\"ok\":true,"
-        << "\"service\":\"dli-gateway-cpp\","
-        << "\"runtime\":\"cpp-native-stub\","
-        << "\"status\":\"stub_generate_with_stage_call\","
-        << "\"prompt\":\"\","
-        << "\"generated_text\":\"\","
-        << "\"assistant_message\":\"\","
-        << "\"generated_token_ids\":[],"
-        << "\"total_latency_ms\":0.0,"
-        << "\"tokens_per_second\":0.0,"
-        << "\"termination_reason\":\"stub\","
-        << "\"request_body_bytes\":" << request.body.size() << ","
-        << "\"stage_http_status\":" << stage_result.http_status << ","
-        << "\"stage_http_reason\":\"" << dli::common::json_escape(stage_result.http_reason) << "\","
-        << "\"stage_metadata\":\"" << dli::common::json_escape(stage_result.response_frame.metadata_json) << "\","
-        << "\"stage_tensor_bytes\":" << stage_result.response_frame.tensor_bytes.size()
-        << "}";
+    const std::string body_text(
+        reinterpret_cast<const char*>(request.body.data()),
+        request.body.size()
+    );
 
-    return out.str();
+    const int max_new_tokens = parse_int_field_or_default(
+        body_text,
+        "max_new_tokens",
+        2,
+        0,
+        512
+    );
+
+    GenerationLoopConfig loop_config;
+    loop_config.first_stage_url = config.first_stage_url;
+    loop_config.max_new_tokens = max_new_tokens;
+
+    GenerationLoop loop(loop_config);
+    const GenerationLoopResult result = loop.run_stub_generation(loop_config.max_new_tokens);
+
+    return generation_loop_result_json(result, request.body.size());
 }
 
 std::string not_found_json(const dli::common::HttpRequest& request) {
@@ -117,23 +141,20 @@ dli::common::HttpResponse handle_request(
     }
 
     if (request.method == "POST" && request.path == "/generate") {
-    try {
-        StageClient client(config.first_stage_url);
-        const StageClientResult result = client.forward_stub_frame();
-
-        return dli::common::make_json_response(
-            200,
-            "OK",
-            generate_stub_json(request, result)
-        );
-    } catch (const std::exception& exc) {
-        return dli::common::make_json_response(
-            502,
-            "Bad Gateway",
-            dli::common::http_error_json(exc.what())
-        );
+        try {
+            return dli::common::make_json_response(
+                200,
+                "OK",
+                generate_loop_json(request, config)
+            );
+        } catch (const std::exception& exc) {
+            return dli::common::make_json_response(
+                502,
+                "Bad Gateway",
+                dli::common::http_error_json(exc.what())
+            );
+        }
     }
-}
 
     return dli::common::make_json_response(
         404,

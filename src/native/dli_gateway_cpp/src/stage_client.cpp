@@ -3,32 +3,66 @@
 #include "dli/common/http_client.hpp"
 #include "dli/common/protocol.hpp"
 
-#include <cstdint>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace dli::gateway {
 
+namespace {
+
+std::string shape_json(const std::vector<std::int64_t>& shape) {
+    std::ostringstream out;
+    out << "[";
+
+    for (std::size_t i = 0; i < shape.size(); ++i) {
+        if (i > 0) {
+            out << ",";
+        }
+        out << shape[i];
+    }
+
+    out << "]";
+    return out.str();
+}
+
+std::string build_stub_metadata_json(const StageForwardStubRequest& request) {
+    std::ostringstream out;
+    out
+        << "{"
+        << "\"request_id\":\"" << request.request_id << "\","
+        << "\"token_index\":" << request.token_index << ","
+        << "\"generation_mode\":\"" << request.generation_mode << "\","
+        << "\"tensor\":{"
+        << "\"dtype\":\"" << request.dtype << "\","
+        << "\"shape\":" << shape_json(request.shape) << ","
+        << "\"byte_order\":\"little\""
+        << "},"
+        << "\"feature_flags\":{"
+        << "\"kv_cache_enabled\":" << (request.kv_cache_enabled ? "true" : "false")
+        << "},"
+        << "\"sampling\":{"
+        << "\"temperature\":0.0,"
+        << "\"top_k\":null,"
+        << "\"top_p\":null"
+        << "}"
+        << "}";
+
+    return out.str();
+}
+
+} // namespace
+
 StageClient::StageClient(std::string first_stage_url)
     : first_stage_url_(std::move(first_stage_url)) {}
 
-StageClientResult StageClient::forward_stub_frame() const {
+StageClientResult StageClient::forward_stub_frame(
+    const StageForwardStubRequest& request
+) const {
     dli::common::DliFrame request_frame;
-
-    request_frame.metadata_json =
-        R"({"request_id":"gateway-stub-request","token_index":0,"generation_mode":"decode","tensor":{"dtype":"float16","shape":[1,1,4],"byte_order":"little"},"feature_flags":{"kv_cache_enabled":true},"sampling":{"temperature":0.0,"top_k":null,"top_p":null}})";
-
-    request_frame.tensor_bytes = {
-        static_cast<std::uint8_t>(1),
-        static_cast<std::uint8_t>(2),
-        static_cast<std::uint8_t>(3),
-        static_cast<std::uint8_t>(4),
-        static_cast<std::uint8_t>(5),
-        static_cast<std::uint8_t>(6),
-        static_cast<std::uint8_t>(7),
-        static_cast<std::uint8_t>(8),
-    };
+    request_frame.metadata_json = build_stub_metadata_json(request);
+    request_frame.tensor_bytes = request.tensor_bytes;
 
     const std::vector<std::uint8_t> request_body =
         dli::common::encode_frame(request_frame);
