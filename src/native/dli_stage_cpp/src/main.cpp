@@ -1,10 +1,11 @@
 #include "dli_stage/server.hpp"
-
+#include "dli_stage/runtimes/stub_runtime.hpp"
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <memory>
 
 namespace {
 
@@ -130,7 +131,9 @@ int main(int argc, char** argv) {
         std::cerr << "[dli-stage-cpp] stage_id=" << config.stage_id << "\n";
         std::cerr << "[dli-stage-cpp] runtime=" << config.runtime << "\n";
 
-        dli_stage::HttpServer server(config);
+        auto runtime = std::make_unique<dli_stage::StubRuntime>();
+        dli_stage::HttpServer server(config, std::move(runtime));
+
         return server.run();
     } catch (const std::exception& exc) {
         std::cerr << "[dli-stage-cpp] error: " << exc.what() << "\n";

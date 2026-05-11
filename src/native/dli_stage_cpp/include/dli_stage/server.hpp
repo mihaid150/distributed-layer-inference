@@ -1,6 +1,9 @@
 #pragma once
 
+#include "dli_stage/runtime.hpp"
+
 #include <atomic>
+#include <memory>
 #include <string>
 
 namespace dli_stage {
@@ -14,7 +17,7 @@ struct ServerConfig {
 
 class HttpServer {
 public:
-    explicit HttpServer(ServerConfig config);
+    HttpServer(ServerConfig config, std::unique_ptr<StageRuntime> runtime);
 
     HttpServer(const HttpServer&) = delete;
     HttpServer& operator=(const HttpServer&) = delete;
@@ -25,6 +28,7 @@ public:
 
 private:
     ServerConfig config_;
+    std::unique_ptr<StageRuntime> runtime_;
     std::atomic<bool> stop_requested_{false};
 };
 

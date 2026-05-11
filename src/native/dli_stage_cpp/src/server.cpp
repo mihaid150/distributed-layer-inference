@@ -1,6 +1,7 @@
 #include "dli_stage/server.hpp"
 
 #include "dli_stage/protocol.hpp"
+#include "dli_stage/runtime.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -342,6 +343,52 @@ std::string health_json(const ServerConfig& config) {
     return out.str();
 }
 
+std::string metrics_json(const StageMetrics& metrics) {
+    std::ostringstream out;
+    out
+        << "{"
+        << "\"backend\":\"" << json_escape(metrics.backend) << "\","
+        << "\"status\":\"" << json_escape(metrics.status) << "\","
+        << "\"compute_time_ms\":" << metrics.compute_time_ms << ","
+        << "\"true_comm_ms\":" << metrics.true_comm_ms << ","
+        << "\"rpc_wall_time_ms\":" << metrics.rpc_wall_time_ms << ","
+        << "\"input_tensor_bytes\":" << metrics.input_tensor_bytes << ","
+        << "\"output_tensor_bytes\":" << metrics.output_tensor_bytes << ","
+        << "\"stage_input_token_count\":" << metrics.stage_input_token_count << ","
+        << "\"stage_output_token_count\":" << metrics.stage_output_token_count << ","
+        << "\"kv_cache_step_valid\":" << (metrics.kv_cache_step_valid ? "true" : "false")
+        << "}";
+
+    return out.str();
+}
+
+std::string runtime_response_metadata_json(
+    const RuntimeResponse& response,
+    const ServerConfig& config,
+    const RuntimeRequest& request
+) {
+    std::ostringstream out;
+    out
+        << "{"
+        << "\"ok\":true,"
+        << "\"service\":\"dli-stage-cpp\","
+        << "\"runtime\":\"" << json_escape(config.runtime) << "\","
+        << "\"backend\":\"" << json_escape(response.metrics.backend) << "\","
+        << "\"status\":\"" << json_escape(response.metrics.status) << "\","
+        << "\"stage_id\":" << config.stage_id << ","
+        << "\"request_id\":\"" << json_escape(request.request_id) << "\","
+        << "\"token_index\":" << request.token_index << ","
+        << "\"input_metadata_bytes\":" << request.input_metadata_json.size() << ","
+        << "\"input_tensor_bytes\":" << request.input_tensor.bytes.size() << ","
+        << "\"output_tensor_bytes\":" << response.output_tensor.bytes.size() << ","
+        << "\"is_final_stage\":" << (response.is_final_stage ? "true" : "false") << ","
+        << "\"next_token_id\":" << response.next_token_id << ","
+        << "\"metrics\":" << metrics_json(response.metrics)
+        << "}";
+
+    return out.str();
+}
+
 std::string config_json(const ServerConfig& config) {
     std::ostringstream out;
     out
@@ -380,26 +427,44 @@ std::string not_found_json(const HttpRequest& request) {
     return out.str();
 }
 
-void handle_forward_binary(int fd, const HttpRequest& request, const ServerConfig& config) {
+RuntimeRequest make_runtime_request(
+    const DliFrame& input,
+    const ServerConfig& config
+) {
+    RuntimeRequest request;
+    request.stage_id = config.stage_id;
+    request.input_metadata_json = input.metadata_json;
+    request.input_tensor.bytes = input.tensor_bytes;
+
+    // Full JSON parsing comes later. For now we keep the metadata opaque and
+    // expose enough fields for stub/runtime plumbing.
+    request.request_id = "";
+    request.token_index = 0;
+    request.generation_mode = "unknown";
+    request.input_tensor.metadata.dtype = "opaque";
+    request.input_tensor.metadata.byte_order = "little";
+
+    return request;
+}
+
+void handle_forward_binary(
+    int fd,
+    const HttpRequest& request,
+    const ServerConfig& config,
+    StageRuntime& runtime
+) {
     try {
         const DliFrame input = decode_frame(request.body);
-
-        std::ostringstream metadata;
-        metadata
-            << "{"
-            << "\"ok\":true,"
-            << "\"service\":\"dli-stage-cpp\","
-            << "\"runtime\":\"" << json_escape(config.runtime) << "\","
-            << "\"status\":\"stub_forward\","
-            << "\"stage_id\":" << config.stage_id << ","
-            << "\"input_metadata_bytes\":" << input.metadata_json.size() << ","
-            << "\"input_tensor_bytes\":" << input.tensor_bytes.size() << ","
-            << "\"note\":\"stub echoes tensor bytes without computation\""
-            << "}";
+        RuntimeRequest runtime_request = make_runtime_request(input, config);
+        RuntimeResponse runtime_response = runtime.forward(runtime_request);
 
         DliFrame output;
-        output.metadata_json = metadata.str();
-        output.tensor_bytes = input.tensor_bytes;
+        output.metadata_json = runtime_response_metadata_json(
+            runtime_response,
+            config,
+            runtime_request
+        );
+        output.tensor_bytes = runtime_response.output_tensor.bytes;
 
         send_response(
             fd,
@@ -413,7 +478,12 @@ void handle_forward_binary(int fd, const HttpRequest& request, const ServerConfi
     }
 }
 
-void handle_request(int fd, const HttpRequest& request, const ServerConfig& config) {
+void handle_request(
+    int fd,
+    const HttpRequest& request,
+    const ServerConfig& config,
+    StageRuntime& runtime
+){
     if (request.method == "GET" && request.path == "/health") {
         send_json(fd, 200, "OK", health_json(config));
         return;
@@ -425,7 +495,7 @@ void handle_request(int fd, const HttpRequest& request, const ServerConfig& conf
     }
 
     if (request.method == "POST" && request.path == "/forward-binary") {
-        handle_forward_binary(fd, request, config);
+        handle_forward_binary(fd, request, config, runtime);
         return;
     }
 
@@ -441,8 +511,13 @@ void close_fd(int fd) {
 
 } // namespace
 
-HttpServer::HttpServer(ServerConfig config)
-    : config_(std::move(config)) {}
+HttpServer::HttpServer(ServerConfig config, std::unique_ptr<StageRuntime> runtime)
+    : config_(std::move(config)),
+      runtime_(std::move(runtime)) {
+    if (!runtime_) {
+        throw std::runtime_error("HttpServer requires a non-null StageRuntime");
+    }
+}
 
 void HttpServer::stop() {
     stop_requested_.store(true);
@@ -503,7 +578,7 @@ int HttpServer::run() {
 
         try {
             const HttpRequest request = read_request(client_fd);
-            handle_request(client_fd, request, config_);
+            handle_request(client_fd, request, config_, *runtime_);
         } catch (const std::exception& exc) {
             send_json(client_fd, 400, "Bad Request", http_error_json(exc.what()));
         }
