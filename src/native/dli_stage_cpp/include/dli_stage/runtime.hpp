@@ -1,7 +1,7 @@
 #pragma once
 
-#include "dli_stage/metrics.hpp"
-#include "dli_stage/tensor.hpp"
+#include "dli/common/metrics.hpp"
+#include "dli/common/tensor.hpp"
 
 #include <string>
 
@@ -14,7 +14,7 @@ struct RuntimeRequest {
     std::string generation_mode = "legacy";
 
     std::string input_metadata_json;
-    TensorBuffer input_tensor;
+    dli::common::TensorBuffer input_tensor;
 
     bool kv_cache_enabled = false;
 
@@ -33,9 +33,9 @@ struct RuntimeResponse {
     int next_token_id = -1;
 
     std::string output_metadata_json;
-    TensorBuffer output_tensor;
+    dli::common::TensorBuffer output_tensor;
 
-    StageMetrics metrics;
+    dli::common::StageMetrics metrics;
 };
 
 class StageRuntime {

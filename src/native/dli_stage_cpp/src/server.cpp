@@ -1,7 +1,9 @@
 #include "dli_stage/server.hpp"
 
-#include "dli_stage/metadata.hpp"
-#include "dli_stage/protocol.hpp"
+#include "dli/common/json_escape.hpp"
+#include "dli/common/metadata.hpp"
+#include "dli/common/protocol.hpp"
+#include "dli/common/tensor.hpp"
 #include "dli_stage/runtime.hpp"
 
 #include <algorithm>
@@ -57,46 +59,6 @@ std::string trim_copy(const std::string& value) {
     }
 
     return value.substr(begin, end - begin);
-}
-
-std::string json_escape(const std::string& value) {
-    std::ostringstream out;
-
-    for (unsigned char c : value) {
-        switch (c) {
-            case '"':
-                out << "\\\"";
-                break;
-            case '\\':
-                out << "\\\\";
-                break;
-            case '\b':
-                out << "\\b";
-                break;
-            case '\f':
-                out << "\\f";
-                break;
-            case '\n':
-                out << "\\n";
-                break;
-            case '\r':
-                out << "\\r";
-                break;
-            case '\t':
-                out << "\\t";
-                break;
-            default:
-                if (c < 0x20) {
-                    const char* hex = "0123456789abcdef";
-                    out << "\\u00" << hex[(c >> 4) & 0x0f] << hex[c & 0x0f];
-                } else {
-                    out << static_cast<char>(c);
-                }
-                break;
-        }
-    }
-
-    return out.str();
 }
 
 std::size_t find_header_end(const std::vector<std::uint8_t>& buffer) {
@@ -174,15 +136,9 @@ void send_json(int fd, int status_code, const std::string& reason, const std::st
     send_response(fd, status_code, reason, "application/json", body);
 }
 
-void send_text(int fd, int status_code, const std::string& reason, const std::string& text) {
-    const auto* begin = reinterpret_cast<const std::uint8_t*>(text.data());
-    std::vector<std::uint8_t> body(begin, begin + text.size());
-    send_response(fd, status_code, reason, "text/plain; charset=utf-8", body);
-}
-
 std::string http_error_json(const std::string& error) {
     std::ostringstream out;
-    out << "{\"ok\":false,\"error\":\"" << json_escape(error) << "\"}";
+    out << "{\"ok\":false,\"error\":\"" << dli::common::json_escape(error) << "\"}";
     return out.str();
 }
 
@@ -335,7 +291,7 @@ std::string health_json(const ServerConfig& config) {
         << "{"
         << "\"ok\":true,"
         << "\"service\":\"dli-stage-cpp\","
-        << "\"runtime\":\"" << json_escape(config.runtime) << "\","
+        << "\"runtime\":\"" << dli::common::json_escape(config.runtime) << "\","
         << "\"status\":\"stub\","
         << "\"stage_id\":" << config.stage_id << ","
         << "\"protocol\":\"DLI2\""
@@ -344,12 +300,12 @@ std::string health_json(const ServerConfig& config) {
     return out.str();
 }
 
-std::string metrics_json(const StageMetrics& metrics) {
+std::string metrics_json(const dli::common::StageMetrics& metrics) {
     std::ostringstream out;
     out
         << "{"
-        << "\"backend\":\"" << json_escape(metrics.backend) << "\","
-        << "\"status\":\"" << json_escape(metrics.status) << "\","
+        << "\"backend\":\"" << dli::common::json_escape(metrics.backend) << "\","
+        << "\"status\":\"" << dli::common::json_escape(metrics.status) << "\","
         << "\"compute_time_ms\":" << metrics.compute_time_ms << ","
         << "\"true_comm_ms\":" << metrics.true_comm_ms << ","
         << "\"rpc_wall_time_ms\":" << metrics.rpc_wall_time_ms << ","
@@ -388,22 +344,22 @@ std::string runtime_response_metadata_json(
         << "{"
         << "\"ok\":true,"
         << "\"service\":\"dli-stage-cpp\","
-        << "\"runtime\":\"" << json_escape(config.runtime) << "\","
-        << "\"backend\":\"" << json_escape(response.metrics.backend) << "\","
-        << "\"status\":\"" << json_escape(response.metrics.status) << "\","
+        << "\"runtime\":\"" << dli::common::json_escape(config.runtime) << "\","
+        << "\"backend\":\"" << dli::common::json_escape(response.metrics.backend) << "\","
+        << "\"status\":\"" << dli::common::json_escape(response.metrics.status) << "\","
         << "\"stage_id\":" << config.stage_id << ","
-        << "\"request_id\":\"" << json_escape(request.request_id) << "\","
+        << "\"request_id\":\"" << dli::common::json_escape(request.request_id) << "\","
         << "\"token_index\":" << request.token_index << ","
-        << "\"generation_mode\":\"" << json_escape(request.generation_mode) << "\","
+        << "\"generation_mode\":\"" << dli::common::json_escape(request.generation_mode) << "\","
         << "\"input_metadata_bytes\":" << request.input_metadata_json.size() << ","
         << "\"input_tensor_bytes\":" << request.input_tensor.bytes.size() << ","
         << "\"output_tensor_bytes\":" << response.output_tensor.bytes.size() << ","
         << "\"is_final_stage\":" << (response.is_final_stage ? "true" : "false") << ","
         << "\"next_token_id\":" << response.next_token_id << ","
         << "\"tensor\":{"
-        << "\"dtype\":\"" << json_escape(request.input_tensor.metadata.dtype) << "\","
+        << "\"dtype\":\"" << dli::common::json_escape(request.input_tensor.metadata.dtype) << "\","
         << "\"shape\":" << shape_json(request.input_tensor.metadata.shape) << ","
-        << "\"byte_order\":\"" << json_escape(request.input_tensor.metadata.byte_order) << "\""
+        << "\"byte_order\":\"" << dli::common::json_escape(request.input_tensor.metadata.byte_order) << "\""
         << "},"
         << "\"feature_flags\":{"
         << "\"kv_cache_enabled\":" << (request.kv_cache_enabled ? "true" : "false")
@@ -420,11 +376,11 @@ std::string config_json(const ServerConfig& config) {
         << "{"
         << "\"ok\":true,"
         << "\"service\":\"dli-stage-cpp\","
-        << "\"runtime\":\"" << json_escape(config.runtime) << "\","
+        << "\"runtime\":\"" << dli::common::json_escape(config.runtime) << "\","
         << "\"status\":\"stub\","
         << "\"stage_id\":" << config.stage_id << ","
         << "\"port\":" << config.port << ","
-        << "\"config_path\":\"" << json_escape(config.config_path) << "\","
+        << "\"config_path\":\"" << dli::common::json_escape(config.config_path) << "\","
         << "\"routes\":["
         << "\"GET /health\","
         << "\"GET /config\","
@@ -435,8 +391,8 @@ std::string config_json(const ServerConfig& config) {
     return out.str();
 }
 
-std::vector<std::uint8_t> frame_response_body(const DliFrame& frame) {
-    return encode_frame(frame);
+std::vector<std::uint8_t> frame_response_body(const dli::common::DliFrame& frame) {
+    return dli::common::encode_frame(frame);
 }
 
 std::string not_found_json(const HttpRequest& request) {
@@ -445,18 +401,19 @@ std::string not_found_json(const HttpRequest& request) {
         << "{"
         << "\"ok\":false,"
         << "\"error\":\"route not found\","
-        << "\"method\":\"" << json_escape(request.method) << "\","
-        << "\"path\":\"" << json_escape(request.path) << "\""
+        << "\"method\":\"" << dli::common::json_escape(request.method) << "\","
+        << "\"path\":\"" << dli::common::json_escape(request.path) << "\""
         << "}";
 
     return out.str();
 }
 
 RuntimeRequest make_runtime_request(
-    const DliFrame& input,
+    const dli::common::DliFrame& input,
     const ServerConfig& config
 ) {
-    const ParsedRequestMetadata parsed = parse_request_metadata(input.metadata_json);
+    const dli::common::ParsedRequestMetadata parsed =
+        dli::common::parse_request_metadata(input.metadata_json);
 
     RuntimeRequest request;
     request.stage_id = config.stage_id;
@@ -489,11 +446,11 @@ void handle_forward_binary(
     StageRuntime& runtime
 ) {
     try {
-        const DliFrame input = decode_frame(request.body);
+        const dli::common::DliFrame input = dli::common::decode_frame(request.body);
         RuntimeRequest runtime_request = make_runtime_request(input, config);
         RuntimeResponse runtime_response = runtime.forward(runtime_request);
 
-        DliFrame output;
+        dli::common::DliFrame output;
         output.metadata_json = runtime_response_metadata_json(
             runtime_response,
             config,
@@ -518,7 +475,7 @@ void handle_request(
     const HttpRequest& request,
     const ServerConfig& config,
     StageRuntime& runtime
-){
+) {
     if (request.method == "GET" && request.path == "/health") {
         send_json(fd, 200, "OK", health_json(config));
         return;
