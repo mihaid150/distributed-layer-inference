@@ -1,5 +1,5 @@
 #include "dli/gateway/server.hpp"
-
+#include "dli/gateway/stage_client.hpp"
 #include "dli/common/http.hpp"
 #include "dli/common/json_escape.hpp"
 
@@ -55,14 +55,17 @@ std::string config_json(const GatewayConfig& config) {
     return out.str();
 }
 
-std::string generate_stub_json(const dli::common::HttpRequest& request) {
+std::string generate_stub_json(
+    const dli::common::HttpRequest& request,
+    const StageClientResult& stage_result
+) {
     std::ostringstream out;
     out
         << "{"
         << "\"ok\":true,"
         << "\"service\":\"dli-gateway-cpp\","
         << "\"runtime\":\"cpp-native-stub\","
-        << "\"status\":\"stub_generate\","
+        << "\"status\":\"stub_generate_with_stage_call\","
         << "\"prompt\":\"\","
         << "\"generated_text\":\"\","
         << "\"assistant_message\":\"\","
@@ -70,7 +73,11 @@ std::string generate_stub_json(const dli::common::HttpRequest& request) {
         << "\"total_latency_ms\":0.0,"
         << "\"tokens_per_second\":0.0,"
         << "\"termination_reason\":\"stub\","
-        << "\"request_body_bytes\":" << request.body.size()
+        << "\"request_body_bytes\":" << request.body.size() << ","
+        << "\"stage_http_status\":" << stage_result.http_status << ","
+        << "\"stage_http_reason\":\"" << dli::common::json_escape(stage_result.http_reason) << "\","
+        << "\"stage_metadata\":\"" << dli::common::json_escape(stage_result.response_frame.metadata_json) << "\","
+        << "\"stage_tensor_bytes\":" << stage_result.response_frame.tensor_bytes.size()
         << "}";
 
     return out.str();
@@ -110,12 +117,23 @@ dli::common::HttpResponse handle_request(
     }
 
     if (request.method == "POST" && request.path == "/generate") {
+    try {
+        StageClient client(config.first_stage_url);
+        const StageClientResult result = client.forward_stub_frame();
+
         return dli::common::make_json_response(
             200,
             "OK",
-            generate_stub_json(request)
+            generate_stub_json(request, result)
+        );
+    } catch (const std::exception& exc) {
+        return dli::common::make_json_response(
+            502,
+            "Bad Gateway",
+            dli::common::http_error_json(exc.what())
         );
     }
+}
 
     return dli::common::make_json_response(
         404,

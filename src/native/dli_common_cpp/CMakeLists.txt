@@ -11,6 +11,7 @@ add_library(dli-common-cpp STATIC
     src/metrics.cpp
     src/json_escape.cpp
     src/http.cpp
+    src/http_client.cpp
 )
 
 target_include_directories(dli-common-cpp PUBLIC
