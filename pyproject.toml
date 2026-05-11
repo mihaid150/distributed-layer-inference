@@ -20,5 +20,8 @@ dependencies = [
     "accelerate"
 ]
 
+[tool.setuptools]
+package-dir = {"" = "src/python"}
+
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src/python"]
