@@ -4,6 +4,7 @@ project(dli_stage_cpp LANGUAGES CXX)
 
 add_library(dli-stage-core STATIC
     src/protocol.cpp
+    src/server.cpp
 )
 
 target_include_directories(dli-stage-core PUBLIC
