@@ -1,10 +1,130 @@
+#include "dli/gateway/server.hpp"
+
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
+#include <stdexcept>
+#include <string>
+
+namespace {
+
+struct CliOptions {
+    std::string config_path = "/app/configs/stage_map.yaml";
+    std::string first_stage_url = "http://inference-stage-1:8000/forward-binary";
+    int port = 8000;
+};
+
+bool parse_int(const std::string& value, int& out) {
+    try {
+        std::size_t pos = 0;
+        int parsed = std::stoi(value, &pos);
+        if (pos != value.size()) {
+            return false;
+        }
+        out = parsed;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+void print_usage(const char* program_name) {
+    std::cerr
+        << "Usage: " << program_name << " [options]\n\n"
+        << "Options:\n"
+        << "  --config <path>             Path to stage_map.yaml. Default: /app/configs/stage_map.yaml\n"
+        << "  --port <port>               HTTP port for the native gateway. Default: 8000\n"
+        << "  --first-stage-url <url>     First stage URL. Default: http://inference-stage-1:8000/forward-binary\n"
+        << "  --help                      Show this help message.\n";
+}
+
+CliOptions parse_args(int argc, char** argv) {
+    CliOptions options;
+
+    const char* env_port = std::getenv("PORT");
+    if (env_port != nullptr) {
+        int parsed_port = 0;
+        if (parse_int(env_port, parsed_port) && parsed_port > 0 && parsed_port <= 65535) {
+            options.port = parsed_port;
+        }
+    }
+
+    const char* env_config_path = std::getenv("STAGE_MAP_PATH");
+    if (env_config_path != nullptr && std::strlen(env_config_path) > 0) {
+        options.config_path = env_config_path;
+    }
+
+    const char* env_first_stage_url = std::getenv("FIRST_STAGE_URL");
+    if (env_first_stage_url != nullptr && std::strlen(env_first_stage_url) > 0) {
+        options.first_stage_url = env_first_stage_url;
+    }
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+
+        if (arg == "--help" || arg == "-h") {
+            print_usage(argv[0]);
+            std::exit(0);
+        }
+
+        if (arg == "--config") {
+            if (i + 1 >= argc) {
+                throw std::runtime_error("--config requires a value");
+            }
+            options.config_path = argv[++i];
+            continue;
+        }
+
+        if (arg == "--port") {
+            if (i + 1 >= argc) {
+                throw std::runtime_error("--port requires a value");
+            }
+
+            int parsed_port = 0;
+            if (!parse_int(argv[++i], parsed_port) || parsed_port <= 0 || parsed_port > 65535) {
+                throw std::runtime_error("--port must be an integer in [1, 65535]");
+            }
+
+            options.port = parsed_port;
+            continue;
+        }
+
+        if (arg == "--first-stage-url") {
+            if (i + 1 >= argc) {
+                throw std::runtime_error("--first-stage-url requires a value");
+            }
+            options.first_stage_url = argv[++i];
+            continue;
+        }
+
+        throw std::runtime_error("unknown argument: " + arg);
+    }
+
+    return options;
+}
+
+} // namespace
 
 int main(int argc, char** argv) {
-    (void)argc;
-    (void)argv;
+    try {
+        const CliOptions options = parse_args(argc, argv);
 
-    std::cerr << "[dli-gateway-cpp] native C++ gateway stub\n";
-    std::cerr << "[dli-gateway-cpp] status=not_implemented\n";
-    return 64;
+        dli::gateway::GatewayConfig config;
+        config.config_path = options.config_path;
+        config.port = options.port;
+        config.first_stage_url = options.first_stage_url;
+
+        std::cerr << "[dli-gateway-cpp] native C++ gateway runtime\n";
+        std::cerr << "[dli-gateway-cpp] config_path=" << config.config_path << "\n";
+        std::cerr << "[dli-gateway-cpp] port=" << config.port << "\n";
+        std::cerr << "[dli-gateway-cpp] first_stage_url=" << config.first_stage_url << "\n";
+        std::cerr << "[dli-gateway-cpp] runtime=cpp-native-stub\n";
+
+        dli::gateway::GatewayServer server(config);
+        return server.run();
+    } catch (const std::exception& exc) {
+        std::cerr << "[dli-gateway-cpp] error: " << exc.what() << "\n";
+        print_usage(argv[0]);
+        return 2;
+    }
 }
