@@ -48,7 +48,10 @@ void test_invalid_magic_is_rejected() {
         rejected = true;
     }
 
-    assert(rejected);
+    if (!rejected) {
+    std::cerr << "expected ProtocolError was not thrown\n";
+    std::exit(1);
+}
 }
 
 void test_truncated_frame_is_rejected() {
