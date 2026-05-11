@@ -1,8 +1,10 @@
 #pragma once
 
 #include "dli/gateway/stage_client.hpp"
+#include "dli/gateway/tokenizer.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -24,6 +26,11 @@ struct GenerationStepTrace {
 
 struct GenerationLoopResult {
     std::string request_id;
+    std::string prompt;
+
+    std::vector<std::int64_t> prompt_token_ids;
+    std::vector<int> generated_token_ids;
+
     std::vector<GenerationStepTrace> steps;
 
     double total_latency_ms = 0.0;
@@ -35,10 +42,14 @@ class GenerationLoop {
 public:
     explicit GenerationLoop(GenerationLoopConfig config);
 
-    GenerationLoopResult run_stub_generation(int max_new_tokens) const;
+    GenerationLoopResult run_stub_generation(
+        const std::string& prompt,
+        int max_new_tokens
+    ) const;
 
 private:
     GenerationLoopConfig config_;
+    TokenizerStub tokenizer_;
 };
 
 std::string generation_loop_result_json(

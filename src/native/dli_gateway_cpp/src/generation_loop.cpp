@@ -13,7 +13,6 @@ namespace dli::gateway {
 namespace {
 
 std::string make_request_id() {
-    // Deterministic for now. Later this should become UUID-like.
     return "gateway-loop-stub-request";
 }
 
@@ -55,40 +54,74 @@ std::string step_json(const GenerationStepTrace& step) {
     return out.str();
 }
 
+std::string int_vector_json(const std::vector<int>& values) {
+    std::ostringstream out;
+    out << "[";
+
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i > 0) {
+            out << ",";
+        }
+        out << values[i];
+    }
+
+    out << "]";
+    return out.str();
+}
+
+std::string i64_vector_json(const std::vector<std::int64_t>& values) {
+    std::ostringstream out;
+    out << "[";
+
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i > 0) {
+            out << ",";
+        }
+        out << values[i];
+    }
+
+    out << "]";
+    return out.str();
+}
+
 } // namespace
 
 GenerationLoop::GenerationLoop(GenerationLoopConfig config)
     : config_(std::move(config)) {}
 
-GenerationLoopResult GenerationLoop::run_stub_generation(int max_new_tokens) const {
+GenerationLoopResult GenerationLoop::run_stub_generation(
+    const std::string& prompt,
+    int max_new_tokens
+) const {
     const auto start = std::chrono::steady_clock::now();
 
     GenerationLoopResult result;
     result.request_id = make_request_id();
+    result.prompt = prompt;
+
+    const TokenizedPrompt tokenized = tokenizer_.tokenize(prompt);
+    result.prompt_token_ids = tokenized.token_ids;
 
     const int decode_steps = std::max(0, max_new_tokens);
 
     StageClient client(config_.first_stage_url);
 
-    // Prefill step: fake token-id placeholder with shape [1, 4].
     StageForwardStubRequest prefill;
     prefill.request_id = result.request_id;
     prefill.token_index = 0;
     prefill.generation_mode = "prefill";
     prefill.dtype = "int64";
-    prefill.shape = {1, 4};
+    prefill.shape = {1, static_cast<std::int64_t>(tokenized.token_ids.size())};
     prefill.kv_cache_enabled = true;
-    prefill.tensor_bytes = {
-        1, 0, 0, 0, 0, 0, 0, 0,
-        2, 0, 0, 0, 0, 0, 0, 0,
-        3, 0, 0, 0, 0, 0, 0, 0,
-        4, 0, 0, 0, 0, 0, 0, 0,
-    };
+    prefill.tensor_bytes = int64_tokens_to_little_endian_bytes(tokenized.token_ids);
 
     const StageClientResult prefill_response = client.forward_stub_frame(prefill);
     result.steps.push_back(make_step_trace(0, "prefill", prefill_response));
 
     for (int i = 0; i < decode_steps; ++i) {
+        const int fake_token_id = 1000 + i;
+        result.generated_token_ids.push_back(fake_token_id);
+
         StageForwardStubRequest decode;
         decode.request_id = result.request_id;
         decode.token_index = i;
@@ -136,10 +169,12 @@ std::string generation_loop_result_json(
         << "\"runtime\":\"cpp-native-stub\","
         << "\"status\":\"stub_generate_loop\","
         << "\"request_id\":\"" << dli::common::json_escape(result.request_id) << "\","
-        << "\"prompt\":\"\","
+        << "\"prompt\":\"" << dli::common::json_escape(result.prompt) << "\","
+        << "\"prompt_token_count\":" << result.prompt_token_ids.size() << ","
+        << "\"prompt_token_ids\":" << i64_vector_json(result.prompt_token_ids) << ","
         << "\"generated_text\":\"\","
         << "\"assistant_message\":\"\","
-        << "\"generated_token_ids\":[],"
+        << "\"generated_token_ids\":" << int_vector_json(result.generated_token_ids) << ","
         << "\"generated_token_count\":" << result.generated_token_count << ","
         << "\"total_latency_ms\":" << result.total_latency_ms << ","
         << "\"tokens_per_second\":" << result.tokens_per_second << ","

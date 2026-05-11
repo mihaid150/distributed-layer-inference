@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 #include <regex>
+#include <optional>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -43,6 +44,22 @@ int parse_int_field_or_default(
     } catch (const std::exception&) {
         return default_value;
     }
+}
+
+std::optional<std::string> parse_string_field(
+    const std::string& json,
+    const std::string& field_name
+) {
+    const std::regex pattern(
+        "\"" + field_name + R"dli("\s*:\s*"((?:\\.|[^"\\])*)")dli"
+    );
+
+    std::smatch match;
+    if (!std::regex_search(json, match, pattern)) {
+        return std::nullopt;
+    }
+
+    return match[1].str();
 }
 
 std::string health_json(const GatewayConfig& config) {
@@ -97,12 +114,18 @@ std::string generate_loop_json(
         512
     );
 
+    std::string prompt;
+    if (const auto parsed_prompt = parse_string_field(body_text, "prompt")) {
+        prompt = *parsed_prompt;
+    }
+
     GenerationLoopConfig loop_config;
     loop_config.first_stage_url = config.first_stage_url;
     loop_config.max_new_tokens = max_new_tokens;
 
     GenerationLoop loop(loop_config);
-    const GenerationLoopResult result = loop.run_stub_generation(loop_config.max_new_tokens);
+    const GenerationLoopResult result =
+        loop.run_stub_generation(prompt, loop_config.max_new_tokens);
 
     return generation_loop_result_json(result, request.body.size());
 }
