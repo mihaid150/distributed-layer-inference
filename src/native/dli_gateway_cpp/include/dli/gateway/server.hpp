@@ -1,16 +1,10 @@
 #pragma once
 
+#include "dli/gateway/config.hpp"
+
 #include <atomic>
-#include <string>
 
 namespace dli::gateway {
-
-struct GatewayConfig {
-    std::string config_path = "/app/configs/stage_map.yaml";
-    std::string service_name = "dli-gateway-cpp";
-    std::string first_stage_url = "http://inference-stage-1:8000/forward-binary";
-    int port = 8000;
-};
 
 class GatewayServer {
 public:

@@ -1,3 +1,4 @@
+#include "dli/gateway/config.hpp"
 #include "dli/gateway/server.hpp"
 
 #include <cstdlib>
@@ -10,8 +11,9 @@ namespace {
 
 struct CliOptions {
     std::string config_path = "/app/configs/stage_map.yaml";
-    std::string first_stage_url = "http://inference-stage-1:8000/forward-binary";
-    int port = 8000;
+    std::string first_stage_url;
+    std::string service_name;
+    int port = 0;
 };
 
 bool parse_int(const std::string& value, int& out) {
@@ -33,13 +35,19 @@ void print_usage(const char* program_name) {
         << "Usage: " << program_name << " [options]\n\n"
         << "Options:\n"
         << "  --config <path>             Path to stage_map.yaml. Default: /app/configs/stage_map.yaml\n"
-        << "  --port <port>               HTTP port for the native gateway. Default: 8000\n"
-        << "  --first-stage-url <url>     First stage URL. Default: http://inference-stage-1:8000/forward-binary\n"
+        << "  --port <port>               HTTP port for the native gateway.\n"
+        << "  --first-stage-url <url>     Override first stage URL.\n"
+        << "  --service-name <name>       Override service name.\n"
         << "  --help                      Show this help message.\n";
 }
 
 CliOptions parse_args(int argc, char** argv) {
     CliOptions options;
+
+    const char* env_config_path = std::getenv("STAGE_MAP_PATH");
+    if (env_config_path != nullptr && std::strlen(env_config_path) > 0) {
+        options.config_path = env_config_path;
+    }
 
     const char* env_port = std::getenv("PORT");
     if (env_port != nullptr) {
@@ -49,14 +57,14 @@ CliOptions parse_args(int argc, char** argv) {
         }
     }
 
-    const char* env_config_path = std::getenv("STAGE_MAP_PATH");
-    if (env_config_path != nullptr && std::strlen(env_config_path) > 0) {
-        options.config_path = env_config_path;
-    }
-
     const char* env_first_stage_url = std::getenv("FIRST_STAGE_URL");
     if (env_first_stage_url != nullptr && std::strlen(env_first_stage_url) > 0) {
         options.first_stage_url = env_first_stage_url;
+    }
+
+    const char* env_service_name = std::getenv("SERVICE_NAME");
+    if (env_service_name != nullptr && std::strlen(env_service_name) > 0) {
+        options.service_name = env_service_name;
     }
 
     for (int i = 1; i < argc; ++i) {
@@ -97,6 +105,14 @@ CliOptions parse_args(int argc, char** argv) {
             continue;
         }
 
+        if (arg == "--service-name") {
+            if (i + 1 >= argc) {
+                throw std::runtime_error("--service-name requires a value");
+            }
+            options.service_name = argv[++i];
+            continue;
+        }
+
         throw std::runtime_error("unknown argument: " + arg);
     }
 
@@ -109,13 +125,22 @@ int main(int argc, char** argv) {
     try {
         const CliOptions options = parse_args(argc, argv);
 
-        dli::gateway::GatewayConfig config;
-        config.config_path = options.config_path;
-        config.port = options.port;
-        config.first_stage_url = options.first_stage_url;
+        dli::gateway::GatewayConfig file_config =
+            dli::gateway::load_gateway_config_from_file(options.config_path);
+
+        dli::gateway::GatewayConfig override_config;
+        override_config.config_path = options.config_path;
+        override_config.port = options.port;
+        override_config.first_stage_url = options.first_stage_url;
+        override_config.service_name = options.service_name;
+
+        dli::gateway::GatewayConfig config =
+            dli::gateway::merge_gateway_config(file_config, override_config);
 
         std::cerr << "[dli-gateway-cpp] native C++ gateway runtime\n";
         std::cerr << "[dli-gateway-cpp] config_path=" << config.config_path << "\n";
+        std::cerr << "[dli-gateway-cpp] service_name=" << config.service_name << "\n";
+        std::cerr << "[dli-gateway-cpp] model_name=" << config.model_name << "\n";
         std::cerr << "[dli-gateway-cpp] port=" << config.port << "\n";
         std::cerr << "[dli-gateway-cpp] first_stage_url=" << config.first_stage_url << "\n";
         std::cerr << "[dli-gateway-cpp] runtime=cpp-native-stub\n";
