@@ -53,7 +53,11 @@ std::string metrics_json(const dli::common::StageMetrics& metrics) {
         << "\"output_tensor_bytes\":" << metrics.output_tensor_bytes << ","
         << "\"stage_input_token_count\":" << metrics.stage_input_token_count << ","
         << "\"stage_output_token_count\":" << metrics.stage_output_token_count << ","
-        << "\"kv_cache_step_valid\":" << (metrics.kv_cache_step_valid ? "true" : "false")
+        << "\"kv_cache_step_valid\":" << (metrics.kv_cache_step_valid ? "true" : "false") << ","
+        << "\"kv_cache_seq_before\":" << metrics.kv_cache_seq_before << ","
+        << "\"kv_cache_seq_after\":" << metrics.kv_cache_seq_after << ","
+        << "\"kv_cache_bytes\":" << metrics.kv_cache_bytes << ","
+        << "\"kv_cache_valid\":" << (metrics.kv_cache_valid ? "true" : "false")
         << "}";
 
     return out.str();

@@ -370,30 +370,135 @@ RuntimeResponse LlamaPartialRuntime::forward(const RuntimeRequest& request) {
 
     validate_runtime_request_matches_partition(request, shard_metadata_);
 
+    if (shard_metadata_.owns_embedding) {
+        return forward_source_partition(request);
+    }
+
     if (shard_metadata_.owns_lm_head || shard_metadata_.next_stage_url.empty()) {
         return forward_terminal_partition(request);
     }
 
-    return forward_non_terminal_partition(request);
+    return forward_intermediate_partition(request);
 }
 
-RuntimeResponse LlamaPartialRuntime::forward_terminal_partition(
+std::uint64_t LlamaPartialRuntime::estimate_kv_cache_bytes(int seq_len) const {
+    if (seq_len <= 0 || shard_metadata_.layers.empty()) {
+        return 0;
+    }
+
+    const int hidden_size =
+        shard_metadata_.hidden_size > 0
+            ? shard_metadata_.hidden_size
+            : model_metadata_.n_embd;
+
+    if (hidden_size <= 0) {
+        return 0;
+    }
+
+    // Conservative accounting for K and V cache as float32 for this correctness phase.
+    // This is not the final memory layout of llama.cpp; it is a stable per-partition
+    // accounting metric until the real GGML KV cache object is wired.
+    return
+        static_cast<std::uint64_t>(seq_len) *
+        static_cast<std::uint64_t>(shard_metadata_.layers.size()) *
+        static_cast<std::uint64_t>(hidden_size) *
+        static_cast<std::uint64_t>(2) *
+        static_cast<std::uint64_t>(sizeof(float));
+}
+
+PartitionKvCacheStep LlamaPartialRuntime::update_kv_cache_for_request(
+    const RuntimeRequest& request
+) {
+    PartitionKvCacheStep step;
+    step.seq_before = kv_cache_.seq_len;
+
+    const int input_seq =
+        static_cast<int>(dli::common::dli2_sequence_length(request.input_tensor));
+
+    if (!request.kv_cache_enabled) {
+        step.seq_after = step.seq_before;
+        step.valid = true;
+        step.bytes = estimate_kv_cache_bytes(step.seq_after);
+        return step;
+    }
+
+    if (request.generation_mode == "prefill") {
+        if (input_seq <= 0) {
+            step.valid = false;
+        } else {
+            kv_cache_.seq_len += input_seq;
+        }
+    } else if (request.generation_mode == "decode") {
+        if (input_seq != 1) {
+            step.valid = false;
+        } else {
+            kv_cache_.seq_len += 1;
+        }
+    } else {
+        step.valid = false;
+    }
+
+    kv_cache_.valid = kv_cache_.valid && step.valid;
+
+    step.seq_after = kv_cache_.seq_len;
+    step.bytes = estimate_kv_cache_bytes(step.seq_after);
+    step.valid = kv_cache_.valid;
+
+    return step;
+}
+
+RuntimeResponse LlamaPartialRuntime::forward_source_partition(
     const RuntimeRequest& request
 ) {
     const auto start = std::chrono::steady_clock::now();
 
-    RuntimeResponse response;
-    response.is_final_stage = true;
-    response.next_token_id = -1;
+    const PartitionKvCacheStep kv_step = update_kv_cache_for_request(request);
 
-    response.output_metadata_json = request.input_metadata_json;
-    response.output_tensor = {};
-    response.backend_metadata_json = backend_metadata_json();
+    RuntimeResponse response;
+    response.is_final_stage = false;
+    response.next_token_id = -1;
 
     const auto end = std::chrono::steady_clock::now();
 
     response.metrics.backend = backend_name();
-    response.metrics.status = "terminal_partition_real_execution_not_yet_implemented";
+    response.metrics.compute_time_ms = elapsed_ms(start, end);
+    response.metrics.true_comm_ms = 0.0;
+    response.metrics.rpc_wall_time_ms = 0.0;
+    response.metrics.input_tensor_bytes = request.input_tensor.bytes.size();
+    response.metrics.stage_input_token_count =
+        static_cast<int>(dli::common::dli2_sequence_length(request.input_tensor));
+    response.metrics.kv_cache_step_valid = kv_step.valid;
+    response.metrics.kv_cache_seq_before = kv_step.seq_before;
+    response.metrics.kv_cache_seq_after = kv_step.seq_after;
+    response.metrics.kv_cache_bytes = kv_step.bytes;
+    response.metrics.kv_cache_valid = kv_step.valid;
+
+    response.backend_metadata_json = backend_metadata_json();
+
+    throw std::runtime_error(
+        "source partition validated DLI2 token ids and KV-cache step, but real "
+        "embedding + assigned-layer execution is not implemented yet. Required "
+        "implementation: token_embd.weight lookup, layers " +
+        int_vector_json(shard_metadata_.layers) +
+        ", then output float32 hidden states [batch, seq, hidden_size]."
+    );
+}
+
+RuntimeResponse LlamaPartialRuntime::forward_intermediate_partition(
+    const RuntimeRequest& request
+) {
+    const auto start = std::chrono::steady_clock::now();
+
+    const PartitionKvCacheStep kv_step = update_kv_cache_for_request(request);
+
+    RuntimeResponse response;
+    response.is_final_stage = false;
+    response.next_token_id = -1;
+
+    const auto end = std::chrono::steady_clock::now();
+
+    response.metrics.backend = backend_name();
+    response.metrics.status = "intermediate_partition_execution_not_yet_implemented";
     response.metrics.compute_time_ms = elapsed_ms(start, end);
     response.metrics.true_comm_ms = 0.0;
     response.metrics.rpc_wall_time_ms = 0.0;
@@ -402,48 +507,62 @@ RuntimeResponse LlamaPartialRuntime::forward_terminal_partition(
     response.metrics.stage_input_token_count =
         static_cast<int>(dli::common::dli2_sequence_length(request.input_tensor));
     response.metrics.stage_output_token_count = 0;
-    response.metrics.kv_cache_step_valid = false;
+    response.metrics.kv_cache_step_valid = kv_step.valid;
+    response.metrics.kv_cache_seq_before = kv_step.seq_before;
+    response.metrics.kv_cache_seq_after = kv_step.seq_after;
+    response.metrics.kv_cache_bytes = kv_step.bytes;
+    response.metrics.kv_cache_valid = kv_step.valid;
+
+    response.backend_metadata_json = backend_metadata_json();
 
     throw std::runtime_error(
-        "terminal DLI GGUF partition validated successfully, but real partial "
-        "execution is not implemented yet. Required next implementation: execute "
-        "assigned layers, final norm, lm_head, then select next_token_id. Fake "
-        "next_token_id generation has been removed."
+        "intermediate partition validated DLI2 hidden states and KV-cache step, "
+        "but real assigned-layer execution is not implemented yet. Required "
+        "implementation: execute layers " +
+        int_vector_json(shard_metadata_.layers) +
+        " and output float32 hidden states [batch, seq, hidden_size]."
     );
 }
 
-RuntimeResponse LlamaPartialRuntime::forward_non_terminal_partition(
+RuntimeResponse LlamaPartialRuntime::forward_terminal_partition(
     const RuntimeRequest& request
 ) {
     const auto start = std::chrono::steady_clock::now();
 
-    RuntimeResponse response;
-    response.is_final_stage = false;
-    response.next_token_id = -1;
+    const PartitionKvCacheStep kv_step = update_kv_cache_for_request(request);
 
-    // Non-terminal execution is intentionally still an echo until source and
-    // intermediate layer execution are implemented.
-    response.output_metadata_json = request.input_metadata_json;
-    response.output_tensor = request.input_tensor;
-    response.backend_metadata_json = backend_metadata_json();
+    RuntimeResponse response;
+    response.is_final_stage = true;
+    response.next_token_id = -1;
 
     const auto end = std::chrono::steady_clock::now();
 
     response.metrics.backend = backend_name();
-    response.metrics.status = "non_terminal_partition_validated_echo_until_layer_execution";
     response.metrics.compute_time_ms = elapsed_ms(start, end);
     response.metrics.true_comm_ms = 0.0;
     response.metrics.rpc_wall_time_ms = 0.0;
     response.metrics.input_tensor_bytes = request.input_tensor.bytes.size();
-    response.metrics.output_tensor_bytes = response.output_tensor.bytes.size();
     response.metrics.stage_input_token_count =
         static_cast<int>(dli::common::dli2_sequence_length(request.input_tensor));
-    response.metrics.stage_output_token_count =
-        static_cast<int>(dli::common::dli2_sequence_length(response.output_tensor));
-    response.metrics.kv_cache_step_valid = true;
+    response.metrics.stage_output_token_count = 0;
+    response.metrics.kv_cache_step_valid = kv_step.valid;
+    response.metrics.kv_cache_seq_before = kv_step.seq_before;
+    response.metrics.kv_cache_seq_after = kv_step.seq_after;
+    response.metrics.kv_cache_bytes = kv_step.bytes;
+    response.metrics.kv_cache_valid = kv_step.valid;
 
-    return response;
+    response.backend_metadata_json = backend_metadata_json();
+
+    throw std::runtime_error(
+        "terminal partition validated DLI2 hidden states and KV-cache step, but "
+        "real terminal execution is not implemented yet. Required implementation: "
+        "execute layers " +
+        int_vector_json(shard_metadata_.layers) +
+        ", final norm, lm_head, logits, deterministic argmax/top_k=1, then "
+        "return next_token_id. Fake next_token_id generation remains disabled."
+    );
 }
+
 
 std::string LlamaPartialRuntime::backend_name() const {
     return "llama.cpp-partial-dli-gguf";
@@ -490,6 +609,11 @@ std::string LlamaPartialRuntime::backend_metadata_json() const {
         << "\"next_stage_url\":\"" << dli::common::json_escape(shard_metadata_.next_stage_url) << "\","
         << "\"hidden_size\":" << shard_metadata_.hidden_size << ","
         << "\"source_model\":\"" << dli::common::json_escape(shard_metadata_.source_model) << "\""
+        << "},"
+        << "\"kv_cache\":{"
+        << "\"seq_len\":" << kv_cache_.seq_len << ","
+        << "\"bytes\":" << estimate_kv_cache_bytes(kv_cache_.seq_len) << ","
+        << "\"valid\":" << (kv_cache_.valid ? "true" : "false")
         << "}"
         << "}";
 

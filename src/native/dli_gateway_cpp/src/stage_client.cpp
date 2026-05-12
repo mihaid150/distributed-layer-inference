@@ -44,7 +44,7 @@ std::string build_stub_metadata_json(const StageForwardStubRequest& request) {
         << "},"
         << "\"sampling\":{"
         << "\"temperature\":0.0,"
-        << "\"top_k\":null,"
+        << "\"top_k\":1,"
         << "\"top_p\":null"
         << "}"
         << "}";
@@ -57,18 +57,15 @@ std::string build_stub_metadata_json(const StageForwardStubRequest& request) {
 StageClient::StageClient(std::string first_stage_url)
     : first_stage_url_(std::move(first_stage_url)) {}
 
-StageClientResult StageClient::forward_stub_frame(
-    const StageForwardStubRequest& request
+StageClientResult StageClient::forward_frame(
+    const std::string& stage_url,
+    const dli::common::DliFrame& frame
 ) const {
-    dli::common::DliFrame request_frame;
-    request_frame.metadata_json = build_stub_metadata_json(request);
-    request_frame.tensor_bytes = request.tensor_bytes;
-
     const std::vector<std::uint8_t> request_body =
-        dli::common::encode_frame(request_frame);
+        dli::common::encode_frame(frame);
 
     const dli::common::HttpClientResponse http_response =
-        dli::common::http_post_binary(first_stage_url_, request_body);
+        dli::common::http_post_binary(stage_url, request_body);
 
     StageClientResult result;
     result.http_status = http_response.status_code;
@@ -76,9 +73,24 @@ StageClientResult StageClient::forward_stub_frame(
 
     if (http_response.status_code >= 200 && http_response.status_code < 300) {
         result.response_frame = dli::common::decode_frame(http_response.body);
+    } else {
+        result.error_body.assign(
+            reinterpret_cast<const char*>(http_response.body.data()),
+            http_response.body.size()
+        );
     }
 
     return result;
+}
+
+StageClientResult StageClient::forward_stub_frame(
+    const StageForwardStubRequest& request
+) const {
+    dli::common::DliFrame request_frame;
+    request_frame.metadata_json = build_stub_metadata_json(request);
+    request_frame.tensor_bytes = request.tensor_bytes;
+
+    return forward_frame(first_stage_url_, request_frame);
 }
 
 } // namespace dli::gateway

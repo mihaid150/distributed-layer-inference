@@ -12,6 +12,7 @@ struct StageClientResult {
     int http_status = 0;
     std::string http_reason;
     dli::common::DliFrame response_frame;
+    std::string error_body;
 };
 
 struct StageForwardStubRequest {
@@ -29,6 +30,11 @@ public:
     explicit StageClient(std::string first_stage_url);
 
     StageClientResult forward_stub_frame(const StageForwardStubRequest& request) const;
+
+    StageClientResult forward_frame(
+        const std::string& stage_url,
+        const dli::common::DliFrame& frame
+    ) const;
 
 private:
     std::string first_stage_url_;

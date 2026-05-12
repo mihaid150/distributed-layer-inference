@@ -2,7 +2,9 @@
 
 #include "dli_stage/runtime.hpp"
 
+#include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 struct llama_model;
@@ -58,6 +60,18 @@ struct LlamaShardMetadata {
     std::string source_model;
 };
 
+struct PartitionKvCacheState {
+    int seq_len = 0;
+    bool valid = true;
+};
+
+struct PartitionKvCacheStep {
+    int seq_before = 0;
+    int seq_after = 0;
+    std::uint64_t bytes = 0;
+    bool valid = true;
+};
+
 class LlamaPartialRuntime final : public StageRuntime {
 public:
     explicit LlamaPartialRuntime(LlamaPartialRuntimeConfig config);
@@ -82,13 +96,19 @@ private:
     LlamaModelMetadata model_metadata_;
     LlamaShardMetadata shard_metadata_;
 
+    PartitionKvCacheState kv_cache_;
+
     llama_model* model_ = nullptr;
     const llama_vocab* vocab_ = nullptr;
 
     std::string backend_metadata_json() const;
 
+    RuntimeResponse forward_source_partition(const RuntimeRequest& request);
+    RuntimeResponse forward_intermediate_partition(const RuntimeRequest& request);
     RuntimeResponse forward_terminal_partition(const RuntimeRequest& request);
-    RuntimeResponse forward_non_terminal_partition(const RuntimeRequest& request);
+
+    PartitionKvCacheStep update_kv_cache_for_request(const RuntimeRequest& request);
+    std::uint64_t estimate_kv_cache_bytes(int seq_len) const;
 };
 
 } // namespace dli_stage

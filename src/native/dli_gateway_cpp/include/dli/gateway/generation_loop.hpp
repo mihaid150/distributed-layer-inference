@@ -1,5 +1,6 @@
 #pragma once
 
+#include "dli/gateway/config.hpp"
 #include "dli/gateway/stage_client.hpp"
 #include "dli/gateway/tokenizer.hpp"
 
@@ -14,15 +15,23 @@ struct GenerationLoopConfig {
     std::string first_stage_url;
     std::string model_path;
     int max_new_tokens = 2;
+
+    std::vector<PartitionNodeConfig> partitions;
 };
 
 struct GenerationStepTrace {
     int token_index = 0;
     std::string generation_mode;
+
+    std::string partition_id;
+    int stage_id = 0;
+    std::string stage_url;
+
     int stage_http_status = 0;
     std::string stage_http_reason;
     std::string stage_metadata_json;
     std::size_t stage_tensor_bytes = 0;
+    std::string error_body;
 };
 
 struct GenerationLoopResult {
@@ -40,6 +49,10 @@ struct GenerationLoopResult {
     double total_latency_ms = 0.0;
     double tokens_per_second = 0.0;
     int generated_token_count = 0;
+
+    bool ok = true;
+    std::string error;
+    std::string termination_reason = "unknown";
 };
 
 class GenerationLoop {

@@ -20,6 +20,11 @@ struct StageMetrics {
     int stage_output_token_count = 0;
 
     bool kv_cache_step_valid = true;
+
+    int kv_cache_seq_before = 0;
+    int kv_cache_seq_after = 0;
+    std::uint64_t kv_cache_bytes = 0;
+    bool kv_cache_valid = true;
 };
 
 } // namespace dli::common

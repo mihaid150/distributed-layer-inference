@@ -189,6 +189,8 @@ std::string partition_graph_json(const std::vector<PartitionNodeConfig>& partiti
             << "\"service_name\":\"" << dli::common::json_escape(partition.service_name) << "\","
             << "\"physical_node\":\"" << dli::common::json_escape(partition.physical_node) << "\","
             << "\"partition_file\":\"" << dli::common::json_escape(partition.partition_file) << "\","
+            << "\"native_partition_file\":\"" << dli::common::json_escape(partition.native_partition_file) << "\","
+            << "\"backend\":\"" << dli::common::json_escape(partition.backend) << "\","
             << "\"next_stage_url\":\"" << dli::common::json_escape(partition.next_stage_url) << "\","
             << "\"components\":{"
             << "\"embedding\":" << (partition.components.embedding ? "true" : "false") << ","
@@ -266,6 +268,7 @@ std::string generate_loop_json(
     loop_config.first_stage_url = config.first_stage_url;
     loop_config.model_path = config.model_path;
     loop_config.max_new_tokens = max_new_tokens;
+    loop_config.partitions = config.partitions;
 
     GenerationLoop loop(loop_config, tokenizer);
 
@@ -311,10 +314,21 @@ dli::common::HttpResponse handle_request(
 
     if (request.method == "POST" && request.path == "/generate") {
         try {
+            const std::string response_json =
+                generate_loop_json(request, config, tokenizer);
+
+            if (response_json.find("\"ok\":false") != std::string::npos) {
+                return dli::common::make_json_response(
+                    502,
+                    "Bad Gateway",
+                    response_json
+                );
+            }
+
             return dli::common::make_json_response(
                 200,
                 "OK",
-                generate_loop_json(request, config, tokenizer)
+                response_json
             );
         } catch (const std::exception& exc) {
             return dli::common::make_json_response(
