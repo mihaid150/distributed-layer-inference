@@ -1,6 +1,7 @@
 #include "dli/gateway/tokenizer.hpp"
 
 #include <cstdint>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -45,6 +46,14 @@ TokenizedPrompt TokenizerStub::tokenize(const std::string& prompt) const {
     }
 
     return result;
+}
+
+std::string TokenizerStub::backend_name() const {
+    return "stub";
+}
+
+std::unique_ptr<Tokenizer> make_stub_tokenizer() {
+    return std::make_unique<TokenizerStub>();
 }
 
 std::vector<std::uint8_t> int64_tokens_to_little_endian_bytes(

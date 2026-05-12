@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -28,6 +29,7 @@ struct GenerationLoopResult {
     std::string request_id;
     std::string prompt;
 
+    std::string tokenizer_backend;
     std::vector<std::int64_t> prompt_token_ids;
     std::vector<int> generated_token_ids;
 
@@ -40,7 +42,10 @@ struct GenerationLoopResult {
 
 class GenerationLoop {
 public:
-    explicit GenerationLoop(GenerationLoopConfig config);
+    GenerationLoop(
+        GenerationLoopConfig config,
+        std::unique_ptr<Tokenizer> tokenizer
+    );
 
     GenerationLoopResult run_stub_generation(
         const std::string& prompt,
@@ -49,7 +54,7 @@ public:
 
 private:
     GenerationLoopConfig config_;
-    TokenizerStub tokenizer_;
+    std::unique_ptr<Tokenizer> tokenizer_;
 };
 
 std::string generation_loop_result_json(

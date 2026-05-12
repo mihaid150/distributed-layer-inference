@@ -124,7 +124,7 @@ std::string generate_loop_json(
     loop_config.first_stage_url = config.first_stage_url;
     loop_config.max_new_tokens = max_new_tokens;
 
-    GenerationLoop loop(loop_config);
+    GenerationLoop loop(loop_config, make_stub_tokenizer());
     const GenerationLoopResult result =
         loop.run_stub_generation(prompt, loop_config.max_new_tokens);
 

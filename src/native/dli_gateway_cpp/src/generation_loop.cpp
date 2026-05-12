@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -86,8 +87,16 @@ std::string i64_vector_json(const std::vector<std::int64_t>& values) {
 
 } // namespace
 
-GenerationLoop::GenerationLoop(GenerationLoopConfig config)
-    : config_(std::move(config)) {}
+GenerationLoop::GenerationLoop(
+    GenerationLoopConfig config,
+    std::unique_ptr<Tokenizer> tokenizer
+)
+    : config_(std::move(config)),
+      tokenizer_(std::move(tokenizer)) {
+    if (!tokenizer_) {
+        throw std::runtime_error("GenerationLoop requires a tokenizer");
+    }
+}
 
 GenerationLoopResult GenerationLoop::run_stub_generation(
     const std::string& prompt,
@@ -98,8 +107,9 @@ GenerationLoopResult GenerationLoop::run_stub_generation(
     GenerationLoopResult result;
     result.request_id = make_request_id();
     result.prompt = prompt;
+    result.tokenizer_backend = tokenizer_->backend_name();
 
-    const TokenizedPrompt tokenized = tokenizer_.tokenize(prompt);
+    const TokenizedPrompt tokenized = tokenizer_->tokenize(prompt);
     result.prompt_token_ids = tokenized.token_ids;
 
     const int decode_steps = std::max(0, max_new_tokens);
@@ -170,6 +180,7 @@ std::string generation_loop_result_json(
         << "\"status\":\"stub_generate_loop\","
         << "\"request_id\":\"" << dli::common::json_escape(result.request_id) << "\","
         << "\"prompt\":\"" << dli::common::json_escape(result.prompt) << "\","
+        << "\"tokenizer_backend\":\"" << dli::common::json_escape(result.tokenizer_backend) << "\","
         << "\"prompt_token_count\":" << result.prompt_token_ids.size() << ","
         << "\"prompt_token_ids\":" << i64_vector_json(result.prompt_token_ids) << ","
         << "\"generated_text\":\"\","
