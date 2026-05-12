@@ -23,4 +23,9 @@ TensorNamePlan build_llama_tensor_name_plan(
     const PartitionComponentsPlan& components
 );
 
+bool tensor_matches_plan(
+    const std::string& tensor_name,
+    const TensorNamePlan& plan
+);
+
 } // namespace dli::common
