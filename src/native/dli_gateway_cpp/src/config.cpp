@@ -1,6 +1,9 @@
 #include "dli/gateway/config.hpp"
 
+#include <algorithm>
 #include <fstream>
+#include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -15,10 +18,7 @@ std::string trim_copy(const std::string& value) {
     }
 
     std::size_t end = value.size();
-    while (
-        end > begin &&
-        (value[end - 1] == ' ' || value[end - 1] == '\t' || value[end - 1] == '\r')
-    ) {
+    while (end > begin && (value[end - 1] == ' ' || value[end - 1] == '\t' || value[end - 1] == '\r')) {
         --end;
     }
 
@@ -27,18 +27,6 @@ std::string trim_copy(const std::string& value) {
 
 bool starts_with(const std::string& value, const std::string& prefix) {
     return value.rfind(prefix, 0) == 0;
-}
-
-int indent_width(const std::string& line) {
-    int count = 0;
-    for (char c : line) {
-        if (c == ' ') {
-            ++count;
-        } else {
-            break;
-        }
-    }
-    return count;
 }
 
 std::string value_after_colon(const std::string& line) {
@@ -62,6 +50,18 @@ std::string value_after_colon(const std::string& line) {
     }
 
     return value;
+}
+
+int indent_width(const std::string& line) {
+    int count = 0;
+    for (char c : line) {
+        if (c == ' ') {
+            ++count;
+        } else {
+            break;
+        }
+    }
+    return count;
 }
 
 bool parse_bool_value(const std::string& value) {
@@ -113,7 +113,158 @@ void finish_partition_if_valid(
     has_current = false;
 }
 
+std::string join_ints(const std::vector<int>& values) {
+    std::ostringstream out;
+
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i > 0) {
+            out << ",";
+        }
+        out << values[i];
+    }
+
+    return out.str();
+}
+
+PartitionGraphValidation make_invalid_validation(const std::string& error) {
+    PartitionGraphValidation validation;
+    validation.valid = false;
+    validation.error = error;
+    return validation;
+}
+
 } // namespace
+
+PartitionGraphValidation validate_partition_graph(
+    const std::vector<PartitionNodeConfig>& partitions,
+    int num_layers
+) {
+    PartitionGraphValidation validation;
+
+    if (partitions.empty()) {
+        return make_invalid_validation("partition graph is empty");
+    }
+
+    std::vector<int> assigned_layers;
+    int embedding_owner_count = 0;
+    int lm_head_owner_count = 0;
+    int terminal_count = 0;
+    std::string terminal_partition_id;
+
+    for (const auto& partition : partitions) {
+        if (partition.partition_id.empty()) {
+            return make_invalid_validation("partition with empty partition_id found");
+        }
+
+        if (partition.service_name.empty()) {
+            return make_invalid_validation(
+                "partition " + partition.partition_id + " has empty service_name"
+            );
+        }
+
+        if (partition.components.embedding) {
+            embedding_owner_count += 1;
+        }
+
+        if (partition.components.lm_head) {
+            lm_head_owner_count += 1;
+        }
+
+        if (partition.next_stage_url.empty()) {
+            terminal_count += 1;
+            terminal_partition_id = partition.partition_id;
+
+            if (!partition.components.lm_head) {
+                return make_invalid_validation(
+                    "terminal partition " + partition.partition_id + " does not own lm_head"
+                );
+            }
+        }
+
+        for (const int layer : partition.components.layers) {
+            if (layer < 0) {
+                return make_invalid_validation(
+                    "partition " + partition.partition_id + " contains negative layer id"
+                );
+            }
+
+            if (num_layers > 0 && layer >= num_layers) {
+                return make_invalid_validation(
+                    "partition " + partition.partition_id +
+                    " contains layer id outside num_layers: " +
+                    std::to_string(layer)
+                );
+            }
+
+            assigned_layers.push_back(layer);
+        }
+    }
+
+    if (embedding_owner_count != 1) {
+        return make_invalid_validation(
+            "expected exactly one embedding owner, got " +
+            std::to_string(embedding_owner_count)
+        );
+    }
+
+    if (lm_head_owner_count != 1) {
+        return make_invalid_validation(
+            "expected exactly one lm_head owner, got " +
+            std::to_string(lm_head_owner_count)
+        );
+    }
+
+    if (terminal_count != 1) {
+        return make_invalid_validation(
+            "expected exactly one terminal partition, got " +
+            std::to_string(terminal_count)
+        );
+    }
+
+    std::sort(assigned_layers.begin(), assigned_layers.end());
+
+    std::vector<int> duplicates;
+    for (std::size_t i = 1; i < assigned_layers.size(); ++i) {
+        if (assigned_layers[i] == assigned_layers[i - 1]) {
+            if (duplicates.empty() || duplicates.back() != assigned_layers[i]) {
+                duplicates.push_back(assigned_layers[i]);
+            }
+        }
+    }
+
+    if (!duplicates.empty()) {
+        return make_invalid_validation(
+            "duplicate layer assignments: " + join_ints(duplicates)
+        );
+    }
+
+    if (num_layers > 0) {
+        std::vector<int> missing;
+
+        std::size_t cursor = 0;
+        for (int layer = 0; layer < num_layers; ++layer) {
+            if (cursor < assigned_layers.size() && assigned_layers[cursor] == layer) {
+                ++cursor;
+            } else {
+                missing.push_back(layer);
+            }
+        }
+
+        if (!missing.empty()) {
+            return make_invalid_validation(
+                "missing layer assignments: " + join_ints(missing)
+            );
+        }
+    }
+
+    validation.valid = true;
+    validation.error = "";
+    validation.assigned_layer_count = static_cast<int>(assigned_layers.size());
+    validation.embedding_owner_count = embedding_owner_count;
+    validation.lm_head_owner_count = lm_head_owner_count;
+    validation.terminal_partition_id = terminal_partition_id;
+    return validation;
+}
 
 GatewayConfig load_gateway_config_from_file(const std::string& config_path) {
     GatewayConfig config;
@@ -151,6 +302,11 @@ GatewayConfig load_gateway_config_from_file(const std::string& config_path) {
 
         if (indent == 0 && starts_with(trimmed, "model_path:")) {
             config.model_path = value_after_colon(trimmed);
+            continue;
+        }
+
+        if (indent == 0 && starts_with(trimmed, "num_layers:")) {
+            config.num_layers = std::stoi(value_after_colon(trimmed));
             continue;
         }
 
@@ -328,6 +484,17 @@ GatewayConfig load_gateway_config_from_file(const std::string& config_path) {
         current_partition,
         inside_current_partition
     );
+
+    config.partition_validation = validate_partition_graph(
+        config.partitions,
+        config.num_layers
+    );
+
+    if (!config.partition_validation.valid) {
+        throw std::runtime_error(
+            "invalid partition graph: " + config.partition_validation.error
+        );
+    }
 
     return config;
 }

@@ -53,6 +53,14 @@ void test_gateway_config_loads_expected_fields(const std::string& config_path) {
     assert(p3.components.norm);
     assert(p3.components.lm_head);
     assert((p3.components.layers == std::vector<int>{17, 18, 19, 20, 21}));
+
+    assert(config.num_layers == 22);
+    assert(config.partition_validation.valid);
+    assert(config.partition_validation.error.empty());
+    assert(config.partition_validation.assigned_layer_count == 22);
+    assert(config.partition_validation.embedding_owner_count == 1);
+    assert(config.partition_validation.lm_head_owner_count == 1);
+    assert(config.partition_validation.terminal_partition_id == "partition-4");
 }
 
 void test_gateway_config_override_merge(const std::string& config_path) {

@@ -12,6 +12,7 @@ add_library(dli-common-cpp STATIC
     src/json_escape.cpp
     src/http.cpp
     src/http_client.cpp
+    src/partition_plan.cpp
 )
 
 target_include_directories(dli-common-cpp PUBLIC
@@ -92,3 +93,25 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
 endif()
 
 add_test(NAME test-llama-backend-smoke COMMAND test-llama-backend-smoke)
+
+add_executable(test-partition-plan
+    tests/test_partition_plan.cpp
+)
+
+target_link_libraries(test-partition-plan PRIVATE
+    dli-common-cpp
+)
+
+target_compile_features(test-partition-plan PRIVATE cxx_std_17)
+
+target_compile_options(test-partition-plan PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_options(test-partition-plan PRIVATE -O3)
+endif()
+
+add_test(NAME test-partition-plan COMMAND test-partition-plan)
