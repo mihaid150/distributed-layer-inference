@@ -3,6 +3,9 @@
 #include "dli/gateway/tokenizer.hpp"
 #include "dli/common/http.hpp"
 #include "dli/common/json_escape.hpp"
+#include "dli/common/gguf_inspector.hpp"
+#include "dli/common/partition_plan.hpp"
+#include "dli/common/partition_tensor_assignment.hpp"
 
 #include <cerrno>
 #include <cstdint>
@@ -92,6 +95,82 @@ std::string int_vector_json(const std::vector<int>& values) {
     return out.str();
 }
 
+dli::common::PartitionComponentsPlan to_common_components(
+    const PartitionComponents& components
+) {
+    dli::common::PartitionComponentsPlan common;
+    common.embedding = components.embedding;
+    common.layers = components.layers;
+    common.norm = components.norm;
+    common.lm_head = components.lm_head;
+    return common;
+}
+
+std::string string_vector_json(const std::vector<std::string>& values) {
+    std::ostringstream out;
+    out << "[";
+
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i > 0) {
+            out << ",";
+        }
+        out << "\"" << dli::common::json_escape(values[i]) << "\"";
+    }
+
+    out << "]";
+    return out.str();
+}
+
+std::string partition_tensor_assignment_json(const GatewayConfig& config) {
+    if (config.model_path.empty()) {
+        return "[]";
+    }
+
+    try {
+        const dli::common::GgufInspection inspection =
+            dli::common::inspect_gguf_tensors(config.model_path);
+
+        std::ostringstream out;
+        out << "[";
+
+        for (std::size_t i = 0; i < config.partitions.size(); ++i) {
+            if (i > 0) {
+                out << ",";
+            }
+
+            const auto& partition = config.partitions[i];
+
+            const auto plan = dli::common::build_llama_tensor_name_plan(
+                partition.partition_id,
+                to_common_components(partition.components)
+            );
+
+            const auto assignment = dli::common::assign_tensors_to_partition(
+                inspection,
+                plan
+            );
+
+            out
+                << "{"
+                << "\"partition_id\":\"" << dli::common::json_escape(assignment.partition_id) << "\","
+                << "\"tensor_count\":" << assignment.tensor_names.size() << ","
+                << "\"missing_required_names\":" << string_vector_json(assignment.missing_required_names) << ","
+                << "\"missing_required_prefixes\":" << string_vector_json(assignment.missing_required_prefixes)
+                << "}";
+        }
+
+        out << "]";
+        return out.str();
+    } catch (const std::exception& exc) {
+        std::ostringstream out;
+        out
+            << "[{"
+            << "\"error\":\"" << dli::common::json_escape(exc.what()) << "\""
+            << "}]";
+        return out.str();
+    }
+}
+
 std::string partition_graph_json(const std::vector<PartitionNodeConfig>& partitions) {
     std::ostringstream out;
     out << "[";
@@ -138,7 +217,6 @@ std::string config_json(const GatewayConfig& config) {
         << "\"model_name\":\"" << dli::common::json_escape(config.model_name) << "\","
         << "\"model_path\":\"" << dli::common::json_escape(config.model_path) << "\","
         << "\"first_stage_url\":\"" << dli::common::json_escape(config.first_stage_url) << "\","
-        << "\"partition_count\":" << config.partitions.size() << ","
         << "\"partition_validation\":{"
         << "\"valid\":" << (config.partition_validation.valid ? "true" : "false") << ","
         << "\"error\":\"" << dli::common::json_escape(config.partition_validation.error) << "\","
@@ -147,7 +225,10 @@ std::string config_json(const GatewayConfig& config) {
         << "\"lm_head_owner_count\":" << config.partition_validation.lm_head_owner_count << ","
         << "\"terminal_partition_id\":\"" << dli::common::json_escape(config.partition_validation.terminal_partition_id) << "\""
         << "},"
+        << "\"partition_count\":" << config.partitions.size() << ","
         << "\"partition_graph\":" << partition_graph_json(config.partitions) << ","
+        << "\"partition_tensor_assignment\":"
+        << partition_tensor_assignment_json(config) << ","
         << "\"routes\":["
         << "\"GET /health\","
         << "\"GET /config\","
