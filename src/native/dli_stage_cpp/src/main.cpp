@@ -54,7 +54,10 @@ void print_usage(const char* program_name) {
         << "  DLI_STAGE_BACKEND    Runtime backend: stub | llama.\n";
 }
 
-std::unique_ptr<dli_stage::StageRuntime> make_runtime(const CliOptions& options) {
+std::unique_ptr<dli_stage::StageRuntime> make_runtime(
+    const CliOptions& options,
+    const dli_stage::StageConfig& stage_config
+) {
     if (options.backend == "stub") {
         return std::make_unique<dli_stage::StubRuntime>();
     }
@@ -63,6 +66,12 @@ std::unique_ptr<dli_stage::StageRuntime> make_runtime(const CliOptions& options)
         dli_stage::LlamaPartialRuntimeConfig config;
         config.model_path = options.model_path;
         config.stage_id = options.stage_id;
+
+        config.expected_layers = stage_config.components.layers;
+        config.expected_owns_embedding = stage_config.components.embedding;
+        config.expected_owns_norm = stage_config.components.norm;
+        config.expected_owns_lm_head = stage_config.components.lm_head;
+        config.expected_next_stage_url = stage_config.next_stage_url;
 
         return std::make_unique<dli_stage::LlamaPartialRuntime>(std::move(config));
     }
@@ -216,7 +225,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        auto runtime = make_runtime(runtime_options);
+        auto runtime = make_runtime(runtime_options, config);
 
         std::cerr << "[dli-stage-cpp] native C++ stage runtime\n";
         std::cerr << "[dli-stage-cpp] config_path=" << config.config_path << "\n";

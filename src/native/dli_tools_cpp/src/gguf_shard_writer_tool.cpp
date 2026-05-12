@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -181,9 +182,31 @@ int read_i32_metadata_or_default(
 ) {
     for (const auto& key : candidate_keys) {
         const int key_id = gguf_find_key(ctx, key.c_str());
-        if (key_id >= 0) {
+        if (key_id < 0) {
+            continue;
+        }
+
+        const gguf_type type = gguf_get_kv_type(ctx, key_id);
+
+        if (type == GGUF_TYPE_INT32) {
             return gguf_get_val_i32(ctx, key_id);
         }
+
+        if (type == GGUF_TYPE_UINT32) {
+            const std::uint32_t value = gguf_get_val_u32(ctx, key_id);
+
+            if (value > static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+                throw std::runtime_error(
+                    "GGUF metadata value is too large for int: " + key
+                );
+            }
+
+            return static_cast<int>(value);
+        }
+
+        throw std::runtime_error(
+            "GGUF metadata key has unsupported integer type for this writer: " + key
+        );
     }
 
     return default_value;

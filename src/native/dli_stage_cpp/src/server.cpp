@@ -139,6 +139,8 @@ std::string config_json(const StageConfig& config) {
         << "\"config_path\":\"" << dli::common::json_escape(config.config_path) << "\","
         << "\"physical_node\":\"" << dli::common::json_escape(config.physical_node) << "\","
         << "\"partition_file\":\"" << dli::common::json_escape(config.partition_file) << "\","
+        << "\"native_partition_file\":\"" << dli::common::json_escape(config.native_partition_file) << "\","
+        << "\"backend\":\"" << dli::common::json_escape(config.backend) << "\","
         << "\"next_stage_url\":\"" << dli::common::json_escape(config.next_stage_url) << "\","
         << "\"components\":{"
         << "\"embedding\":" << (config.components.embedding ? "true" : "false") << ","
@@ -196,6 +198,10 @@ RuntimeRequest make_runtime_request(
 
     request.has_top_p = parsed.has_top_p;
     request.top_p = parsed.top_p;
+
+    request.has_next_token_id = parsed.has_next_token_id;
+    request.next_token_id = parsed.next_token_id;
+    request.stage_input_token_count = parsed.stage_input_token_count;
 
     return request;
 }
