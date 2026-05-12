@@ -62,3 +62,30 @@ add_test(NAME test-gateway-config COMMAND test-gateway-config)
 set_tests_properties(test-gateway-config PROPERTIES
     ENVIRONMENT "DLI_TEST_STAGE_MAP_PATH=${CMAKE_SOURCE_DIR}/../../configs/stage_map.yaml"
 )
+
+add_executable(test-tokenizer
+    tests/test_tokenizer.cpp
+    src/tokenizer.cpp
+)
+
+target_include_directories(test-tokenizer PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(test-tokenizer PRIVATE
+    dli-common-cpp
+)
+
+target_compile_features(test-tokenizer PRIVATE cxx_std_17)
+
+target_compile_options(test-tokenizer PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_options(test-tokenizer PRIVATE -O3)
+endif()
+
+add_test(NAME test-tokenizer COMMAND test-tokenizer)

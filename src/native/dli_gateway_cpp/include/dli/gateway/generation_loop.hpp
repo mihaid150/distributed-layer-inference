@@ -10,9 +10,10 @@
 #include <vector>
 
 namespace dli::gateway {
-
+    
 struct GenerationLoopConfig {
     std::string first_stage_url;
+    std::string model_path;
     int max_new_tokens = 2;
 };
 
