@@ -83,7 +83,7 @@ std::string runtime_response_metadata_json(
     out
         << "{"
         << "\"ok\":true,"
-        << "\"service\":\"dli-stage-cpp\","
+        << "\"service\":\"" << dli::common::json_escape(config.service_name) << "\","
         << "\"runtime\":\"cpp-native-stub\","
         << "\"backend\":\"" << dli::common::json_escape(response.metrics.backend) << "\","
         << "\"status\":\"" << dli::common::json_escape(response.metrics.status) << "\","
@@ -104,9 +104,10 @@ std::string runtime_response_metadata_json(
         << "\"feature_flags\":{"
         << "\"kv_cache_enabled\":" << (request.kv_cache_enabled ? "true" : "false")
         << "},"
-        << "\"metrics\":" << metrics_json(response.metrics)
+        << "\"metrics\":" << metrics_json(response.metrics) << ","
+        << "\"backend_metadata\":"
+        << (response.backend_metadata_json.empty() ? "{}" : response.backend_metadata_json)
         << "}";
-
     return out.str();
 }
 

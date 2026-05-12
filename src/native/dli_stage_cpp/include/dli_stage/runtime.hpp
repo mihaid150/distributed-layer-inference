@@ -36,6 +36,10 @@ struct RuntimeResponse {
     dli::common::TensorBuffer output_tensor;
 
     dli::common::StageMetrics metrics;
+
+    // Optional runtime-specific metadata, already serialized as JSON object text.
+    // Example: {"model_loaded":true,"n_layer":22}
+    std::string backend_metadata_json;
 };
 
 class StageRuntime {

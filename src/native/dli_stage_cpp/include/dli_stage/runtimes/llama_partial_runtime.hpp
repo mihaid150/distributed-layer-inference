@@ -14,6 +14,21 @@ struct LlamaPartialRuntimeConfig {
     int stage_id = 0;
 };
 
+struct LlamaModelMetadata {
+    bool model_loaded = false;
+
+    std::string model_path;
+    std::string architecture;
+    std::string name;
+
+    int n_ctx_train = 0;
+    int n_embd = 0;
+    int n_layer = 0;
+    int n_head = 0;
+    int n_head_kv = 0;
+    int n_vocab = 0;
+};
+
 class LlamaPartialRuntime final : public StageRuntime {
 public:
     explicit LlamaPartialRuntime(LlamaPartialRuntimeConfig config);
@@ -29,12 +44,16 @@ public:
 
     const LlamaPartialRuntimeConfig& config() const;
 
+    const LlamaModelMetadata& model_metadata() const;
+
 private:
     LlamaPartialRuntimeConfig config_;
+    LlamaModelMetadata model_metadata_;
 
     llama_model* model_ = nullptr;
     const llama_vocab* vocab_ = nullptr;
-    bool model_loaded_ = false;
+
+    std::string backend_metadata_json() const;
 };
 
 } // namespace dli_stage
