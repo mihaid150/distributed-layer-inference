@@ -4,12 +4,16 @@
 #include "dli/common/json_escape.hpp"
 #include "dli/common/tensor.hpp"
 
+#include "ggml.h"
 #include "gguf.h"
 #include "llama.h"
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -20,6 +24,68 @@
 namespace dli_stage {
 
 namespace {
+
+std::uint64_t current_rss_mb() {
+    std::ifstream input("/proc/self/status");
+
+    if (!input.is_open()) {
+        return 0;
+    }
+
+    std::string key;
+    while (input >> key) {
+        if (key == "VmRSS:") {
+            std::uint64_t kb = 0;
+            std::string unit;
+            input >> kb >> unit;
+            return (kb + 1023u) / 1024u;
+        }
+
+        std::string rest;
+        std::getline(input, rest);
+    }
+
+    return 0;
+}
+
+std::int64_t read_i64_le(
+    const std::vector<std::uint8_t>& bytes,
+    std::size_t offset
+) {
+    if (offset + sizeof(std::int64_t) > bytes.size()) {
+        throw std::runtime_error("cannot read int64 token id past tensor byte buffer");
+    }
+
+    std::uint64_t value = 0;
+
+    for (int i = 0; i < 8; ++i) {
+        value |=
+            static_cast<std::uint64_t>(bytes[offset + static_cast<std::size_t>(i)])
+            << static_cast<unsigned>(i * 8);
+    }
+
+    return static_cast<std::int64_t>(value);
+}
+
+void write_f32_le(
+    std::vector<std::uint8_t>& bytes,
+    std::size_t offset,
+    float value
+) {
+    static_assert(sizeof(float) == 4);
+
+    if (offset + sizeof(float) > bytes.size()) {
+        throw std::runtime_error("cannot write float32 past tensor byte buffer");
+    }
+
+    std::uint32_t raw = 0;
+    std::memcpy(&raw, &value, sizeof(float));
+
+    bytes[offset + 0] = static_cast<std::uint8_t>(raw & 0xffu);
+    bytes[offset + 1] = static_cast<std::uint8_t>((raw >> 8u) & 0xffu);
+    bytes[offset + 2] = static_cast<std::uint8_t>((raw >> 16u) & 0xffu);
+    bytes[offset + 3] = static_cast<std::uint8_t>((raw >> 24u) & 0xffu);
+}
 
 double elapsed_ms(
     const std::chrono::steady_clock::time_point& start,
@@ -304,6 +370,8 @@ LlamaPartialRuntime::LlamaPartialRuntime(LlamaPartialRuntimeConfig config)
     model_metadata_.model_path = config_.model_path;
 
     if (!config_.model_path.empty()) {
+        const auto load_start = std::chrono::steady_clock::now();
+
         shard_metadata_ = load_shard_metadata_from_gguf(config_.model_path);
         validate_shard_against_stage_config(shard_metadata_, config_);
 
@@ -350,10 +418,25 @@ LlamaPartialRuntime::LlamaPartialRuntime(LlamaPartialRuntimeConfig config)
                 );
             }
         }
+
+        load_raw_tensor_context();
+
+        const auto load_end = std::chrono::steady_clock::now();
+        model_load_ms_ = elapsed_ms(load_start, load_end);
     }
 }
 
 LlamaPartialRuntime::~LlamaPartialRuntime() {
+    if (tensor_data_ctx_ != nullptr) {
+        ggml_free(tensor_data_ctx_);
+        tensor_data_ctx_ = nullptr;
+    }
+
+    if (tensor_gguf_ctx_ != nullptr) {
+        gguf_free(tensor_gguf_ctx_);
+        tensor_gguf_ctx_ = nullptr;
+    }
+
     if (model_ != nullptr) {
         llama_model_free(model_);
         model_ = nullptr;
@@ -361,6 +444,161 @@ LlamaPartialRuntime::~LlamaPartialRuntime() {
     }
 
     model_metadata_.model_loaded = false;
+}
+
+void LlamaPartialRuntime::load_raw_tensor_context() {
+    if (config_.model_path.empty()) {
+        throw std::runtime_error("cannot load raw tensors without model_path");
+    }
+
+    if (tensor_gguf_ctx_ != nullptr || tensor_data_ctx_ != nullptr) {
+        return;
+    }
+
+    ggml_context* raw_data_ctx = nullptr;
+
+    gguf_init_params params{};
+    params.no_alloc = false;
+    params.ctx = &raw_data_ctx;
+
+    tensor_gguf_ctx_ = gguf_init_from_file(config_.model_path.c_str(), params);
+    tensor_data_ctx_ = raw_data_ctx;
+
+    if (tensor_gguf_ctx_ == nullptr) {
+        throw std::runtime_error(
+            "failed to load GGUF shard tensor data: " + config_.model_path
+        );
+    }
+
+    if (tensor_data_ctx_ == nullptr) {
+        gguf_free(tensor_gguf_ctx_);
+        tensor_gguf_ctx_ = nullptr;
+
+        throw std::runtime_error(
+            "GGUF shard did not produce a GGML tensor context: " + config_.model_path
+        );
+    }
+}
+
+dli::common::TensorBuffer LlamaPartialRuntime::execute_token_embedding_only(
+    const dli::common::TensorBuffer& token_ids
+) const {
+    if (tensor_data_ctx_ == nullptr) {
+        throw std::runtime_error("raw GGUF tensor context is not loaded");
+    }
+
+    if (!shard_metadata_.owns_embedding) {
+        throw std::runtime_error("execute_token_embedding_only called on non-source partition");
+    }
+
+    dli::common::validate_token_ids_tensor(token_ids);
+
+    if (token_ids.metadata.shape.size() != 2) {
+        throw std::runtime_error("token id input must have shape [batch, seq]");
+    }
+
+    const std::int64_t batch = token_ids.metadata.shape[0];
+    const std::int64_t seq = token_ids.metadata.shape[1];
+
+    if (batch <= 0 || seq <= 0) {
+        throw std::runtime_error("token id input has invalid [batch, seq]");
+    }
+
+    ggml_tensor* embedding = ggml_get_tensor(tensor_data_ctx_, "token_embd.weight");
+    if (embedding == nullptr) {
+        throw std::runtime_error("source shard is missing token_embd.weight");
+    }
+
+    const int64_t hidden_size = embedding->ne[0];
+    const int64_t vocab_size = embedding->ne[1];
+
+    if (hidden_size <= 0 || vocab_size <= 0) {
+        throw std::runtime_error("token_embd.weight has invalid dimensions");
+    }
+
+    if (
+        shard_metadata_.hidden_size > 0 &&
+        hidden_size != static_cast<int64_t>(shard_metadata_.hidden_size)
+    ) {
+        throw std::runtime_error(
+            "token_embd.weight hidden size does not match dli.hidden_size"
+        );
+    }
+
+    const std::size_t token_count =
+        static_cast<std::size_t>(batch * seq);
+
+    const std::size_t output_float_count =
+        token_count * static_cast<std::size_t>(hidden_size);
+
+    std::vector<float> output_f32(output_float_count, 0.0f);
+
+    const std::size_t row_size =
+        ggml_row_size(embedding->type, hidden_size);
+
+    const auto* base =
+        static_cast<const std::uint8_t*>(embedding->data);
+
+    if (base == nullptr) {
+        throw std::runtime_error("token_embd.weight has null data pointer");
+    }
+
+    const ggml_type_traits* traits = ggml_get_type_traits(embedding->type);
+    if (traits == nullptr || traits->to_float == nullptr) {
+        throw std::runtime_error("token_embd.weight type cannot be converted to float32");
+    }
+
+    std::vector<float> row_f32(static_cast<std::size_t>(hidden_size), 0.0f);
+
+    for (std::size_t i = 0; i < token_count; ++i) {
+        const std::int64_t token_id =
+            read_i64_le(token_ids.bytes, i * sizeof(std::int64_t));
+
+        if (token_id < 0 || token_id >= vocab_size) {
+            throw std::runtime_error(
+                "token id out of vocabulary range: " + std::to_string(token_id)
+            );
+        }
+
+        const std::uint8_t* row_ptr =
+            base + static_cast<std::size_t>(token_id) * row_size;
+
+        traits->to_float(
+            row_ptr,
+            row_f32.data(),
+            hidden_size
+        );
+
+        float* output_row =
+            output_f32.data() + i * static_cast<std::size_t>(hidden_size);
+
+        std::copy(
+            row_f32.begin(),
+            row_f32.end(),
+            output_row
+        );
+    }
+
+    dli::common::TensorBuffer out;
+    out.metadata.dtype = "float32";
+    out.metadata.shape = {
+        batch,
+        seq,
+        hidden_size
+    };
+    out.metadata.byte_order = "little";
+
+    out.bytes.resize(output_f32.size() * sizeof(float));
+
+    for (std::size_t i = 0; i < output_f32.size(); ++i) {
+        write_f32_le(
+            out.bytes,
+            i * sizeof(float),
+            output_f32[i]
+        );
+    }
+
+    return out;
 }
 
 RuntimeResponse LlamaPartialRuntime::forward(const RuntimeRequest& request) {
@@ -458,30 +696,40 @@ RuntimeResponse LlamaPartialRuntime::forward_source_partition(
     response.is_final_stage = false;
     response.next_token_id = -1;
 
+    response.output_tensor = execute_token_embedding_only(request.input_tensor);
+
+    // IMPORTANT:
+    // This patch implements real token embedding only.
+    // Transformer layers owned by the source partition are not executed yet.
+    response.output_metadata_json = request.input_metadata_json;
+    response.backend_metadata_json = backend_metadata_json();
+
     const auto end = std::chrono::steady_clock::now();
 
     response.metrics.backend = backend_name();
+    response.metrics.status = "source_embedding_only_layers_not_yet_executed";
     response.metrics.compute_time_ms = elapsed_ms(start, end);
     response.metrics.true_comm_ms = 0.0;
     response.metrics.rpc_wall_time_ms = 0.0;
+
     response.metrics.input_tensor_bytes = request.input_tensor.bytes.size();
+    response.metrics.output_tensor_bytes = response.output_tensor.bytes.size();
+
     response.metrics.stage_input_token_count =
         static_cast<int>(dli::common::dli2_sequence_length(request.input_tensor));
+    response.metrics.stage_output_token_count =
+        static_cast<int>(dli::common::dli2_sequence_length(response.output_tensor));
+
     response.metrics.kv_cache_step_valid = kv_step.valid;
     response.metrics.kv_cache_seq_before = kv_step.seq_before;
     response.metrics.kv_cache_seq_after = kv_step.seq_after;
     response.metrics.kv_cache_bytes = kv_step.bytes;
     response.metrics.kv_cache_valid = kv_step.valid;
 
-    response.backend_metadata_json = backend_metadata_json();
+    response.metrics.model_load_ms = model_load_ms_;
+    response.metrics.memory_rss_mb = current_rss_mb();
 
-    throw std::runtime_error(
-        "source partition validated DLI2 token ids and KV-cache step, but real "
-        "embedding + assigned-layer execution is not implemented yet. Required "
-        "implementation: token_embd.weight lookup, layers " +
-        int_vector_json(shard_metadata_.layers) +
-        ", then output float32 hidden states [batch, seq, hidden_size]."
-    );
+    return response;
 }
 
 RuntimeResponse LlamaPartialRuntime::forward_intermediate_partition(
@@ -514,6 +762,9 @@ RuntimeResponse LlamaPartialRuntime::forward_intermediate_partition(
     response.metrics.kv_cache_valid = kv_step.valid;
 
     response.backend_metadata_json = backend_metadata_json();
+
+    response.metrics.model_load_ms = model_load_ms_;
+    response.metrics.memory_rss_mb = current_rss_mb();
 
     throw std::runtime_error(
         "intermediate partition validated DLI2 hidden states and KV-cache step, "
@@ -552,6 +803,9 @@ RuntimeResponse LlamaPartialRuntime::forward_terminal_partition(
     response.metrics.kv_cache_valid = kv_step.valid;
 
     response.backend_metadata_json = backend_metadata_json();
+
+    response.metrics.model_load_ms = model_load_ms_;
+    response.metrics.memory_rss_mb = current_rss_mb();
 
     throw std::runtime_error(
         "terminal partition validated DLI2 hidden states and KV-cache step, but "

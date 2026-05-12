@@ -25,6 +25,9 @@ struct StageMetrics {
     int kv_cache_seq_after = 0;
     std::uint64_t kv_cache_bytes = 0;
     bool kv_cache_valid = true;
+
+    double model_load_ms = 0.0;
+    std::uint64_t memory_rss_mb = 0;
 };
 
 } // namespace dli::common

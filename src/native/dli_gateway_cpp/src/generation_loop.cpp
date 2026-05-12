@@ -13,11 +13,95 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <regex>
 
 namespace dli::gateway {
 
 namespace {
 
+bool extract_number_field(
+    const std::string& json,
+    const std::string& key,
+    double& out
+) {
+    const std::regex pattern(
+        "\"" + key + R"("\s*:\s*(-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?))"
+    );
+
+    std::smatch match;
+    if (!std::regex_search(json, match, pattern)) {
+        return false;
+    }
+
+    try {
+        out = std::stod(match[1].str());
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool extract_u64_field(
+    const std::string& json,
+    const std::string& key,
+    std::uint64_t& out
+) {
+    double value = 0.0;
+
+    if (!extract_number_field(json, key, value)) {
+        return false;
+    }
+
+    if (value < 0.0) {
+        return false;
+    }
+
+    out = static_cast<std::uint64_t>(value);
+    return true;
+}
+
+void aggregate_stage_metrics(
+    GenerationLoopResult& result,
+    const std::string& metadata_json
+) {
+    double d = 0.0;
+    std::uint64_t u = 0;
+
+    if (extract_number_field(metadata_json, "compute_time_ms", d)) {
+        result.aggregate_metrics.compute_ms += d;
+    }
+
+    if (extract_number_field(metadata_json, "rpc_wall_time_ms", d)) {
+        result.aggregate_metrics.rpc_wall_ms += d;
+    }
+
+    if (extract_number_field(metadata_json, "true_comm_ms", d)) {
+        result.aggregate_metrics.true_comm_ms += d;
+    }
+
+    if (extract_u64_field(metadata_json, "input_tensor_bytes", u)) {
+        result.aggregate_metrics.tensor_bytes_in += u;
+    }
+
+    if (extract_u64_field(metadata_json, "output_tensor_bytes", u)) {
+        result.aggregate_metrics.tensor_bytes_out += u;
+    }
+
+    if (extract_number_field(metadata_json, "model_load_ms", d)) {
+        result.aggregate_metrics.model_load_ms += d;
+    }
+
+    if (extract_u64_field(metadata_json, "kv_cache_bytes", u)) {
+        result.aggregate_metrics.kv_cache_bytes =
+            std::max(result.aggregate_metrics.kv_cache_bytes, u);
+    }
+
+    if (extract_u64_field(metadata_json, "memory_rss_mb", u)) {
+        result.aggregate_metrics.memory_rss_mb =
+            std::max(result.aggregate_metrics.memory_rss_mb, u);
+    }
+}
+    
 std::string make_request_id() {
     return "gateway-loop-native-routing-request";
 }
@@ -238,6 +322,8 @@ StageClientResult forward_through_partition_graph(
 
         current_frame = last_result.response_frame;
 
+        aggregate_stage_metrics(result, current_frame.metadata_json);
+
         if (is_terminal_partition(partition)) {
             return last_result;
         }
@@ -398,6 +484,16 @@ std::string generation_loop_result_json(
         << "\"generated_token_count\":" << result.generated_token_count << ","
         << "\"total_latency_ms\":" << result.total_latency_ms << ","
         << "\"tokens_per_second\":" << result.tokens_per_second << ","
+        << "\"aggregate_metrics\":{"
+        << "\"compute_ms\":" << result.aggregate_metrics.compute_ms << ","
+        << "\"rpc_wall_ms\":" << result.aggregate_metrics.rpc_wall_ms << ","
+        << "\"true_comm_ms\":" << result.aggregate_metrics.true_comm_ms << ","
+        << "\"tensor_bytes_in\":" << result.aggregate_metrics.tensor_bytes_in << ","
+        << "\"tensor_bytes_out\":" << result.aggregate_metrics.tensor_bytes_out << ","
+        << "\"model_load_ms\":" << result.aggregate_metrics.model_load_ms << ","
+        << "\"kv_cache_bytes\":" << result.aggregate_metrics.kv_cache_bytes << ","
+        << "\"memory_rss_mb\":" << result.aggregate_metrics.memory_rss_mb
+        << "},"
         << "\"termination_reason\":\"" << dli::common::json_escape(result.termination_reason) << "\","
         << "\"error\":\"" << dli::common::json_escape(result.error) << "\","
         << "\"request_body_bytes\":" << request_body_bytes << ","

@@ -4,9 +4,10 @@
 
 #include <cstdint>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
+struct gguf_context;
+struct ggml_context;
 struct llama_model;
 struct llama_vocab;
 
@@ -101,6 +102,11 @@ private:
     llama_model* model_ = nullptr;
     const llama_vocab* vocab_ = nullptr;
 
+    gguf_context* tensor_gguf_ctx_ = nullptr;
+    ggml_context* tensor_data_ctx_ = nullptr;
+
+    double model_load_ms_ = 0.0;
+
     std::string backend_metadata_json() const;
 
     RuntimeResponse forward_source_partition(const RuntimeRequest& request);
@@ -109,6 +115,11 @@ private:
 
     PartitionKvCacheStep update_kv_cache_for_request(const RuntimeRequest& request);
     std::uint64_t estimate_kv_cache_bytes(int seq_len) const;
+
+    void load_raw_tensor_context();
+    dli::common::TensorBuffer execute_token_embedding_only(
+        const dli::common::TensorBuffer& token_ids
+    ) const;
 };
 
 } // namespace dli_stage

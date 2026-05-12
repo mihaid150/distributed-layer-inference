@@ -57,7 +57,9 @@ std::string metrics_json(const dli::common::StageMetrics& metrics) {
         << "\"kv_cache_seq_before\":" << metrics.kv_cache_seq_before << ","
         << "\"kv_cache_seq_after\":" << metrics.kv_cache_seq_after << ","
         << "\"kv_cache_bytes\":" << metrics.kv_cache_bytes << ","
-        << "\"kv_cache_valid\":" << (metrics.kv_cache_valid ? "true" : "false")
+        << "\"kv_cache_valid\":" << (metrics.kv_cache_valid ? "true" : "false") << ","
+        << "\"model_load_ms\":" << metrics.model_load_ms << ","
+        << "\"memory_rss_mb\":" << metrics.memory_rss_mb
         << "}";
 
     return out.str();
@@ -83,6 +85,10 @@ std::string runtime_response_metadata_json(
     const StageConfig& config,
     const RuntimeRequest& request
 ) {
+    const dli::common::TensorMetadata& tensor_metadata =
+    response.output_tensor.metadata.shape.empty()
+        ? request.input_tensor.metadata
+        : response.output_tensor.metadata;
     std::ostringstream out;
     out
         << "{"
@@ -101,9 +107,9 @@ std::string runtime_response_metadata_json(
         << "\"is_final_stage\":" << (response.is_final_stage ? "true" : "false") << ","
         << "\"next_token_id\":" << response.next_token_id << ","
         << "\"tensor\":{"
-        << "\"dtype\":\"" << dli::common::json_escape(request.input_tensor.metadata.dtype) << "\","
-        << "\"shape\":" << shape_json(request.input_tensor.metadata.shape) << ","
-        << "\"byte_order\":\"" << dli::common::json_escape(request.input_tensor.metadata.byte_order) << "\""
+        << "\"dtype\":\"" << dli::common::json_escape(tensor_metadata.dtype) << "\","
+        << "\"shape\":" << shape_json(tensor_metadata.shape) << ","
+        << "\"byte_order\":\"" << dli::common::json_escape(tensor_metadata.byte_order) << "\""
         << "},"
         << "\"feature_flags\":{"
         << "\"kv_cache_enabled\":" << (request.kv_cache_enabled ? "true" : "false")

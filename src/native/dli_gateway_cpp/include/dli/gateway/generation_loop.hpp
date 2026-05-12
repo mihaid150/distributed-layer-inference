@@ -34,6 +34,19 @@ struct GenerationStepTrace {
     std::string error_body;
 };
 
+struct GatewayAggregatedMetrics {
+    double compute_ms = 0.0;
+    double rpc_wall_ms = 0.0;
+    double true_comm_ms = 0.0;
+
+    std::uint64_t tensor_bytes_in = 0;
+    std::uint64_t tensor_bytes_out = 0;
+
+    double model_load_ms = 0.0;
+    std::uint64_t kv_cache_bytes = 0;
+    std::uint64_t memory_rss_mb = 0;
+};
+
 struct GenerationLoopResult {
     std::string request_id;
     std::string prompt;
@@ -45,6 +58,8 @@ struct GenerationLoopResult {
     std::string generated_text;
 
     std::vector<GenerationStepTrace> steps;
+
+    GatewayAggregatedMetrics aggregate_metrics;
 
     double total_latency_ms = 0.0;
     double tokens_per_second = 0.0;
