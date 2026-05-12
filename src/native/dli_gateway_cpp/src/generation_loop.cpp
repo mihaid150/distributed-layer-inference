@@ -390,25 +390,32 @@ GenerationLoopResult GenerationLoop::run_stub_generation(
         prefill.tensor_bytes = int64_tokens_to_bytes(tokenized.token_ids);
 
         StageClientResult terminal_prefill_response =
-            forward_through_partition_graph(
-                config_,
-                client,
-                prefill,
-                0,
-                "prefill",
-                result
-            );
-
-        // Prefill may or may not return a token depending on final runtime policy.
-        // Decode below is authoritative for generated tokens.
-        (void) terminal_prefill_response;
+        forward_through_partition_graph(
+            config_,
+            client,
+            prefill,
+            0,
+            "prefill",
+            result
+        );
 
         int last_token_id =
             tokenized.token_ids.empty()
                 ? 1
                 : static_cast<int>(tokenized.token_ids.back());
 
-        for (int i = 0; i < decode_steps; ++i) {
+        int decode_start = 0;
+
+        if (decode_steps > 0) {
+            const int first_generated_token =
+                next_token_id_from_terminal_response(terminal_prefill_response);
+
+            result.generated_token_ids.push_back(first_generated_token);
+            last_token_id = first_generated_token;
+            decode_start = 1;
+        }
+
+        for (int i = decode_start; i < decode_steps; ++i) {
             dli::common::DliFrame decode;
 
             decode.metadata_json = request_metadata_json(

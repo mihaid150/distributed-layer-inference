@@ -2,6 +2,7 @@
 
 #include "dli_stage/runtime.hpp"
 
+#include <memory>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -12,6 +13,8 @@ struct llama_model;
 struct llama_vocab;
 
 namespace dli_stage {
+
+class LlamaCpuExecutor;
 
 struct LlamaPartialRuntimeConfig {
     std::string model_path;
@@ -98,6 +101,8 @@ private:
     LlamaShardMetadata shard_metadata_;
 
     PartitionKvCacheState kv_cache_;
+
+    std::unique_ptr<LlamaCpuExecutor> executor_;
 
     llama_model* model_ = nullptr;
     const llama_vocab* vocab_ = nullptr;

@@ -4,6 +4,7 @@ add_executable(dli-stage-cpp
     src/server.cpp
     src/runtimes/stub_runtime.cpp
     src/runtimes/llama_partial_runtime.cpp
+    src/runtimes/llama_cpu_executor.cpp
 )
 
 target_include_directories(dli-stage-cpp PRIVATE
