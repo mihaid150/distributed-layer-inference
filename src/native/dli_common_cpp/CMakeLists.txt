@@ -70,3 +70,25 @@ endif()
 
 add_test(NAME test-protocol COMMAND test-protocol)
 add_test(NAME test-metadata COMMAND test-metadata)
+
+add_executable(test-llama-backend-smoke
+    tests/test_llama_backend_smoke.cpp
+)
+
+target_link_libraries(test-llama-backend-smoke PRIVATE
+    llama
+)
+
+target_compile_features(test-llama-backend-smoke PRIVATE cxx_std_17)
+
+target_compile_options(test-llama-backend-smoke PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_options(test-llama-backend-smoke PRIVATE -O3)
+endif()
+
+add_test(NAME test-llama-backend-smoke COMMAND test-llama-backend-smoke)

@@ -56,3 +56,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
 endif()
 
 add_test(NAME test-stage-config COMMAND test-stage-config)
+
+set_tests_properties(test-stage-config PROPERTIES
+    ENVIRONMENT "DLI_TEST_STAGE_MAP_PATH=${CMAKE_SOURCE_DIR}/../../configs/stage_map.yaml"
+)
