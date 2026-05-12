@@ -1,5 +1,7 @@
 #include "dli/gateway/tokenizer.hpp"
 
+#include "llama.h"
+
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -41,6 +43,55 @@ void validate_model_path(const std::string& model_path) {
     }
 }
 
+std::vector<llama_token> tokenize_with_vocab(
+    const llama_vocab* vocab,
+    const std::string& prompt
+) {
+    if (vocab == nullptr) {
+        throw std::runtime_error("cannot tokenize with null llama vocab");
+    }
+
+    const bool add_special = true;
+    const bool parse_special = false;
+
+    int token_count = llama_tokenize(
+        vocab,
+        prompt.c_str(),
+        static_cast<int32_t>(prompt.size()),
+        nullptr,
+        0,
+        add_special,
+        parse_special
+    );
+
+    if (token_count == 0) {
+        return {};
+    }
+
+    if (token_count < 0) {
+        token_count = -token_count;
+    }
+
+    std::vector<llama_token> tokens(static_cast<std::size_t>(token_count));
+
+    const int actual_count = llama_tokenize(
+        vocab,
+        prompt.c_str(),
+        static_cast<int32_t>(prompt.size()),
+        tokens.data(),
+        static_cast<int32_t>(tokens.size()),
+        add_special,
+        parse_special
+    );
+
+    if (actual_count < 0) {
+        throw std::runtime_error("llama_tokenize reported insufficient token buffer unexpectedly");
+    }
+
+    tokens.resize(static_cast<std::size_t>(actual_count));
+    return tokens;
+}
+
 } // namespace
 
 TokenizedPrompt TokenizerStub::tokenize(const std::string& prompt) const {
@@ -74,16 +125,55 @@ std::string TokenizerStub::backend_name() const {
 LlamaTokenizer::LlamaTokenizer(std::string model_path)
     : model_path_(std::move(model_path)) {
     validate_model_path(model_path_);
+
+    llama_model_params model_params = llama_model_default_params();
+
+    // Keep tokenizer loading CPU-only and conservative.
+    model_params.n_gpu_layers = 0;
+
+    model_ = llama_model_load_from_file(model_path_.c_str(), model_params);
+    if (model_ == nullptr) {
+        throw std::runtime_error("failed to load GGUF model for tokenizer: " + model_path_);
+    }
+
+    vocab_ = llama_model_get_vocab(model_);
+    if (vocab_ == nullptr) {
+        llama_model_free(model_);
+        model_ = nullptr;
+        throw std::runtime_error("failed to get llama vocab from model: " + model_path_);
+    }
+}
+
+LlamaTokenizer::~LlamaTokenizer() {
+    if (model_ != nullptr) {
+        llama_model_free(model_);
+        model_ = nullptr;
+        vocab_ = nullptr;
+    }
 }
 
 TokenizedPrompt LlamaTokenizer::tokenize(const std::string& prompt) const {
-    // Skeleton phase:
-    // The model path is validated, but real llama.cpp tokenization is not used yet.
-    return fallback_.tokenize(prompt);
+    TokenizedPrompt result;
+    result.prompt = prompt;
+
+    const std::vector<llama_token> llama_tokens =
+        tokenize_with_vocab(vocab_, prompt);
+
+    result.token_ids.reserve(llama_tokens.size());
+
+    for (const llama_token token : llama_tokens) {
+        result.token_ids.push_back(static_cast<std::int64_t>(token));
+    }
+
+    if (result.token_ids.empty()) {
+        throw std::runtime_error("llama tokenizer returned no tokens");
+    }
+
+    return result;
 }
 
 std::string LlamaTokenizer::backend_name() const {
-    return "llama-tokenizer-skeleton";
+    return "llama.cpp";
 }
 
 const std::string& LlamaTokenizer::model_path() const {

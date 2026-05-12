@@ -14,6 +14,7 @@ target_include_directories(dli-gateway-cpp PRIVATE
 
 target_link_libraries(dli-gateway-cpp PRIVATE
     dli-common-cpp
+    llama
 )
 
 target_compile_features(dli-gateway-cpp PRIVATE cxx_std_17)
@@ -74,6 +75,7 @@ target_include_directories(test-tokenizer PRIVATE
 
 target_link_libraries(test-tokenizer PRIVATE
     dli-common-cpp
+    llama
 )
 
 target_compile_features(test-tokenizer PRIVATE cxx_std_17)

@@ -1,18 +1,13 @@
 #include "dli/gateway/tokenizer.hpp"
 
+#include "llama.h"
+
 #include <cassert>
 #include <cstdlib>
-#include <fstream>
 #include <iostream>
 #include <string>
 
 namespace {
-
-std::string temp_model_path() {
-    const char* tmp_dir = std::getenv("TMPDIR");
-    const std::string base = tmp_dir != nullptr ? tmp_dir : "/tmp";
-    return base + "/dli-tokenizer-skeleton-test.gguf";
-}
 
 void test_stub_tokenizer() {
     const auto tokenizer = dli::gateway::make_stub_tokenizer();
@@ -34,25 +29,7 @@ void test_factory_returns_stub_for_empty_model_path() {
     assert(tokenizer->backend_name() == "stub");
 }
 
-void test_llama_tokenizer_skeleton_validates_existing_file() {
-    const std::string path = temp_model_path();
-
-    {
-        std::ofstream file(path, std::ios::binary);
-        file << "fake-gguf-placeholder";
-    }
-
-    const auto tokenizer = dli::gateway::make_tokenizer_for_model_path(path);
-
-    assert(tokenizer->backend_name() == "llama-tokenizer-skeleton");
-
-    const auto result = tokenizer->tokenize("hello world");
-    assert(result.token_ids.size() == 3);
-
-    std::remove(path.c_str());
-}
-
-void test_llama_tokenizer_skeleton_rejects_missing_file() {
+void test_llama_tokenizer_rejects_missing_file() {
     bool rejected = false;
 
     try {
@@ -72,10 +49,13 @@ void test_llama_tokenizer_skeleton_rejects_missing_file() {
 } // namespace
 
 int main() {
+    llama_backend_init();
+
     test_stub_tokenizer();
     test_factory_returns_stub_for_empty_model_path();
-    test_llama_tokenizer_skeleton_validates_existing_file();
-    test_llama_tokenizer_skeleton_rejects_missing_file();
+    test_llama_tokenizer_rejects_missing_file();
+
+    llama_backend_free();
 
     std::cout << "test_tokenizer: OK\n";
     return 0;

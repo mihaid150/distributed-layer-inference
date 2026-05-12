@@ -1,3 +1,5 @@
+#include "llama.h"
+
 #include "dli/gateway/config.hpp"
 #include "dli/gateway/server.hpp"
 
@@ -162,8 +164,14 @@ int main(int argc, char** argv) {
         std::cerr << "[dli-gateway-cpp] first_stage_url=" << config.first_stage_url << "\n";
         std::cerr << "[dli-gateway-cpp] runtime=cpp-native-stub\n";
 
+        llama_backend_init();
+
         dli::gateway::GatewayServer server(config);
-        return server.run();
+        const int exit_code = server.run();
+
+        llama_backend_free();
+
+        return exit_code;
     } catch (const std::exception& exc) {
         std::cerr << "[dli-gateway-cpp] error: " << exc.what() << "\n";
         print_usage(argv[0]);

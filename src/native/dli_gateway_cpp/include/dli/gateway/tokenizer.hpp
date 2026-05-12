@@ -5,6 +5,9 @@
 #include <string>
 #include <vector>
 
+struct llama_model;
+struct llama_vocab;
+
 namespace dli::gateway {
 
 struct TokenizedPrompt {
@@ -32,6 +35,11 @@ class LlamaTokenizer final : public Tokenizer {
 public:
     explicit LlamaTokenizer(std::string model_path);
 
+    ~LlamaTokenizer() override;
+
+    LlamaTokenizer(const LlamaTokenizer&) = delete;
+    LlamaTokenizer& operator=(const LlamaTokenizer&) = delete;
+
     TokenizedPrompt tokenize(const std::string& prompt) const override;
 
     std::string backend_name() const override;
@@ -40,7 +48,8 @@ public:
 
 private:
     std::string model_path_;
-    TokenizerStub fallback_;
+    llama_model* model_ = nullptr;
+    const llama_vocab* vocab_ = nullptr;
 };
 
 std::unique_ptr<Tokenizer> make_stub_tokenizer();
