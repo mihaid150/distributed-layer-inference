@@ -9,6 +9,8 @@ inference_stages:
   service_name: inference-stage-1
   physical_node: pinode7
   partition_file: /app/models/stage_1.pt
+  native_partition_file: /app/models/partition-1.dli.gguf
+  backend: llama
   partition_profiles:
     baseline: /app/models/stage_1.pt
     latency_balanced_v1: /app/models/latency_balanced_v1/stage_1.pt
@@ -30,6 +32,8 @@ inference_stages:
   service_name: inference-stage-2
   physical_node: pinode8
   partition_file: /app/models/stage_2.pt
+  native_partition_file: /app/models/partition-2.dli.gguf
+  backend: llama
   partition_profiles:
     baseline: /app/models/stage_2.pt
     latency_balanced_v1: /app/models/latency_balanced_v1/stage_2.pt
@@ -51,6 +55,8 @@ inference_stages:
   service_name: inference-stage-3
   physical_node: pinode9
   partition_file: /app/models/stage_3.pt
+  native_partition_file: /app/models/partition-3.dli.gguf
+  backend: llama
   partition_profiles:
     baseline: /app/models/stage_3.pt
     latency_balanced_v1: /app/models/latency_balanced_v1/stage_3.pt
@@ -71,6 +77,8 @@ inference_stages:
   service_name: inference-stage-4
   physical_node: pinode10
   partition_file: /app/models/stage_4.pt
+  native_partition_file: /app/models/partition-4.dli.gguf
+  backend: llama
   partition_profiles:
     baseline: /app/models/stage_4.pt
     latency_balanced_v1: /app/models/latency_balanced_v1/stage_4.pt

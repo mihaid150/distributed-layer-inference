@@ -198,18 +198,38 @@ int main(int argc, char** argv) {
         
         llama_backend_init();
 
-        auto runtime = make_runtime(options);
+        CliOptions runtime_options = options;
+
+        if (runtime_options.backend == "stub" && !config.backend.empty()) {
+            runtime_options.backend = config.backend;
+        }
+
+        if (runtime_options.model_path.empty()) {
+            if (
+                (runtime_options.backend == "llama" ||
+                runtime_options.backend == "llama-partial") &&
+                !config.native_partition_file.empty()
+            ) {
+                runtime_options.model_path = config.native_partition_file;
+            } else if (!config.partition_file.empty()) {
+                runtime_options.model_path = config.partition_file;
+            }
+        }
+
+        auto runtime = make_runtime(runtime_options);
 
         std::cerr << "[dli-stage-cpp] native C++ stage runtime\n";
         std::cerr << "[dli-stage-cpp] config_path=" << config.config_path << "\n";
         std::cerr << "[dli-stage-cpp] service_name=" << config.service_name << "\n";
         std::cerr << "[dli-stage-cpp] physical_node=" << config.physical_node << "\n";
         std::cerr << "[dli-stage-cpp] partition_file=" << config.partition_file << "\n";
+        std::cerr << "[dli-stage-cpp] native_partition_file=" << config.native_partition_file << "\n";
         std::cerr << "[dli-stage-cpp] next_stage_url=" << config.next_stage_url << "\n";
         std::cerr << "[dli-stage-cpp] port=" << config.port << "\n";
         std::cerr << "[dli-stage-cpp] stage_id=" << config.stage_id << "\n";
-        std::cerr << "[dli-stage-cpp] backend=" << options.backend << "\n";
-        std::cerr << "[dli-stage-cpp] model_path=" << options.model_path << "\n";
+        std::cerr << "[dli-stage-cpp] config_backend=" << config.backend << "\n";
+        std::cerr << "[dli-stage-cpp] backend=" << runtime_options.backend << "\n";
+        std::cerr << "[dli-stage-cpp] model_path=" << runtime_options.model_path << "\n";
         std::cerr << "[dli-stage-cpp] runtime_backend=" << runtime->backend_name() << "\n";
 
         dli_stage::HttpServer server(config, std::move(runtime));

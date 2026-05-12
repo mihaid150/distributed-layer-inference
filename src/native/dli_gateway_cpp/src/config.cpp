@@ -437,6 +437,16 @@ GatewayConfig load_gateway_config_from_file(const std::string& config_path) {
                 continue;
             }
 
+            if (starts_with(trimmed, "native_partition_file:")) {
+                current_partition.native_partition_file = value_after_colon(trimmed);
+                continue;
+            }
+
+            if (starts_with(trimmed, "backend:")) {
+                current_partition.backend = value_after_colon(trimmed);
+                continue;
+            }
+
             if (starts_with(trimmed, "next_stage_url:")) {
                 current_partition.next_stage_url = value_after_colon(trimmed);
                 continue;

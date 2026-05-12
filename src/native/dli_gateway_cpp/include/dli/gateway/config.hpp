@@ -22,6 +22,8 @@ struct PartitionNodeConfig {
     std::string service_name;
     std::string physical_node;
     std::string partition_file;
+    std::string native_partition_file;
+    std::string backend;
     std::string next_stage_url;
 
     PartitionComponents components;

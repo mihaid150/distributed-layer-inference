@@ -1,3 +1,27 @@
+add_library(dli-gateway-config STATIC
+    src/config.cpp
+)
+
+target_include_directories(dli-gateway-config PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(dli-gateway-config PUBLIC
+    dli-common-cpp
+)
+
+target_compile_features(dli-gateway-config PUBLIC cxx_std_17)
+
+target_compile_options(dli-gateway-config PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_options(dli-gateway-config PRIVATE -O3)
+endif()
+
 add_executable(dli-gateway-cpp
     src/main.cpp
     src/server.cpp
@@ -5,7 +29,6 @@ add_executable(dli-gateway-cpp
     src/stage_client.cpp
     src/tokenizer.cpp
     src/sampler.cpp
-    src/config.cpp
 )
 
 target_include_directories(dli-gateway-cpp PRIVATE
@@ -14,6 +37,7 @@ target_include_directories(dli-gateway-cpp PRIVATE
 
 target_link_libraries(dli-gateway-cpp PRIVATE
     dli-common-cpp
+    dli-gateway-config
     llama
 )
 
@@ -35,7 +59,6 @@ set_target_properties(dli-gateway-cpp PROPERTIES
 
 add_executable(test-gateway-config
     tests/test_gateway_config.cpp
-    src/config.cpp
 )
 
 target_include_directories(test-gateway-config PRIVATE
@@ -44,6 +67,7 @@ target_include_directories(test-gateway-config PRIVATE
 
 target_link_libraries(test-gateway-config PRIVATE
     dli-common-cpp
+    dli-gateway-config
 )
 
 target_compile_features(test-gateway-config PRIVATE cxx_std_17)

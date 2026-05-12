@@ -175,6 +175,16 @@ StageConfig load_stage_config_from_file(
                 continue;
             }
 
+            if (starts_with(trimmed, "native_partition_file:")) {
+                config.native_partition_file = value_after_colon(trimmed);
+                continue;
+            }
+
+            if (starts_with(trimmed, "backend:")) {
+                config.backend = value_after_colon(trimmed);
+                continue;
+            }
+
             if (starts_with(trimmed, "next_stage_url:")) {
                 config.next_stage_url = value_after_colon(trimmed);
                 continue;
@@ -250,6 +260,14 @@ StageConfig merge_stage_config(
 
     if (!override_config.partition_file.empty()) {
         file_config.partition_file = override_config.partition_file;
+    }
+
+    if (!override_config.native_partition_file.empty()) {
+        file_config.native_partition_file = override_config.native_partition_file;
+    }
+
+    if (!override_config.backend.empty()) {
+        file_config.backend = override_config.backend;
     }
 
     if (!override_config.next_stage_url.empty()) {
