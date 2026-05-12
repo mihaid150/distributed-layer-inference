@@ -24,6 +24,9 @@ struct ParsedRequestMetadata {
     bool has_top_p = false;
     double top_p = 0.0;
 
+    bool has_next_token_id = false;
+    int next_token_id = -1;
+
     int stage_input_token_count = 0;
 };
 

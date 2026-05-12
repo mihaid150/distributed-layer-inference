@@ -71,10 +71,34 @@ void test_sequence_length_inference() {
     assert(infer_sequence_length_from_shape({1, 32, 2048}) == 32);
 }
 
+void test_parse_stage_response_metadata() {
+    const std::string metadata =
+        R"({"ok":true,"service":"inference-stage-1","backend":"stub","status":"stub_echo","stage_id":1,"request_id":"req-001","token_index":3,"generation_mode":"decode","next_token_id":1003,"tensor":{"dtype":"float16","shape":[1,1,4],"byte_order":"little"},"feature_flags":{"kv_cache_enabled":true}})";
+
+    const auto parsed = parse_request_metadata(metadata);
+
+    assert(parsed.request_id == "req-001");
+    assert(parsed.token_index == 3);
+    assert(parsed.generation_mode == "decode");
+
+    assert(parsed.has_next_token_id);
+    assert(parsed.next_token_id == 1003);
+
+    assert(parsed.tensor.dtype == "float16");
+    assert(parsed.tensor.shape.size() == 3);
+    assert(parsed.tensor.shape[0] == 1);
+    assert(parsed.tensor.shape[1] == 1);
+    assert(parsed.tensor.shape[2] == 4);
+
+    assert(parsed.kv_cache_enabled);
+    assert(parsed.stage_input_token_count == 1);
+}
+
 int main() {
     test_parse_decode_metadata();
     test_parse_prefill_metadata();
     test_sequence_length_inference();
+    test_parse_stage_response_metadata();
 
     std::cout << "test_metadata: OK\n";
     return 0;

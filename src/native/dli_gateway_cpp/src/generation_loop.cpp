@@ -1,6 +1,7 @@
 #include "dli/gateway/generation_loop.hpp"
 
 #include "dli/common/json_escape.hpp"
+#include "dli/common/metadata.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -11,6 +12,24 @@
 namespace dli::gateway {
 
 namespace {
+
+int next_token_id_from_stage_response(
+    const StageClientResult& stage_result,
+    int fallback_token_id
+) {
+    if (stage_result.response_frame.metadata_json.empty()) {
+        return fallback_token_id;
+    }
+
+    const dli::common::ParsedRequestMetadata parsed =
+        dli::common::parse_request_metadata(stage_result.response_frame.metadata_json);
+
+    if (parsed.has_next_token_id && parsed.next_token_id >= 0) {
+        return parsed.next_token_id;
+    }
+
+    return fallback_token_id;
+}
 
 std::string make_request_id() {
     return "gateway-loop-stub-request";
@@ -124,9 +143,6 @@ GenerationLoopResult GenerationLoop::run_stub_generation(
     result.steps.push_back(make_step_trace(0, "prefill", prefill_response));
 
     for (int i = 0; i < decode_steps; ++i) {
-        const int fake_token_id = 1000 + i;
-        result.generated_token_ids.push_back(fake_token_id);
-
         StageForwardStubRequest decode;
         decode.request_id = result.request_id;
         decode.token_index = i;
@@ -146,6 +162,14 @@ GenerationLoopResult GenerationLoop::run_stub_generation(
         };
 
         const StageClientResult decode_response = client.forward_stub_frame(decode);
+
+        const int fallback_token_id = 1000 + i;
+        const int next_token_id = next_token_id_from_stage_response(
+            decode_response,
+            fallback_token_id
+        );
+
+        result.generated_token_ids.push_back(next_token_id);
         result.steps.push_back(make_step_trace(i, "decode", decode_response));
     }
 

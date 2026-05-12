@@ -23,7 +23,13 @@ RuntimeResponse StubRuntime::forward(const RuntimeRequest& request) {
 
     RuntimeResponse response;
     response.is_final_stage = false;
-    response.next_token_id = -1;
+
+    if (request.generation_mode == "decode") {
+        response.next_token_id = 1000 + request.token_index;
+    } else {
+        response.next_token_id = -1;
+    }
+    
     response.output_metadata_json = request.input_metadata_json;
     response.output_tensor = request.input_tensor;
 

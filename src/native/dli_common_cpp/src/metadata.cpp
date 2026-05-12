@@ -173,6 +173,11 @@ ParsedRequestMetadata parse_request_metadata(const std::string& metadata_json) {
         parsed.token_index = *value;
     }
 
+    if (const auto value = extract_int_field(metadata_json, "next_token_id")) {
+        parsed.has_next_token_id = true;
+        parsed.next_token_id = *value;
+    }
+
     if (const auto value = extract_string_field(metadata_json, "generation_mode")) {
         parsed.generation_mode = *value;
     }
