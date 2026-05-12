@@ -5,12 +5,11 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <string>
 #include <vector>
 
 namespace dli::gateway {
-    
+
 struct GenerationLoopConfig {
     std::string first_stage_url;
     std::string model_path;
@@ -45,7 +44,7 @@ class GenerationLoop {
 public:
     GenerationLoop(
         GenerationLoopConfig config,
-        std::unique_ptr<Tokenizer> tokenizer
+        const Tokenizer& tokenizer
     );
 
     GenerationLoopResult run_stub_generation(
@@ -55,7 +54,7 @@ public:
 
 private:
     GenerationLoopConfig config_;
-    std::unique_ptr<Tokenizer> tokenizer_;
+    const Tokenizer& tokenizer_;
 };
 
 std::string generation_loop_result_json(

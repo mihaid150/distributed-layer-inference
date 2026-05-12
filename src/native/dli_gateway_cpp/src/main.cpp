@@ -2,7 +2,9 @@
 
 #include "dli/gateway/config.hpp"
 #include "dli/gateway/server.hpp"
+#include "dli/gateway/tokenizer.hpp"
 
+#include <memory>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -166,7 +168,12 @@ int main(int argc, char** argv) {
 
         llama_backend_init();
 
-        dli::gateway::GatewayServer server(config);
+        auto tokenizer = dli::gateway::make_tokenizer_for_model_path(config.model_path);
+
+        std::cerr << "[dli-gateway-cpp] tokenizer_backend="
+                  << tokenizer->backend_name() << "\n";
+
+        dli::gateway::GatewayServer server(config, std::move(tokenizer));
         const int exit_code = server.run();
 
         llama_backend_free();

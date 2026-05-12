@@ -91,3 +91,31 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
 endif()
 
 add_test(NAME test-tokenizer COMMAND test-tokenizer)
+
+add_executable(test-llama-tokenizer-optional
+    tests/test_llama_tokenizer_optional.cpp
+    src/tokenizer.cpp
+)
+
+target_include_directories(test-llama-tokenizer-optional PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(test-llama-tokenizer-optional PRIVATE
+    dli-common-cpp
+    llama
+)
+
+target_compile_features(test-llama-tokenizer-optional PRIVATE cxx_std_17)
+
+target_compile_options(test-llama-tokenizer-optional PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_options(test-llama-tokenizer-optional PRIVATE -O3)
+endif()
+
+add_test(NAME test-llama-tokenizer-optional COMMAND test-llama-tokenizer-optional)

@@ -1,14 +1,19 @@
 #pragma once
 
 #include "dli/gateway/config.hpp"
+#include "dli/gateway/tokenizer.hpp"
 
 #include <atomic>
+#include <memory>
 
 namespace dli::gateway {
 
 class GatewayServer {
 public:
-    explicit GatewayServer(GatewayConfig config);
+    GatewayServer(
+        GatewayConfig config,
+        std::unique_ptr<Tokenizer> tokenizer
+    );
 
     GatewayServer(const GatewayServer&) = delete;
     GatewayServer& operator=(const GatewayServer&) = delete;
@@ -19,6 +24,7 @@ public:
 
 private:
     GatewayConfig config_;
+    std::unique_ptr<Tokenizer> tokenizer_;
     std::atomic<bool> stop_requested_{false};
 };
 

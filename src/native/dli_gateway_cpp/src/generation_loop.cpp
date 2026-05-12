@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <chrono>
 #include <sstream>
-#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -89,14 +88,10 @@ std::string i64_vector_json(const std::vector<std::int64_t>& values) {
 
 GenerationLoop::GenerationLoop(
     GenerationLoopConfig config,
-    std::unique_ptr<Tokenizer> tokenizer
+    const Tokenizer& tokenizer
 )
     : config_(std::move(config)),
-      tokenizer_(std::move(tokenizer)) {
-    if (!tokenizer_) {
-        throw std::runtime_error("GenerationLoop requires a tokenizer");
-    }
-}
+      tokenizer_(tokenizer) {}
 
 GenerationLoopResult GenerationLoop::run_stub_generation(
     const std::string& prompt,
@@ -107,9 +102,9 @@ GenerationLoopResult GenerationLoop::run_stub_generation(
     GenerationLoopResult result;
     result.request_id = make_request_id();
     result.prompt = prompt;
-    result.tokenizer_backend = tokenizer_->backend_name();
+    result.tokenizer_backend = tokenizer_.backend_name();
 
-    const TokenizedPrompt tokenized = tokenizer_->tokenize(prompt);
+    const TokenizedPrompt tokenized = tokenizer_.tokenize(prompt);
     result.prompt_token_ids = tokenized.token_ids;
 
     const int decode_steps = std::max(0, max_new_tokens);

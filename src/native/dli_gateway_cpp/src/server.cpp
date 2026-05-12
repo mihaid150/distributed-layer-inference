@@ -1,5 +1,6 @@
 #include "dli/gateway/server.hpp"
 #include "dli/gateway/generation_loop.hpp"
+#include "dli/gateway/tokenizer.hpp"
 #include "dli/common/http.hpp"
 #include "dli/common/json_escape.hpp"
 
@@ -101,7 +102,8 @@ std::string config_json(const GatewayConfig& config) {
 
 std::string generate_loop_json(
     const dli::common::HttpRequest& request,
-    const GatewayConfig& config
+    const GatewayConfig& config,
+    const Tokenizer& tokenizer
 ) {
     const std::string body_text(
         reinterpret_cast<const char*>(request.body.data()),
@@ -123,13 +125,11 @@ std::string generate_loop_json(
 
     GenerationLoopConfig loop_config;
     loop_config.first_stage_url = config.first_stage_url;
-    loop_config.max_new_tokens = max_new_tokens;
     loop_config.model_path = config.model_path;
+    loop_config.max_new_tokens = max_new_tokens;
 
-    GenerationLoop loop(
-        loop_config,
-        make_tokenizer_for_model_path(loop_config.model_path)
-    );
+    GenerationLoop loop(loop_config, tokenizer);
+
     const GenerationLoopResult result =
         loop.run_stub_generation(prompt, loop_config.max_new_tokens);
 
@@ -151,8 +151,9 @@ std::string not_found_json(const dli::common::HttpRequest& request) {
 
 dli::common::HttpResponse handle_request(
     const dli::common::HttpRequest& request,
-    const GatewayConfig& config
-) {
+    const GatewayConfig& config,
+    const Tokenizer& tokenizer
+){
     if (request.method == "GET" && request.path == "/health") {
         return dli::common::make_json_response(
             200,
@@ -174,7 +175,7 @@ dli::common::HttpResponse handle_request(
             return dli::common::make_json_response(
                 200,
                 "OK",
-                generate_loop_json(request, config)
+                generate_loop_json(request, config, *tokenizer_)
             );
         } catch (const std::exception& exc) {
             return dli::common::make_json_response(
@@ -201,8 +202,16 @@ void close_fd(int fd) {
 
 } // namespace
 
-GatewayServer::GatewayServer(GatewayConfig config)
-    : config_(std::move(config)) {}
+GatewayServer::GatewayServer(
+    GatewayConfig config,
+    std::unique_ptr<Tokenizer> tokenizer
+)
+    : config_(std::move(config)),
+      tokenizer_(std::move(tokenizer)) {
+    if (!tokenizer_) {
+        throw std::runtime_error("GatewayServer requires a tokenizer");
+    }
+}
 
 void GatewayServer::stop() {
     stop_requested_.store(true);
@@ -266,8 +275,8 @@ int GatewayServer::run() {
             const dli::common::HttpRequest request =
                 dli::common::read_http_request(client_fd);
 
-            const dli::common::HttpResponse response =
-                handle_request(request, config_);
+            const dli::common::HttpResponse response = 
+                handle_request(request, config_, *tokenizer_);
 
             dli::common::send_http_response(client_fd, response);
         } catch (const std::exception& exc) {
