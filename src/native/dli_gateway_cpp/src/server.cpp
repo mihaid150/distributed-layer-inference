@@ -77,6 +77,53 @@ std::string health_json(const GatewayConfig& config) {
     return out.str();
 }
 
+std::string int_vector_json(const std::vector<int>& values) {
+    std::ostringstream out;
+    out << "[";
+
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i > 0) {
+            out << ",";
+        }
+        out << values[i];
+    }
+
+    out << "]";
+    return out.str();
+}
+
+std::string partition_graph_json(const std::vector<PartitionNodeConfig>& partitions) {
+    std::ostringstream out;
+    out << "[";
+
+    for (std::size_t i = 0; i < partitions.size(); ++i) {
+        if (i > 0) {
+            out << ",";
+        }
+
+        const PartitionNodeConfig& partition = partitions[i];
+
+        out
+            << "{"
+            << "\"stage_id\":" << partition.stage_id << ","
+            << "\"partition_id\":\"" << dli::common::json_escape(partition.partition_id) << "\","
+            << "\"service_name\":\"" << dli::common::json_escape(partition.service_name) << "\","
+            << "\"physical_node\":\"" << dli::common::json_escape(partition.physical_node) << "\","
+            << "\"partition_file\":\"" << dli::common::json_escape(partition.partition_file) << "\","
+            << "\"next_stage_url\":\"" << dli::common::json_escape(partition.next_stage_url) << "\","
+            << "\"components\":{"
+            << "\"embedding\":" << (partition.components.embedding ? "true" : "false") << ","
+            << "\"layers\":" << int_vector_json(partition.components.layers) << ","
+            << "\"norm\":" << (partition.components.norm ? "true" : "false") << ","
+            << "\"lm_head\":" << (partition.components.lm_head ? "true" : "false")
+            << "}"
+            << "}";
+    }
+
+    out << "]";
+    return out.str();
+}
+
 std::string config_json(const GatewayConfig& config) {
     std::ostringstream out;
     out
@@ -90,6 +137,8 @@ std::string config_json(const GatewayConfig& config) {
         << "\"model_name\":\"" << dli::common::json_escape(config.model_name) << "\","
         << "\"model_path\":\"" << dli::common::json_escape(config.model_path) << "\","
         << "\"first_stage_url\":\"" << dli::common::json_escape(config.first_stage_url) << "\","
+        << "\"partition_count\":" << config.partitions.size() << ","
+        << "\"partition_graph\":" << partition_graph_json(config.partitions) << ","
         << "\"routes\":["
         << "\"GET /health\","
         << "\"GET /config\","

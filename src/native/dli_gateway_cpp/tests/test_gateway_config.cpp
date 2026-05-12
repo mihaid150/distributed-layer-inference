@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -26,6 +27,32 @@ void test_gateway_config_loads_expected_fields(const std::string& config_path) {
     assert(config.service_name == "inference-gateway");
     assert(config.port == 8000);
     assert(config.first_stage_url == "http://inference-stage-1:8000/forward");
+
+    assert(config.partitions.size() == 4);
+
+    const auto& p0 = config.partitions[0];
+    assert(p0.stage_id == 1);
+    assert(p0.partition_id == "partition-1");
+    assert(p0.service_name == "inference-stage-1");
+    assert(p0.physical_node == "pinode7");
+    assert(p0.partition_file == "/app/models/stage_1.pt");
+    assert(p0.next_stage_url == "http://inference-stage-2:8000/forward");
+    assert(p0.components.embedding);
+    assert(!p0.components.norm);
+    assert(!p0.components.lm_head);
+    assert((p0.components.layers == std::vector<int>{0, 1, 2, 3, 4, 5}));
+
+    const auto& p3 = config.partitions[3];
+    assert(p3.stage_id == 4);
+    assert(p3.partition_id == "partition-4");
+    assert(p3.service_name == "inference-stage-4");
+    assert(p3.physical_node == "pinode10");
+    assert(p3.partition_file == "/app/models/stage_4.pt");
+    assert(p3.next_stage_url.empty());
+    assert(!p3.components.embedding);
+    assert(p3.components.norm);
+    assert(p3.components.lm_head);
+    assert((p3.components.layers == std::vector<int>{17, 18, 19, 20, 21}));
 }
 
 void test_gateway_config_override_merge(const std::string& config_path) {
