@@ -87,6 +87,11 @@ GatewayConfig load_gateway_config_from_file(const std::string& config_path) {
             continue;
         }
 
+        if (indent == 0 && starts_with(trimmed, "model_path:")) {
+            config.model_path = value_after_colon(trimmed);
+            continue;
+        }
+
         if (indent == 0 && starts_with(trimmed, "inference_gateway:")) {
             inside_gateway = true;
             gateway_indent = indent;
@@ -139,6 +144,10 @@ GatewayConfig merge_gateway_config(
 
     if (!override_config.model_name.empty()) {
         file_config.model_name = override_config.model_name;
+    }
+
+    if (!override_config.model_path.empty()) {
+        file_config.model_path = override_config.model_path;
     }
 
     if (!override_config.first_stage_url.empty()) {

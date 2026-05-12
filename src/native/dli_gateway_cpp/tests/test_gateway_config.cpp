@@ -22,6 +22,7 @@ void test_gateway_config_loads_expected_fields(const std::string& config_path) {
 
     assert(config.config_path == config_path);
     assert(config.model_name == "TinyLlama/TinyLlama-1.1B-Chat-v1.0");
+    assert(config.model_path.empty());
     assert(config.service_name == "inference-gateway");
     assert(config.port == 8000);
     assert(config.first_stage_url == "http://inference-stage-1:8000/forward");
@@ -37,6 +38,7 @@ void test_gateway_config_override_merge(const std::string& config_path) {
     override_config.model_name.clear();
     override_config.port = 8010;
     override_config.first_stage_url = "http://127.0.0.1:8001/forward-binary";
+    override_config.model_path = "/tmp/tinyllama-q8_0.gguf";
 
     const dli::gateway::GatewayConfig merged =
         dli::gateway::merge_gateway_config(file_config, override_config);
@@ -46,6 +48,7 @@ void test_gateway_config_override_merge(const std::string& config_path) {
     assert(merged.service_name == "inference-gateway");
     assert(merged.port == 8010);
     assert(merged.first_stage_url == "http://127.0.0.1:8001/forward-binary");
+    assert(merged.model_path == "/tmp/tinyllama-q8_0.gguf");
 }
 
 } // namespace

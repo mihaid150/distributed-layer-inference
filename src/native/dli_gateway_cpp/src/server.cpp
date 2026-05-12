@@ -87,6 +87,7 @@ std::string config_json(const GatewayConfig& config) {
         << "\"port\":" << config.port << ","
         << "\"config_path\":\"" << dli::common::json_escape(config.config_path) << "\","
         << "\"model_name\":\"" << dli::common::json_escape(config.model_name) << "\","
+        << "\"model_path\":\"" << dli::common::json_escape(config.model_path) << "\","
         << "\"first_stage_url\":\"" << dli::common::json_escape(config.first_stage_url) << "\","
         << "\"routes\":["
         << "\"GET /health\","

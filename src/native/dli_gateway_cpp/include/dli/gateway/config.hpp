@@ -8,6 +8,7 @@ struct GatewayConfig {
     std::string config_path = "/app/configs/stage_map.yaml";
     std::string service_name = "dli-gateway-cpp";
     std::string model_name = "";
+    std::string model_path = "";
     std::string first_stage_url = "http://inference-stage-1:8000/forward-binary";
     int port = 8000;
 };

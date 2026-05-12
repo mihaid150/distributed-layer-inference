@@ -13,6 +13,7 @@ struct CliOptions {
     std::string config_path = "/app/configs/stage_map.yaml";
     std::string first_stage_url;
     std::string service_name;
+    std::string model_path;
     int port = 0;
 };
 
@@ -38,6 +39,7 @@ void print_usage(const char* program_name) {
         << "  --port <port>               HTTP port for the native gateway.\n"
         << "  --first-stage-url <url>     Override first stage URL.\n"
         << "  --service-name <name>       Override service name.\n"
+        << "  --model <path>              Override GGUF model path for future llama tokenizer/model loading.\n"
         << "  --help                      Show this help message.\n";
 }
 
@@ -65,6 +67,11 @@ CliOptions parse_args(int argc, char** argv) {
     const char* env_service_name = std::getenv("SERVICE_NAME");
     if (env_service_name != nullptr && std::strlen(env_service_name) > 0) {
         options.service_name = env_service_name;
+    }
+
+    const char* env_model_path = std::getenv("MODEL_PATH");
+    if (env_model_path != nullptr && std::strlen(env_model_path) > 0) {
+        options.model_path = env_model_path;
     }
 
     for (int i = 1; i < argc; ++i) {
@@ -113,6 +120,14 @@ CliOptions parse_args(int argc, char** argv) {
             continue;
         }
 
+        if (arg == "--model") {
+            if (i + 1 >= argc) {
+                throw std::runtime_error("--model requires a value");
+            }
+            options.model_path = argv[++i];
+            continue;
+        }
+
         throw std::runtime_error("unknown argument: " + arg);
     }
 
@@ -133,6 +148,7 @@ int main(int argc, char** argv) {
         override_config.port = options.port;
         override_config.first_stage_url = options.first_stage_url;
         override_config.service_name = options.service_name;
+        override_config.model_path = options.model_path;
 
         dli::gateway::GatewayConfig config =
             dli::gateway::merge_gateway_config(file_config, override_config);
@@ -141,6 +157,7 @@ int main(int argc, char** argv) {
         std::cerr << "[dli-gateway-cpp] config_path=" << config.config_path << "\n";
         std::cerr << "[dli-gateway-cpp] service_name=" << config.service_name << "\n";
         std::cerr << "[dli-gateway-cpp] model_name=" << config.model_name << "\n";
+        std::cerr << "[dli-gateway-cpp] model_path=" << config.model_path << "\n";
         std::cerr << "[dli-gateway-cpp] port=" << config.port << "\n";
         std::cerr << "[dli-gateway-cpp] first_stage_url=" << config.first_stage_url << "\n";
         std::cerr << "[dli-gateway-cpp] runtime=cpp-native-stub\n";
