@@ -1,4 +1,5 @@
 #include "dli_stage/config.hpp"
+#include "dli_stage/runtimes/llama_partial_runtime.hpp"
 #include "dli_stage/runtimes/stub_runtime.hpp"
 #include "dli_stage/server.hpp"
 
@@ -13,6 +14,7 @@ namespace {
 
 struct CliOptions {
     std::string config_path = "/app/configs/stage_map.yaml";
+    std::string backend = "stub";
     int port = 0;
     int stage_id = 0;
 };
@@ -38,7 +40,27 @@ void print_usage(const char* program_name) {
         << "  --config <path>      Path to stage_map.yaml. Default: /app/configs/stage_map.yaml\n"
         << "  --port <port>        HTTP port for the native stage server.\n"
         << "  --stage-id <id>      Stage id. If omitted, STAGE_ID env is used.\n"
-        << "  --help               Show this help message.\n";
+        << "  --backend <name>     Runtime backend: stub | llama. Default: stub.\n"
+        << "  --help               Show this help message.\n\n"
+        << "Environment:\n"
+        << "  STAGE_ID             Stage id.\n"
+        << "  PORT                 HTTP port.\n"
+        << "  STAGE_MAP_PATH       Path to stage_map.yaml.\n"
+        << "  DLI_STAGE_BACKEND    Runtime backend: stub | llama.\n";
+}
+
+std::unique_ptr<dli_stage::StageRuntime> make_runtime(const std::string& backend) {
+    if (backend == "stub") {
+        return std::make_unique<dli_stage::StubRuntime>();
+    }
+
+    if (backend == "llama" || backend == "llama-partial") {
+        return std::make_unique<dli_stage::LlamaPartialRuntime>();
+    }
+
+    throw std::runtime_error(
+        "unknown stage backend '" + backend + "'; expected stub or llama"
+    );
 }
 
 CliOptions parse_args(int argc, char** argv) {
@@ -63,6 +85,11 @@ CliOptions parse_args(int argc, char** argv) {
     const char* env_config_path = std::getenv("STAGE_MAP_PATH");
     if (env_config_path != nullptr && std::strlen(env_config_path) > 0) {
         options.config_path = env_config_path;
+    }
+
+    const char* env_backend = std::getenv("DLI_STAGE_BACKEND");
+    if (env_backend != nullptr && std::strlen(env_backend) > 0) {
+        options.backend = env_backend;
     }
 
     for (int i = 1; i < argc; ++i) {
@@ -109,6 +136,15 @@ CliOptions parse_args(int argc, char** argv) {
             continue;
         }
 
+        if (arg == "--backend") {
+            if (i + 1 >= argc) {
+                throw std::runtime_error("--backend requires a value");
+            }
+
+            options.backend = argv[++i];
+            continue;
+        }
+
         throw std::runtime_error("unknown argument: " + arg);
     }
 
@@ -137,6 +173,8 @@ int main(int argc, char** argv) {
         dli_stage::StageConfig config =
             dli_stage::merge_stage_config(file_config, override_config);
 
+        auto runtime = make_runtime(options.backend);
+
         std::cerr << "[dli-stage-cpp] native C++ stage runtime\n";
         std::cerr << "[dli-stage-cpp] config_path=" << config.config_path << "\n";
         std::cerr << "[dli-stage-cpp] service_name=" << config.service_name << "\n";
@@ -145,9 +183,9 @@ int main(int argc, char** argv) {
         std::cerr << "[dli-stage-cpp] next_stage_url=" << config.next_stage_url << "\n";
         std::cerr << "[dli-stage-cpp] port=" << config.port << "\n";
         std::cerr << "[dli-stage-cpp] stage_id=" << config.stage_id << "\n";
-        std::cerr << "[dli-stage-cpp] runtime=cpp-native-stub\n";
+        std::cerr << "[dli-stage-cpp] backend=" << options.backend << "\n";
+        std::cerr << "[dli-stage-cpp] runtime_backend=" << runtime->backend_name() << "\n";
 
-        auto runtime = std::make_unique<dli_stage::StubRuntime>();
         dli_stage::HttpServer server(config, std::move(runtime));
 
         return server.run();
