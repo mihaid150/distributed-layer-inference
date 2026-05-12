@@ -3,6 +3,9 @@
 #include "dli/common/tensor.hpp"
 
 #include <chrono>
+#include <filesystem>
+#include <stdexcept>
+#include <utility>
 
 namespace dli_stage {
 
@@ -16,7 +19,32 @@ double elapsed_ms(
     return duration.count();
 }
 
+void validate_model_path_if_present(const std::string& model_path) {
+    if (model_path.empty()) {
+        return;
+    }
+
+    const std::filesystem::path path(model_path);
+
+    if (!std::filesystem::exists(path)) {
+        throw std::runtime_error(
+            "LlamaPartialRuntime model path does not exist: " + model_path
+        );
+    }
+
+    if (!std::filesystem::is_regular_file(path)) {
+        throw std::runtime_error(
+            "LlamaPartialRuntime model path is not a regular file: " + model_path
+        );
+    }
+}
+
 } // namespace
+
+LlamaPartialRuntime::LlamaPartialRuntime(LlamaPartialRuntimeConfig config)
+    : config_(std::move(config)) {
+    validate_model_path_if_present(config_.model_path);
+}
 
 RuntimeResponse LlamaPartialRuntime::forward(const RuntimeRequest& request) {
     const auto start = std::chrono::steady_clock::now();
@@ -58,6 +86,10 @@ RuntimeResponse LlamaPartialRuntime::forward(const RuntimeRequest& request) {
 
 std::string LlamaPartialRuntime::backend_name() const {
     return "llama.cpp-partial-skeleton";
+}
+
+const LlamaPartialRuntimeConfig& LlamaPartialRuntime::config() const {
+    return config_;
 }
 
 } // namespace dli_stage

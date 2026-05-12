@@ -15,6 +15,7 @@ namespace {
 struct CliOptions {
     std::string config_path = "/app/configs/stage_map.yaml";
     std::string backend = "stub";
+    std::string model_path;
     int port = 0;
     int stage_id = 0;
 };
@@ -41,25 +42,31 @@ void print_usage(const char* program_name) {
         << "  --port <port>        HTTP port for the native stage server.\n"
         << "  --stage-id <id>      Stage id. If omitted, STAGE_ID env is used.\n"
         << "  --backend <name>     Runtime backend: stub | llama. Default: stub.\n"
+        << "  --model <path>       Optional GGUF model/stage-shard path for llama backend.\n"
         << "  --help               Show this help message.\n\n"
         << "Environment:\n"
         << "  STAGE_ID             Stage id.\n"
         << "  PORT                 HTTP port.\n"
         << "  STAGE_MAP_PATH       Path to stage_map.yaml.\n"
+        << "  DLI_STAGE_MODEL_PATH Optional GGUF model/stage-shard path for llama backend.\n"
         << "  DLI_STAGE_BACKEND    Runtime backend: stub | llama.\n";
 }
 
-std::unique_ptr<dli_stage::StageRuntime> make_runtime(const std::string& backend) {
-    if (backend == "stub") {
+std::unique_ptr<dli_stage::StageRuntime> make_runtime(const CliOptions& options) {
+    if (options.backend == "stub") {
         return std::make_unique<dli_stage::StubRuntime>();
     }
 
-    if (backend == "llama" || backend == "llama-partial") {
-        return std::make_unique<dli_stage::LlamaPartialRuntime>();
+    if (options.backend == "llama" || options.backend == "llama-partial") {
+        dli_stage::LlamaPartialRuntimeConfig config;
+        config.model_path = options.model_path;
+        config.stage_id = options.stage_id;
+
+        return std::make_unique<dli_stage::LlamaPartialRuntime>(std::move(config));
     }
 
     throw std::runtime_error(
-        "unknown stage backend '" + backend + "'; expected stub or llama"
+        "unknown stage backend '" + options.backend + "'; expected stub or llama"
     );
 }
 
@@ -90,6 +97,11 @@ CliOptions parse_args(int argc, char** argv) {
     const char* env_backend = std::getenv("DLI_STAGE_BACKEND");
     if (env_backend != nullptr && std::strlen(env_backend) > 0) {
         options.backend = env_backend;
+    }
+
+    const char* env_model_path = std::getenv("DLI_STAGE_MODEL_PATH");
+    if (env_model_path != nullptr && std::strlen(env_model_path) > 0) {
+        options.model_path = env_model_path;
     }
 
     for (int i = 1; i < argc; ++i) {
@@ -145,6 +157,15 @@ CliOptions parse_args(int argc, char** argv) {
             continue;
         }
 
+        if (arg == "--model") {
+            if (i + 1 >= argc) {
+                throw std::runtime_error("--model requires a value");
+            }
+
+            options.model_path = argv[++i];
+            continue;
+        }
+
         throw std::runtime_error("unknown argument: " + arg);
     }
 
@@ -173,7 +194,7 @@ int main(int argc, char** argv) {
         dli_stage::StageConfig config =
             dli_stage::merge_stage_config(file_config, override_config);
 
-        auto runtime = make_runtime(options.backend);
+        auto runtime = make_runtime(options);
 
         std::cerr << "[dli-stage-cpp] native C++ stage runtime\n";
         std::cerr << "[dli-stage-cpp] config_path=" << config.config_path << "\n";
@@ -184,6 +205,7 @@ int main(int argc, char** argv) {
         std::cerr << "[dli-stage-cpp] port=" << config.port << "\n";
         std::cerr << "[dli-stage-cpp] stage_id=" << config.stage_id << "\n";
         std::cerr << "[dli-stage-cpp] backend=" << options.backend << "\n";
+        std::cerr << "[dli-stage-cpp] model_path=" << options.model_path << "\n";
         std::cerr << "[dli-stage-cpp] runtime_backend=" << runtime->backend_name() << "\n";
 
         dli_stage::HttpServer server(config, std::move(runtime));
