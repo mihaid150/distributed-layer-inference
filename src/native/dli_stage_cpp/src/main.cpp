@@ -1,3 +1,5 @@
+#include "llama.h"
+
 #include "dli_stage/config.hpp"
 #include "dli_stage/runtimes/llama_partial_runtime.hpp"
 #include "dli_stage/runtimes/stub_runtime.hpp"
@@ -193,6 +195,8 @@ int main(int argc, char** argv) {
 
         dli_stage::StageConfig config =
             dli_stage::merge_stage_config(file_config, override_config);
+        
+        llama_backend_init();
 
         auto runtime = make_runtime(options);
 
@@ -210,7 +214,11 @@ int main(int argc, char** argv) {
 
         dli_stage::HttpServer server(config, std::move(runtime));
 
-        return server.run();
+        const int exit_code = server.run();
+
+        llama_backend_free();
+
+        return exit_code;
     } catch (const std::exception& exc) {
         std::cerr << "[dli-stage-cpp] error: " << exc.what() << "\n";
         print_usage(argv[0]);

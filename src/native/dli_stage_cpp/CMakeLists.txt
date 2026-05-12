@@ -12,6 +12,7 @@ target_include_directories(dli-stage-cpp PRIVATE
 
 target_link_libraries(dli-stage-cpp PRIVATE
     dli-common-cpp
+    llama
 )
 
 target_compile_features(dli-stage-cpp PRIVATE cxx_std_17)

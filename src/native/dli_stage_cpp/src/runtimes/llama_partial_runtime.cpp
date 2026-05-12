@@ -2,6 +2,8 @@
 
 #include "dli/common/tensor.hpp"
 
+#include "llama.h"
+
 #include <chrono>
 #include <filesystem>
 #include <stdexcept>
@@ -44,6 +46,44 @@ void validate_model_path_if_present(const std::string& model_path) {
 LlamaPartialRuntime::LlamaPartialRuntime(LlamaPartialRuntimeConfig config)
     : config_(std::move(config)) {
     validate_model_path_if_present(config_.model_path);
+
+    if (!config_.model_path.empty()) {
+        llama_model_params model_params = llama_model_default_params();
+
+        // Metadata/vocab-only load for now. Later this becomes a real
+        // partial-stage GGUF loader.
+        model_params.vocab_only = true;
+        model_params.n_gpu_layers = 0;
+
+        model_ = llama_model_load_from_file(config_.model_path.c_str(), model_params);
+        if (model_ == nullptr) {
+            throw std::runtime_error(
+                "failed to load GGUF metadata/vocab for LlamaPartialRuntime: " +
+                config_.model_path
+            );
+        }
+
+        vocab_ = llama_model_get_vocab(model_);
+        if (vocab_ == nullptr) {
+            llama_model_free(model_);
+            model_ = nullptr;
+            throw std::runtime_error(
+                "failed to get vocab from LlamaPartialRuntime model: " +
+                config_.model_path
+            );
+        }
+
+        model_loaded_ = true;
+    }
+}
+
+LlamaPartialRuntime::~LlamaPartialRuntime() {
+    if (model_ != nullptr) {
+        llama_model_free(model_);
+        model_ = nullptr;
+        vocab_ = nullptr;
+        model_loaded_ = false;
+    }
 }
 
 RuntimeResponse LlamaPartialRuntime::forward(const RuntimeRequest& request) {
@@ -54,7 +94,8 @@ RuntimeResponse LlamaPartialRuntime::forward(const RuntimeRequest& request) {
 
     // Skeleton phase:
     // This does not execute llama.cpp layers yet. It only proves that the
-    // HTTP server can switch to a llama-backed runtime without changing routes.
+    // HTTP server can switch to a llama-backed runtime and optionally load
+    // GGUF metadata/vocab at startup.
     if (request.generation_mode == "decode") {
         response.next_token_id = 2000 + request.token_index;
     } else {
@@ -71,7 +112,13 @@ RuntimeResponse LlamaPartialRuntime::forward(const RuntimeRequest& request) {
     );
 
     response.metrics.backend = backend_name();
-    response.metrics.status = "llama_partial_skeleton_echo";
+
+    if (model_loaded_) {
+        response.metrics.status = "llama_partial_metadata_loaded_echo";
+    } else {
+        response.metrics.status = "llama_partial_skeleton_echo";
+    }
+
     response.metrics.compute_time_ms = elapsed_ms(start, end);
     response.metrics.true_comm_ms = 0.0;
     response.metrics.rpc_wall_time_ms = 0.0;
