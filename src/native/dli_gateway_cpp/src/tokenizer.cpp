@@ -92,6 +92,51 @@ std::vector<llama_token> tokenize_with_vocab(
     return tokens;
 }
 
+std::string llama_token_to_string(
+    const llama_vocab* vocab,
+    llama_token token
+) {
+    if (vocab == nullptr) {
+        throw std::runtime_error("cannot detokenize with null llama vocab");
+    }
+
+    const bool special = true;
+    int required = llama_token_to_piece(
+        vocab,
+        token,
+        nullptr,
+        0,
+        0,
+        special
+    );
+
+    if (required == 0) {
+        return "";
+    }
+
+    if (required < 0) {
+        required = -required;
+    }
+
+    std::string piece(static_cast<std::size_t>(required), '\0');
+
+    const int actual = llama_token_to_piece(
+        vocab,
+        token,
+        piece.data(),
+        static_cast<int32_t>(piece.size()),
+        0,
+        special
+    );
+
+    if (actual < 0) {
+        throw std::runtime_error("llama_token_to_piece reported insufficient buffer unexpectedly");
+    }
+
+    piece.resize(static_cast<std::size_t>(actual));
+    return piece;
+}
+
 } // namespace
 
 TokenizedPrompt TokenizerStub::tokenize(const std::string& prompt) const {
@@ -101,7 +146,6 @@ TokenizedPrompt TokenizerStub::tokenize(const std::string& prompt) const {
     std::istringstream stream(prompt);
     std::string word;
 
-    // Fake BOS token.
     result.token_ids.push_back(1);
 
     std::int64_t next_id = 100;
@@ -110,12 +154,24 @@ TokenizedPrompt TokenizerStub::tokenize(const std::string& prompt) const {
         result.token_ids.push_back(next_id++);
     }
 
-    // Ensure non-empty prompt representation.
     if (result.token_ids.size() == 1) {
         result.token_ids.push_back(100);
     }
 
     return result;
+}
+
+std::string TokenizerStub::detokenize(const std::vector<int>& token_ids) const {
+    std::ostringstream out;
+
+    for (std::size_t i = 0; i < token_ids.size(); ++i) {
+        if (i > 0) {
+            out << " ";
+        }
+        out << "<tok_" << token_ids[i] << ">";
+    }
+
+    return out.str();
 }
 
 std::string TokenizerStub::backend_name() const {
@@ -128,8 +184,6 @@ LlamaTokenizer::LlamaTokenizer(std::string model_path)
 
     llama_model_params model_params = llama_model_default_params();
 
-    // Gateway uses this model only for tokenizer/vocab access.
-    // Do not load full model tensors here.
     model_params.vocab_only = true;
     model_params.n_gpu_layers = 0;
 
@@ -172,6 +226,16 @@ TokenizedPrompt LlamaTokenizer::tokenize(const std::string& prompt) const {
     }
 
     return result;
+}
+
+std::string LlamaTokenizer::detokenize(const std::vector<int>& token_ids) const {
+    std::string out;
+
+    for (const int token_id : token_ids) {
+        out += llama_token_to_string(vocab_, static_cast<llama_token>(token_id));
+    }
+
+    return out;
 }
 
 std::string LlamaTokenizer::backend_name() const {

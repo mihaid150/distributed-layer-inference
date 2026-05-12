@@ -32,6 +32,17 @@ void test_real_llama_tokenizer(const std::string& model_path) {
         std::exit(1);
     }
 
+    const std::vector<int> first_tokens = {
+        static_cast<int>(result.token_ids.front())
+    };
+
+    const std::string text = tokenizer->detokenize(first_tokens);
+
+    if (text.empty()) {
+        std::cerr << "expected non-empty detokenized text for first token\n";
+        std::exit(1);
+    }
+    
     std::cout << "tokenizer_backend=" << tokenizer->backend_name() << "\n";
     std::cout << "token_count=" << result.token_ids.size() << "\n";
     std::cout << "tokens=";

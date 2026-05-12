@@ -21,6 +21,9 @@ void test_stub_tokenizer() {
     assert(result.token_ids[1] == 100);
     assert(result.token_ids[2] == 101);
     assert(result.token_ids[3] == 102);
+
+    const std::string text = tokenizer->detokenize({1000, 1001, 1002});
+    assert(text == "<tok_1000> <tok_1001> <tok_1002>");
 }
 
 void test_factory_returns_stub_for_empty_model_path() {

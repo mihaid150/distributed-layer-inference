@@ -21,12 +21,16 @@ public:
 
     virtual TokenizedPrompt tokenize(const std::string& prompt) const = 0;
 
+    virtual std::string detokenize(const std::vector<int>& token_ids) const = 0;
+
     virtual std::string backend_name() const = 0;
 };
 
 class TokenizerStub final : public Tokenizer {
 public:
     TokenizedPrompt tokenize(const std::string& prompt) const override;
+
+    std::string detokenize(const std::vector<int>& token_ids) const override;
 
     std::string backend_name() const override;
 };
@@ -41,6 +45,8 @@ public:
     LlamaTokenizer& operator=(const LlamaTokenizer&) = delete;
 
     TokenizedPrompt tokenize(const std::string& prompt) const override;
+
+    std::string detokenize(const std::vector<int>& token_ids) const override;
 
     std::string backend_name() const override;
 

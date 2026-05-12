@@ -149,6 +149,8 @@ GenerationLoopResult GenerationLoop::run_stub_generation(
         result.steps.push_back(make_step_trace(i, "decode", decode_response));
     }
 
+    result.generated_text = tokenizer_.detokenize(result.generated_token_ids);
+
     const auto end = std::chrono::steady_clock::now();
 
     result.generated_token_count = decode_steps;
@@ -178,8 +180,8 @@ std::string generation_loop_result_json(
         << "\"tokenizer_backend\":\"" << dli::common::json_escape(result.tokenizer_backend) << "\","
         << "\"prompt_token_count\":" << result.prompt_token_ids.size() << ","
         << "\"prompt_token_ids\":" << i64_vector_json(result.prompt_token_ids) << ","
-        << "\"generated_text\":\"\","
-        << "\"assistant_message\":\"\","
+        << "\"generated_text\":\"" << dli::common::json_escape(result.generated_text) << "\","
+        << "\"assistant_message\":\"" << dli::common::json_escape(result.generated_text) << "\","
         << "\"generated_token_ids\":" << int_vector_json(result.generated_token_ids) << ","
         << "\"generated_token_count\":" << result.generated_token_count << ","
         << "\"total_latency_ms\":" << result.total_latency_ms << ","

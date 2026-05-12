@@ -33,6 +33,8 @@ struct GenerationLoopResult {
     std::vector<std::int64_t> prompt_token_ids;
     std::vector<int> generated_token_ids;
 
+    std::string generated_text;
+
     std::vector<GenerationStepTrace> steps;
 
     double total_latency_ms = 0.0;
