@@ -175,7 +175,7 @@ dli::common::HttpResponse handle_request(
             return dli::common::make_json_response(
                 200,
                 "OK",
-                generate_loop_json(request, config, *tokenizer_)
+                generate_loop_json(request, config, tokenizer)
             );
         } catch (const std::exception& exc) {
             return dli::common::make_json_response(
