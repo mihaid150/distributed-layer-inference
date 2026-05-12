@@ -128,7 +128,9 @@ LlamaTokenizer::LlamaTokenizer(std::string model_path)
 
     llama_model_params model_params = llama_model_default_params();
 
-    // Keep tokenizer loading CPU-only and conservative.
+    // Gateway uses this model only for tokenizer/vocab access.
+    // Do not load full model tensors here.
+    model_params.vocab_only = true;
     model_params.n_gpu_layers = 0;
 
     model_ = llama_model_load_from_file(model_path_.c_str(), model_params);
