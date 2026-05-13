@@ -1,0 +1,198 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: dli-native-gateway-model-pv
+spec:
+  capacity:
+    storage: 2Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: dli-native-local
+  hostPath:
+    path: /mnt/dli/native/gateway-model
+    type: DirectoryOrCreate
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - REPLACE_MASTER_NODE_HOSTNAME
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dli-native-gateway-model-pvc
+  namespace: inference
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: dli-native-local
+  resources:
+    requests:
+      storage: 2Gi
+  volumeName: dli-native-gateway-model-pv
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: dli-native-stage-1-model-pv
+spec:
+  capacity:
+    storage: 2Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: dli-native-local
+  hostPath:
+    path: /mnt/dli/native/stage-1-model
+    type: DirectoryOrCreate
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - pinode7
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dli-native-stage-1-model-pvc
+  namespace: inference
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: dli-native-local
+  resources:
+    requests:
+      storage: 2Gi
+  volumeName: dli-native-stage-1-model-pv
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: dli-native-stage-2-model-pv
+spec:
+  capacity:
+    storage: 2Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: dli-native-local
+  hostPath:
+    path: /mnt/dli/native/stage-2-model
+    type: DirectoryOrCreate
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - pinode8
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dli-native-stage-2-model-pvc
+  namespace: inference
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: dli-native-local
+  resources:
+    requests:
+      storage: 2Gi
+  volumeName: dli-native-stage-2-model-pv
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: dli-native-stage-3-model-pv
+spec:
+  capacity:
+    storage: 2Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: dli-native-local
+  hostPath:
+    path: /mnt/dli/native/stage-3-model
+    type: DirectoryOrCreate
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - pinode9
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dli-native-stage-3-model-pvc
+  namespace: inference
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: dli-native-local
+  resources:
+    requests:
+      storage: 2Gi
+  volumeName: dli-native-stage-3-model-pv
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: dli-native-stage-4-model-pv
+spec:
+  capacity:
+    storage: 2Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: dli-native-local
+  hostPath:
+    path: /mnt/dli/native/stage-4-model
+    type: DirectoryOrCreate
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - pinode10
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dli-native-stage-4-model-pvc
+  namespace: inference
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: dli-native-local
+  resources:
+    requests:
+      storage: 2Gi
+  volumeName: dli-native-stage-4-model-pv

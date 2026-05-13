@@ -253,6 +253,7 @@ GenerationStepTrace make_step_trace(
     trace.stage_url = stage_url;
     trace.stage_http_status = stage_result.http_status;
     trace.stage_http_reason = stage_result.http_reason;
+    trace.stage_http_elapsed_ms = stage_result.elapsed_ms;
     trace.stage_metadata_json = stage_result.response_frame.metadata_json;
     trace.stage_tensor_bytes = stage_result.response_frame.tensor_bytes.size();
     trace.error_body = stage_result.error_body;
@@ -323,6 +324,7 @@ StageClientResult forward_through_partition_graph(
         current_frame = last_result.response_frame;
 
         aggregate_stage_metrics(result, current_frame.metadata_json);
+        result.aggregate_metrics.rpc_wall_ms += last_result.elapsed_ms;
 
         if (is_terminal_partition(partition)) {
             return last_result;
@@ -343,6 +345,7 @@ std::string step_json(const GenerationStepTrace& step) {
         << "\"stage_url\":\"" << dli::common::json_escape(step.stage_url) << "\","
         << "\"stage_http_status\":" << step.stage_http_status << ","
         << "\"stage_http_reason\":\"" << dli::common::json_escape(step.stage_http_reason) << "\","
+        << "\"stage_http_elapsed_ms\":" << step.stage_http_elapsed_ms << ","
         << "\"stage_metadata\":\"" << dli::common::json_escape(step.stage_metadata_json) << "\","
         << "\"stage_tensor_bytes\":" << step.stage_tensor_bytes << ","
         << "\"error_body\":\"" << dli::common::json_escape(step.error_body) << "\""

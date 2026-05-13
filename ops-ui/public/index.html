@@ -18,6 +18,13 @@
           <input id="namespaceInput" type="text" value="inference" placeholder="inference" />
         </label>
         <label>
+          Runtime
+          <select id="runtimeVariant">
+            <option value="python" selected>PyTorch</option>
+            <option value="native">Native C++</option>
+          </select>
+        </label>
+        <label>
           Refresh
           <select id="refreshSeconds">
             <option value="3">3s</option>

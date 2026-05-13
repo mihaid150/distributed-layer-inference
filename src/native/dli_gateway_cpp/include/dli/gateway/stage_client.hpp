@@ -11,6 +11,7 @@ namespace dli::gateway {
 struct StageClientResult {
     int http_status = 0;
     std::string http_reason;
+    double elapsed_ms = 0.0;
     dli::common::DliFrame response_frame;
     std::string error_body;
 };

@@ -7,6 +7,7 @@ const els = {
   workloadsTable: document.getElementById("workloadsTable"),
   runtimePanel: document.getElementById("runtimePanel"),
   namespaceInput: document.getElementById("namespaceInput"),
+  runtimeVariant: document.getElementById("runtimeVariant"),
   refreshSeconds: document.getElementById("refreshSeconds"),
   autoRefresh: document.getElementById("autoRefresh"),
   refreshTopologyBtn: document.getElementById("refreshTopologyBtn"),
@@ -76,6 +77,22 @@ let latestInvokeEnabledModules = [];
 let latestChatFeatureFlags = null;
 let latestChatEnabledModules = [];
 let runtimeSnapshot = null;
+let runtimeVariantCatalog = [
+  {
+    id: "python",
+    label: "PyTorch",
+    description: "Python/FastAPI gateway and PyTorch stage pods",
+    supportsChat: true,
+    supportsFeatureFlags: true
+  },
+  {
+    id: "native",
+    label: "Native C++",
+    description: "C++ gateway/stage pods using llama.cpp and DLI2 binary frames",
+    supportsChat: false,
+    supportsFeatureFlags: false
+  }
+];
 
 const SESSION_STORAGE_KEY = "dli_ops_ui_session_v2";
 const HISTORY_POST_BATCH_LIMIT = 1;
@@ -165,6 +182,27 @@ const MODULE_FALLBACK_CATALOG = [
   }
 ];
 
+const NATIVE_MODULE_CATALOG = [
+  {
+    key: "llama_cpp_native",
+    title: "Native llama.cpp Runtime",
+    summary:
+      "C++ gateway and stage pods execute GGUF partitions with llama.cpp-backed native code."
+  },
+  {
+    key: "dli2_binary_frames",
+    title: "DLI2 Binary Frames",
+    summary:
+      "The gateway and stages communicate through /forward-binary using binary DLI2 tensor frames."
+  },
+  {
+    key: "gguf_partition_shards",
+    title: "GGUF Partition Shards",
+    summary:
+      "Each native stage loads its partition-*.dli.gguf shard while the gateway owns tokenizer/model metadata."
+  }
+];
+
 function statusClass(status) {
   const s = String(status || "").toLowerCase();
   if (s.includes("running") || s.includes("healthy") || s.includes("ready")) {
@@ -228,6 +266,32 @@ async function fetchJson(url) {
 function getNamespace() {
   const value = (els.namespaceInput.value || "").trim();
   return value || "inference";
+}
+
+function getRuntimeVariant() {
+  const value = String(els.runtimeVariant?.value || "python").trim().toLowerCase();
+  return value === "native" ? "native" : "python";
+}
+
+function getRuntimeVariantInfo() {
+  const selected = getRuntimeVariant();
+  return (
+    runtimeVariantCatalog.find((item) => item.id === selected) ||
+    runtimeVariantCatalog.find((item) => item.id === "python") ||
+    { id: "python", label: "PyTorch", supportsChat: true, supportsFeatureFlags: true }
+  );
+}
+
+function runtimeQuery() {
+  return `variant=${encodeURIComponent(getRuntimeVariant())}`;
+}
+
+function supportsFeatureFlags() {
+  return getRuntimeVariantInfo().supportsFeatureFlags !== false;
+}
+
+function supportsChatEndpoint() {
+  return getRuntimeVariantInfo().supportsChat !== false;
 }
 
 function prettyJson(value) {
@@ -552,6 +616,36 @@ function syncFeatureFlagControlState() {
   els.featureBackpressureQueue.disabled = !enabled;
 }
 
+function syncRuntimeUiState() {
+  const featureControls = [
+    els.featureTransportJson,
+    els.featureTransportBinary,
+    els.featurePrecisionFp32,
+    els.featurePrecisionFp16,
+    els.featurePrecisionBf16,
+    els.featurePrecisionInt8,
+    els.featureRebalanceBaseline,
+    els.featureRebalanceLatency,
+    els.featureKvCache,
+    els.featureForwardDedupe,
+    els.featureTopologyAware,
+    els.featurePersistentSessions,
+    els.featureBackpressure,
+    els.featureBackpressureQueue,
+    els.featureFlagsResetBtn
+  ].filter(Boolean);
+  const featureFlagsEnabled = supportsFeatureFlags();
+  for (const control of featureControls) {
+    control.disabled = !featureFlagsEnabled;
+  }
+  document
+    .querySelector(".feature-flags-panel")
+    ?.classList.toggle("is-disabled", !featureFlagsEnabled);
+  if (featureFlagsEnabled) {
+    syncFeatureFlagControlState();
+  }
+}
+
 function syncFeatureFlagControlsFromBody() {
   const parsed = parseJsonOrNull(els.endpointBody.value || "");
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -561,6 +655,10 @@ function syncFeatureFlagControlsFromBody() {
 }
 
 function syncBodyFromFeatureFlagControls() {
+  if (!supportsFeatureFlags()) {
+    return;
+  }
+
   const method = String(els.endpointMethod.value || "").toUpperCase();
   if (method === "GET" || method === "HEAD") {
     return;
@@ -659,9 +757,15 @@ function applyEndpointPreset(preset) {
 async function loadEndpointCatalog() {
   const namespace = getNamespace();
   const catalog = await fetchJson(
-    `/api/endpoint-catalog?namespace=${encodeURIComponent(namespace)}`
+    `/api/endpoint-catalog?namespace=${encodeURIComponent(namespace)}&${runtimeQuery()}`
   );
   endpointCatalog = catalog;
+  if (Array.isArray(catalog.runtimeVariants) && catalog.runtimeVariants.length) {
+    runtimeVariantCatalog = catalog.runtimeVariants;
+  }
+  if (catalog.runtimeVariant?.id && els.runtimeVariant) {
+    els.runtimeVariant.value = catalog.runtimeVariant.id;
+  }
 
   els.endpointTarget.innerHTML = (catalog.targets || [])
     .map((target) => `<option value="${escapeHtml(target)}">${escapeHtml(target)}</option>`)
@@ -677,11 +781,15 @@ async function loadEndpointCatalog() {
   }
   syncGenerationControlsEnabledState();
   syncGenerationFieldsFromBody();
+  syncRuntimeUiState();
 }
 
 function getModuleCatalogRows() {
   if (featureModuleCatalog.length) {
     return featureModuleCatalog;
+  }
+  if (getRuntimeVariant() === "native") {
+    return NATIVE_MODULE_CATALOG;
   }
   return MODULE_FALLBACK_CATALOG;
 }
@@ -691,6 +799,8 @@ function renderArchitectureGuide() {
     return;
   }
 
+  const isNativeRuntime = getRuntimeVariant() === "native";
+  const runtimeInfo = getRuntimeVariantInfo();
   const invokeEnabled = deriveEnabledModules(
     latestInvokeFeatureFlags,
     latestInvokeEnabledModules
@@ -699,14 +809,31 @@ function renderArchitectureGuide() {
   const invokeSet = new Set(invokeEnabled);
   const chatSet = new Set(chatEnabled);
 
-  const baselineChips = [
-    "json_base64 transport",
-    "fp32 activations",
-    "no stage cache",
-    "baseline partition",
-    "static next-hop",
-    "default HTTP requests"
-  ];
+  const baselineChips = isNativeRuntime
+    ? [
+        "C++ gateway",
+        "llama.cpp GGUF",
+        "DLI2 binary frames",
+        "/forward-binary",
+        "native stage shards"
+      ]
+    : [
+        "json_base64 transport",
+        "fp32 activations",
+        "no stage cache",
+        "baseline partition",
+        "static next-hop",
+        "default HTTP requests"
+      ];
+  const workflowSteps = isNativeRuntime
+    ? [
+        "Gateway tokenizes the prompt and prepares a DLI2 binary tensor frame.",
+        "Native stage-1 executes embedding/layers from its GGUF shard.",
+        "Gateway routes the returned frame through native stage-2 and stage-3.",
+        "Native stage-4 executes terminal norm/lm-head work and returns next-token metadata.",
+        "Gateway detokenizes generated IDs and reports native aggregate/step metrics."
+      ]
+    : BASELINE_WORKFLOW_STEPS;
 
   const moduleRows = getModuleCatalogRows();
   const moduleCards = moduleRows
@@ -738,10 +865,10 @@ function renderArchitectureGuide() {
   els.architectureGuide.innerHTML = `
     <div class="architecture-overview">
       <div class="architecture-card">
-        <h3>Baseline Architecture</h3>
-        <p>Default flow before enabling modules. This is your comparison point for all experiments.</p>
+        <h3>${isNativeRuntime ? "Native C++ Runtime" : "Baseline Architecture"}</h3>
+        <p>${escapeHtml(runtimeInfo.description || "Current runtime target.")}</p>
         <ol class="arch-flow">
-          ${BASELINE_WORKFLOW_STEPS.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}
+          ${workflowSteps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}
         </ol>
         <div class="profile-row">
           ${baselineChips.map((chip) => `<span class="profile-chip">${escapeHtml(chip)}</span>`).join("")}
@@ -783,6 +910,12 @@ function renderArchitectureGuide() {
 }
 
 async function loadFeatureModuleCatalog() {
+  if (!supportsFeatureFlags()) {
+    featureModuleCatalog = [];
+    renderArchitectureGuide();
+    return;
+  }
+
   const namespace = getNamespace();
   try {
     const res = await fetch("/api/invoke", {
@@ -790,6 +923,7 @@ async function loadFeatureModuleCatalog() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         namespace,
+        variant: getRuntimeVariant(),
         target: "gateway",
         method: "GET",
         path: "/config",
@@ -941,7 +1075,9 @@ function renderRuntimePanel() {
   const inFlightRows = asArray(snapshot.inFlightRequests)
     .map(
       (item) => `
-      <li>${escapeHtml(item.method)} ${escapeHtml(item.path)} target=${escapeHtml(item.target)} inFlight=${formatNumber(
+      <li>${escapeHtml(item.method)} ${escapeHtml(item.path)} runtime=${escapeHtml(
+        item.variant || "-"
+      )} target=${escapeHtml(item.target)} inFlight=${formatNumber(
         item.inFlightMs,
         0
       )}ms</li>
@@ -993,7 +1129,9 @@ async function loadRuntime() {
   }
   const namespace = getNamespace();
   try {
-    const payload = await fetchJson(`/api/runtime?namespace=${encodeURIComponent(namespace)}`);
+    const payload = await fetchJson(
+      `/api/runtime?namespace=${encodeURIComponent(namespace)}&${runtimeQuery()}`
+    );
     runtimeSnapshot = asObject(payload.runtime);
     renderRuntimePanel();
   } catch (error) {
@@ -1094,6 +1232,10 @@ function buildCriticalPathBreakdown(stageSamples, totalLatencyMs) {
       stageComputeMs += computeMs;
       stageTransferMs += transferMs;
     }
+  }
+
+  if (gatewayWaitMs <= 0 && stageComputeMs + stageTransferMs > 0) {
+    gatewayWaitMs = stageComputeMs + stageTransferMs;
   }
 
   const stageResidualMs = Math.max(0, gatewayWaitMs - stageComputeMs - stageTransferMs);
@@ -1408,6 +1550,7 @@ function buildLineChartSvg(series, { width = 920, height = 220, yLabel = "" } = 
 function persistSessionState() {
   const state = {
     savedAt: new Date().toISOString(),
+    runtimeVariant: getRuntimeVariant(),
     chatMessages,
     chatTurns,
     invokeRuns
@@ -1439,6 +1582,10 @@ function restoreSessionState() {
   );
   chatTurns = asArray(parsed.chatTurns).filter((item) => item && typeof item === "object");
   invokeRuns = asArray(parsed.invokeRuns).filter((item) => item && typeof item === "object");
+  if (parsed.runtimeVariant && els.runtimeVariant) {
+    const nextVariant = String(parsed.runtimeVariant).toLowerCase() === "native" ? "native" : "python";
+    els.runtimeVariant.value = nextVariant;
+  }
 
   const lastInvoke = invokeRuns.length ? asObject(invokeRuns[invokeRuns.length - 1]) : {};
   latestInvokeFeatureFlags = asObject(lastInvoke.feature_flags);
@@ -1459,7 +1606,11 @@ function updateChatContextInfo() {
   const totalMessages = chatMessages.length;
   const turns = chatTurns.length;
   if (els.chatContextInfo) {
-    els.chatContextInfo.textContent = `Context: ${totalMessages} messages, ${turns} completed turns (sent on each /chat request).`;
+    const pathLabel = supportsChatEndpoint() ? "/chat" : "/generate";
+    const modeText = supportsChatEndpoint()
+      ? `${totalMessages} messages, ${turns} completed turns (sent on each ${pathLabel} request).`
+      : `${totalMessages} messages, ${turns} completed turns (latest user message is sent as ${pathLabel} prompt).`;
+    els.chatContextInfo.textContent = `Context: ${modeText}`;
   }
 }
 
@@ -1486,6 +1637,23 @@ function metricNetworkDeltaBytes(metric) {
 
 function metricPayloadBytes(metric) {
   const m = asObject(metric);
+  const tensorWireBytes = toFiniteNumber(m.tensor_wire_bytes);
+  if (tensorWireBytes != null) {
+    return tensorWireBytes;
+  }
+
+  const inputTensorBytes = toFiniteNumber(m.input_tensor_bytes);
+  const outputTensorBytes = toFiniteNumber(m.output_tensor_bytes);
+  if (inputTensorBytes != null || outputTensorBytes != null) {
+    return Number(inputTensorBytes || 0) + Number(outputTensorBytes || 0);
+  }
+
+  const tensorBytesIn = toFiniteNumber(m.tensor_bytes_in);
+  const tensorBytesOut = toFiniteNumber(m.tensor_bytes_out);
+  if (tensorBytesIn != null || tensorBytesOut != null) {
+    return Number(tensorBytesIn || 0) + Number(tensorBytesOut || 0);
+  }
+
   const keys = [
     "outbound_payload_bytes",
     "inbound_payload_bytes",
@@ -1506,6 +1674,173 @@ function metricPayloadBytes(metric) {
     }
   }
   return total;
+}
+
+function parseNativeStageMetadata(rawValue) {
+  if (!rawValue) {
+    return {};
+  }
+  if (typeof rawValue === "object" && !Array.isArray(rawValue)) {
+    return rawValue;
+  }
+  if (typeof rawValue !== "string") {
+    return {};
+  }
+  return parseJsonOrNull(rawValue) || {};
+}
+
+function nativeStepToStageMetric(step) {
+  const s = asObject(step);
+  const metadata = parseNativeStageMetadata(s.stage_metadata || s.stage_metadata_json);
+  const metrics = asObject(metadata.metrics);
+  const stageId = Number(metadata.stage_id ?? s.stage_id ?? 0);
+  const serviceName = String(metadata.service || metadata.service_name || `native-stage-${stageId}`);
+  const inputTensorBytes = Number(metrics.input_tensor_bytes || 0);
+  const outputTensorBytes = Number(metrics.output_tensor_bytes ?? s.stage_tensor_bytes ?? 0);
+  const stageHttpElapsedMs = Number(s.stage_http_elapsed_ms || 0);
+  const rpcWallMs = Number(metrics.rpc_wall_time_ms || stageHttpElapsedMs || 0);
+  const trueCommMs = Number(metrics.true_comm_ms || 0);
+
+  return {
+    timestamp_ms: 0,
+    hostname: serviceName,
+    service_name: serviceName,
+    stage_id: stageId,
+    token_index: Number(metadata.token_index ?? s.token_index ?? 0),
+    generation_mode: String(metadata.generation_mode || s.generation_mode || ""),
+    partition_id: String(s.partition_id || ""),
+    backend: String(metadata.backend || metrics.backend || ""),
+    status: String(metadata.status || metrics.status || ""),
+    stage_url: String(s.stage_url || ""),
+    stage_http_status: Number(s.stage_http_status || 0),
+    stage_http_reason: String(s.stage_http_reason || ""),
+    stage_http_elapsed_ms: stageHttpElapsedMs,
+    compute_time_ms: Number(metrics.compute_time_ms || 0),
+    rpc_wall_time_ms: rpcWallMs,
+    transfer_time_ms: rpcWallMs,
+    true_comm_ms: trueCommMs,
+    input_tensor_bytes: inputTensorBytes,
+    output_tensor_bytes: outputTensorBytes,
+    request_wire_bytes: inputTensorBytes,
+    response_wire_bytes: outputTensorBytes,
+    tensor_wire_bytes: inputTensorBytes + outputTensorBytes,
+    process_memory_mb: Number(metrics.memory_rss_mb || 0),
+    memory_rss_mb: Number(metrics.memory_rss_mb || 0),
+    model_load_ms: Number(metrics.model_load_ms || 0),
+    kv_cache_bytes: Number(metrics.kv_cache_bytes || 0),
+    kv_cache_seq_before: Number(metrics.kv_cache_seq_before || 0),
+    kv_cache_seq_after: Number(metrics.kv_cache_seq_after || 0),
+    kv_cache_valid: Boolean(metrics.kv_cache_valid),
+    native_stage_metadata: metadata
+  };
+}
+
+function normalizeNativeResponseMetrics(responseJson, callMeta = {}) {
+  const response = asObject(responseJson);
+  const steps = asArray(response.steps);
+  const aggregateMetrics = asObject(response.aggregate_metrics);
+
+  if (!steps.length && !Object.keys(aggregateMetrics).length) {
+    return responseJson;
+  }
+
+  const stageSamples = steps.map(nativeStepToStageMetric);
+  const byToken = new Map();
+  for (const sample of stageSamples) {
+    const tokenIndex = Number(sample.token_index || 0);
+    const row = byToken.get(tokenIndex) || {
+      token_index: tokenIndex,
+      stage_metrics: []
+    };
+    row.stage_metrics.push(sample);
+    byToken.set(tokenIndex, row);
+  }
+
+  const generatedTokenIds = asArray(response.generated_token_ids);
+  const tokenMetrics = [...byToken.values()]
+    .sort((a, b) => Number(a.token_index || 0) - Number(b.token_index || 0))
+    .map((row) => {
+      const samples = asArray(row.stage_metrics);
+      const latencyMs = samples.reduce(
+        (sum, sample) =>
+          sum +
+          Number(sample.compute_time_ms || 0) +
+          Number(sample.rpc_wall_time_ms || 0),
+        0
+      );
+      const tokenIndex = Number(row.token_index || 0);
+      return {
+        token_index: tokenIndex,
+        token_id: generatedTokenIds[tokenIndex] ?? "",
+        token_text: generatedTokenIds[tokenIndex] == null ? "" : `<tok_${generatedTokenIds[tokenIndex]}>`,
+        latency_ms: latencyMs,
+        stage_metrics: samples
+      };
+    });
+
+  const computeSum = Number(
+    aggregateMetrics.compute_ms ||
+      stageSamples.reduce((sum, sample) => sum + Number(sample.compute_time_ms || 0), 0)
+  );
+  const rpcWallSum = Number(
+    aggregateMetrics.rpc_wall_ms ||
+      stageSamples.reduce((sum, sample) => sum + Number(sample.rpc_wall_time_ms || 0), 0)
+  );
+  const trueCommSum = Number(
+    aggregateMetrics.true_comm_ms ||
+      stageSamples.reduce((sum, sample) => sum + Number(sample.true_comm_ms || 0), 0)
+  );
+  const payloadBytes = Number(
+    (aggregateMetrics.tensor_bytes_in || 0) +
+      (aggregateMetrics.tensor_bytes_out || 0) ||
+      stageSamples.reduce((sum, sample) => sum + metricPayloadBytes(sample), 0)
+  );
+  const maxMemoryMb = Number(
+    aggregateMetrics.memory_rss_mb ||
+      stageSamples.reduce((max, sample) => Math.max(max, Number(sample.process_memory_mb || 0)), 0)
+  );
+
+  return {
+    ...response,
+    prompt_token_count: Number(response.prompt_token_count || asArray(response.prompt_token_ids).length || 0),
+    generated_token_count: Number(response.generated_token_count || generatedTokenIds.length || 0),
+    summary_metrics: {
+      generated_token_count: Number(response.generated_token_count || generatedTokenIds.length || 0),
+      prompt_token_count: Number(response.prompt_token_count || asArray(response.prompt_token_ids).length || 0),
+      feature_flags: {},
+      enabled_modules: ["llama_cpp_native", "dli2_binary_frames", "gguf_partition_shards"],
+      aggregate: {
+        compute_time_ms_sum: computeSum,
+        rpc_wall_time_ms_sum: rpcWallSum,
+        transfer_time_ms_sum: rpcWallSum,
+        true_comm_ms_sum: trueCommSum,
+        rpc_compute_ratio: rpcWallSum / Math.max(1e-9, computeSum),
+        true_comm_compute_ratio: trueCommSum / Math.max(1e-9, computeSum),
+        payload_bytes_sum: payloadBytes,
+        payload_mebibytes_sum: payloadBytes / (1024 * 1024),
+        network_delta_bytes_sum: 0,
+        network_delta_mebibytes_sum: 0,
+        max_process_memory_mb: maxMemoryMb
+      },
+      per_stage: {}
+    },
+    token_metrics: tokenMetrics
+  };
+}
+
+function normalizeResponseMetrics(responseJson, callMeta = {}) {
+  const response = asObject(responseJson);
+  if (response.summary_metrics && response.token_metrics) {
+    return responseJson;
+  }
+  if (
+    String(response.runtime || "").includes("cpp-native") ||
+    response.aggregate_metrics ||
+    response.steps
+  ) {
+    return normalizeNativeResponseMetrics(responseJson, callMeta);
+  }
+  return responseJson;
 }
 
 function flattenNumericMetrics(value, prefix = "", out = []) {
@@ -1820,7 +2155,8 @@ function buildInvokeRunSummary({
       timeoutMs: Number(requestConfig?.timeoutMs || 0),
       method: String(requestConfig?.method || "POST"),
       path: String(requestConfig?.path || "/generate"),
-      target: String(requestConfig?.target || "gateway")
+      target: String(requestConfig?.target || "gateway"),
+      variant: String(requestConfig?.variant || getRuntimeVariant())
     },
     payloadMib: Number(aggregate.payload_mebibytes_sum ?? aggregate.payload_b64_mebibytes_sum ?? 0),
     networkMib: Number(aggregate.network_delta_mebibytes_sum || 0),
@@ -1856,6 +2192,7 @@ function buildInvokeRunSummary({
 }
 
 function updateLatestModuleState(responseJson, source) {
+  responseJson = normalizeResponseMetrics(responseJson);
   const summary = asObject(asObject(responseJson).summary_metrics);
   const featureFlags = asObject(summary.feature_flags);
   const enabledModules = deriveEnabledModules(featureFlags, summary.enabled_modules);
@@ -1935,6 +2272,7 @@ function renderInvokeRunEvolution() {
 }
 
 function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
+  responseJson = normalizeResponseMetrics(responseJson, callMeta);
   if (!responseJson || typeof responseJson !== "object") {
     els.invokeMetricsDashboard.innerHTML = `<div class="muted">No structured JSON response available for dashboard rendering.</div>`;
     return;
@@ -2419,14 +2757,29 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
 async function loadTopology() {
   const namespace = getNamespace();
   try {
-    const data = await fetchJson(`/api/topology?namespace=${encodeURIComponent(namespace)}`);
-    els.clusterMeta.textContent = `namespace=${data.namespace} | updated=${new Date(
+    const data = await fetchJson(
+      `/api/topology?namespace=${encodeURIComponent(namespace)}&${runtimeQuery()}`
+    );
+    if (Array.isArray(data.runtimeVariants) && data.runtimeVariants.length) {
+      runtimeVariantCatalog = data.runtimeVariants;
+    }
+    const runtimeLabel = data.runtimeVariant?.label || getRuntimeVariantInfo().label || getRuntimeVariant();
+    els.clusterMeta.textContent = `runtime=${runtimeLabel} | namespace=${data.namespace} | updated=${new Date(
       data.generatedAt
     ).toLocaleString()}`;
     renderOverview(data);
     renderPipeline(data);
     renderWorkloads(data);
-    podToNodeMap = new Map((data.pods || []).map((pod) => [String(pod.name || ""), String(pod.node || "")]));
+    const podNodeEntries = [];
+    for (const pod of data.pods || []) {
+      if (pod?.name) {
+        podNodeEntries.push([String(pod.name), String(pod.node || "")]);
+      }
+      if (pod?.app) {
+        podNodeEntries.push([String(pod.app), String(pod.node || "")]);
+      }
+    }
+    podToNodeMap = new Map(podNodeEntries);
   } catch (error) {
     els.clusterMeta.textContent = `Topology error (${namespace}): ${error.message}`;
     podToNodeMap = new Map();
@@ -2444,7 +2797,7 @@ async function loadLogs() {
     const payload = await fetchJson(
       `/api/logs?namespace=${encodeURIComponent(namespace)}&target=${encodeURIComponent(
         target
-      )}&source=${encodeURIComponent(source)}&tail=${tail}&previous=${previous}`
+      )}&source=${encodeURIComponent(source)}&tail=${tail}&previous=${previous}&${runtimeQuery()}`
     );
     renderLogs(payload);
   } catch (error) {
@@ -2475,11 +2828,15 @@ async function invokeEndpoint() {
       }
     }
     if (parsedBody && typeof parsedBody === "object" && !Array.isArray(parsedBody)) {
-      const flags = readFeatureFlagsFromControls();
-      if (isBaselineFeatureFlags(flags)) {
-        delete parsedBody.feature_flags;
+      if (supportsFeatureFlags()) {
+        const flags = readFeatureFlagsFromControls();
+        if (isBaselineFeatureFlags(flags)) {
+          delete parsedBody.feature_flags;
+        } else {
+          parsedBody.feature_flags = flags;
+        }
       } else {
-        parsedBody.feature_flags = flags;
+        delete parsedBody.feature_flags;
       }
       els.endpointBody.value = prettyJson(parsedBody);
     }
@@ -2487,6 +2844,7 @@ async function invokeEndpoint() {
 
   const requestPayload = {
     namespace,
+    variant: getRuntimeVariant(),
     target,
     method,
     path,
@@ -2536,23 +2894,26 @@ async function invokeEndpoint() {
       payload.call?.statusText
     )}</div>
       <div class="log-pill">elapsed: ${safeText(payload.call?.elapsedMs)}ms</div>
+      <div class="log-pill">runtime: ${safeText(payload.variant || getRuntimeVariant())}</div>
       <div class="log-pill">target: ${safeText(payload.target)}</div>
       <div class="log-pill">path: ${safeText(payload.path)}</div>
       <div class="log-pill">pod: ${safeText(payload.podName)}</div>
     `;
 
-    renderInvokeMetrics(payload.responseJson, payload.call || {}, {
+    const responseJson = normalizeResponseMetrics(payload.responseJson, payload.call || {});
+    renderInvokeMetrics(responseJson, payload.call || {}, {
       ...parseGenerateConfigFromBody(parsedBody),
       timeoutMs,
       method,
       path,
-      target
+      target,
+      variant: getRuntimeVariant()
     });
-    updateLatestModuleState(payload.responseJson, "invoke");
+    updateLatestModuleState(responseJson, "invoke");
     renderArchitectureGuide();
 
-    const formatted = payload.responseJson != null
-      ? prettyJson(payload.responseJson)
+    const formatted = responseJson != null
+      ? prettyJson(responseJson)
       : payload.responseText || "";
     els.invokeOutput.textContent = formatted;
   } catch (error) {
@@ -2603,6 +2964,7 @@ function renderChatMessages() {
 }
 
 function summarizeTurnMetrics(response, requestConfig = {}) {
+  response = normalizeResponseMetrics(response);
   const summary = response.summary_metrics || {};
   const aggregate = summary.aggregate || {};
   const featureFlags = asObject(summary.feature_flags);
@@ -3211,6 +3573,7 @@ async function sendChatTurn() {
     INVOKE_TIMEOUT_LONG_DEFAULT_MS
   );
   const featureFlags = readFeatureFlagsFromControls();
+  const chatPath = supportsChatEndpoint() ? "/chat" : "/generate";
 
   const conversation = [...chatMessages, { role: "user", content: userText }];
   const requestConfig = {
@@ -3220,8 +3583,9 @@ async function sendChatTurn() {
     temperature,
     timeoutMs,
     method: "POST",
-    path: "/chat",
-    target: "gateway"
+    path: chatPath,
+    target: "gateway",
+    variant: getRuntimeVariant()
   };
   setChatBusy(true);
   els.chatMeta.innerHTML = "";
@@ -3229,17 +3593,25 @@ async function sendChatTurn() {
   try {
     const invokePayload = {
       namespace,
+      variant: getRuntimeVariant(),
       target: "gateway",
       method: "POST",
-      path: "/chat",
+      path: chatPath,
       timeoutMs,
-      body: {
-        messages: conversation,
-        max_new_tokens: maxNewTokens,
-        min_new_tokens: minNewTokens,
-        temperature,
-        feature_flags: featureFlags
-      }
+      body: supportsChatEndpoint()
+        ? {
+            messages: conversation,
+            max_new_tokens: maxNewTokens,
+            min_new_tokens: minNewTokens,
+            temperature,
+            ...(supportsFeatureFlags() ? { feature_flags: featureFlags } : {})
+          }
+        : {
+            prompt: userText,
+            max_new_tokens: maxNewTokens,
+            min_new_tokens: minNewTokens,
+            temperature
+          }
     };
 
     const res = await fetch("/api/invoke", {
@@ -3266,7 +3638,7 @@ async function sendChatTurn() {
       throw new Error(pieces.join(": "));
     }
 
-    const response = payload.responseJson;
+    const response = normalizeResponseMetrics(payload.responseJson, payload.call || {});
     const assistantText = String(response.assistant_message || response.generated_text || "").trim();
     const turnSummary = summarizeTurnMetrics(response, requestConfig);
     chatMessages = [...conversation, { role: "assistant", content: assistantText || "(empty response)" }];
@@ -3285,7 +3657,7 @@ async function sendChatTurn() {
         namespace: getNamespace(),
         target: "gateway",
         method: "POST",
-        path: "/chat",
+        path: chatPath,
         config: {
           promptChars: turnSummary.config?.promptChars || 0,
           promptTokens: turnSummary.prompt_tokens || 0,
@@ -3333,6 +3705,8 @@ async function sendChatTurn() {
 
     els.chatMeta.innerHTML = `
       <div class="log-pill">turn: ${chatTurns.length}</div>
+      <div class="log-pill">runtime: ${escapeHtml(getRuntimeVariant())}</div>
+      <div class="log-pill">path: ${escapeHtml(chatPath)}</div>
       <div class="log-pill">latency: ${formatNumber(response.total_latency_ms, 1)}ms</div>
       <div class="log-pill">tokens/s: ${formatNumber(response.tokens_per_second, 3)}</div>
       <div class="log-pill">termination: ${escapeHtml(response.termination_reason || "unknown")}</div>
@@ -3405,6 +3779,28 @@ function updateAutoRefresh() {
   }, seconds * 1000);
 }
 
+function reloadRuntimeScopedData() {
+  featureModuleCatalog = [];
+  runtimeSnapshot = null;
+  latestInvokeFeatureFlags = null;
+  latestInvokeEnabledModules = [];
+  latestChatFeatureFlags = null;
+  latestChatEnabledModules = [];
+  syncRuntimeUiState();
+  loadTopology();
+  loadLogs();
+  loadRuntime();
+  loadEndpointCatalog().catch((error) => {
+    els.invokeMeta.innerHTML = `<div class="log-pill line-err">Catalog error: ${escapeHtml(
+      error.message
+    )}</div>`;
+  });
+  loadFeatureModuleCatalog();
+  renderArchitectureGuide();
+  updateChatContextInfo();
+  persistSessionState();
+}
+
 els.refreshTopologyBtn.addEventListener("click", () => {
   loadTopology();
   loadRuntime();
@@ -3416,6 +3812,9 @@ els.refreshLogsBtn.addEventListener("click", () => {
 
 els.autoRefresh.addEventListener("change", updateAutoRefresh);
 els.refreshSeconds.addEventListener("change", updateAutoRefresh);
+if (els.runtimeVariant) {
+  els.runtimeVariant.addEventListener("change", reloadRuntimeScopedData);
+}
 els.logTarget.addEventListener("change", loadLogs);
 els.logSource.addEventListener("change", loadLogs);
 els.namespaceInput.addEventListener("change", () => {
@@ -3457,6 +3856,7 @@ els.endpointTemperature.addEventListener("input", syncBodyFromGenerationFields);
   els.featureRebalanceBaseline,
   els.featureRebalanceLatency,
   els.featureKvCache,
+  els.featureForwardDedupe,
   els.featureTopologyAware,
   els.featurePersistentSessions,
   els.featureBackpressure,
@@ -3493,12 +3893,18 @@ els.chatInput.addEventListener("keydown", (event) => {
   }
 });
 
-const initialNamespace = new URLSearchParams(window.location.search).get("namespace");
+const initialParams = new URLSearchParams(window.location.search);
+const initialNamespace = initialParams.get("namespace");
 if (initialNamespace) {
   els.namespaceInput.value = initialNamespace;
 }
 
 restoreSessionState();
+const initialRuntimeVariant = initialParams.get("variant") || initialParams.get("runtime");
+if (initialRuntimeVariant && els.runtimeVariant) {
+  els.runtimeVariant.value = String(initialRuntimeVariant).toLowerCase() === "native" ? "native" : "python";
+}
+syncRuntimeUiState();
 if (invokeRuns.length) {
   els.invokeMetricsDashboard.innerHTML = renderInvokeRunEvolution();
 }

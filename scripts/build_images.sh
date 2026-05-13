@@ -14,6 +14,12 @@ BUILDER="${BUILDER:-multiarch-insecure}"
 PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.org/simple}"
 PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST:-pypi.org}"
 INSECURE_FLAG="${INSECURE_FLAG:-}"
+NATIVE_BUILD_IMAGE="${NATIVE_BUILD_IMAGE:-}"
+NATIVE_RUNTIME_BASE_ARG="${NATIVE_RUNTIME_BASE_ARG:-RUNTIME_IMAGE}"
+NATIVE_CMAKE_BUILD_TYPE="${NATIVE_CMAKE_BUILD_TYPE:-Release}"
+NATIVE_GGML_NATIVE="${NATIVE_GGML_NATIVE:-OFF}"
+NATIVE_GGML_CPU_ARM_ARCH="${NATIVE_GGML_CPU_ARM_ARCH:-armv8-a}"
+NATIVE_GGML_CPU_ALL_VARIANTS="${NATIVE_GGML_CPU_ALL_VARIANTS:-OFF}"
 ALLOW_SELF_BASE="${ALLOW_SELF_BASE:-}"
 ENABLE_INLINE_CACHE="${ENABLE_INLINE_CACHE:-1}"
 ENABLE_REGISTRY_CACHE="${ENABLE_REGISTRY_CACHE:-1}"
@@ -102,41 +108,66 @@ cat <<EOF
 Distributed Layer Inference image builder
 -----------------------------------------
 Services:
-  gateway      -> runs on the master/control-plane node
-  stage-python -> legacy Python/PyTorch stage runtime
-  stage-cpp    -> native C++ stage runtime skeleton
+  gateway-python -> legacy Python/FastAPI gateway runtime
+  stage-python   -> legacy Python/PyTorch stage runtime
+  native-gateway -> native C++ GGUF gateway runtime from docker/Dockerfile.native
+  native-stage   -> native C++ GGUF stage runtime from docker/Dockerfile.native
+  native-tools   -> native C++ GGUF manifest/shard tools from docker/Dockerfile.native
 EOF
 
-SERVICE="$(prompt "Service to build (gateway | stage-python | stage-cpp)" | lower)"
+SERVICE="$(prompt "Service to build (gateway-python | stage-python | native-gateway | native-stage | native-tools)" | lower)"
 if [[ -z "${SERVICE}" ]]; then
   echo "Service is required." >&2
   exit 1
 fi
 
 STAGE_RUNTIME=""
+DOCKER_BUILD_TARGET=""
+IMAGE_KIND="python"
+
 case "${SERVICE}" in
-  gateway|gw|master|inference-gateway|dli-gateway)
+  gateway|gateway-python|gw|master|inference-gateway|dli-gateway)
     SERVICE="gateway-python"
+    IMAGE_KIND="python"
     DOCKERFILE="docker/Dockerfile.gateway-python"
+    DOCKER_BUILD_TARGET=""
     DEFAULT_IMAGE_REPO="${DOCKERHUB_NAMESPACE}/distributed-layer-inference-gateway-python"
     ;;
-  gateway-cpp|gateway-native|cpp-gateway|native-gateway|dli-gateway-cpp)
-    SERVICE="gateway-cpp"
-    DOCKERFILE="docker/Dockerfile.gateway-cpp"
-    DEFAULT_IMAGE_REPO="${DOCKERHUB_NAMESPACE}/distributed-layer-inference-gateway-cpp"
-    ;;
+
   stage|stage-python|stage-pytorch|stage-legacy|client|worker|inference-stage|dli-stage)
     SERVICE="stage-python"
+    IMAGE_KIND="python"
     STAGE_RUNTIME="python-pytorch-legacy"
     DOCKERFILE="docker/Dockerfile.stage-python"
+    DOCKER_BUILD_TARGET=""
     DEFAULT_IMAGE_REPO="${DOCKERHUB_NAMESPACE}/distributed-layer-inference-stage-python"
     ;;
-  stage-cpp|stage-native|cpp-stage|native-stage|dli-stage-cpp)
-    SERVICE="stage-cpp"
-    STAGE_RUNTIME="cpp-native"
-    DOCKERFILE="docker/Dockerfile.stage-cpp"
-    DEFAULT_IMAGE_REPO="${DOCKERHUB_NAMESPACE}/distributed-layer-inference-stage-cpp"
+
+  native-gateway|gateway-cpp|gateway-native|cpp-gateway|dli-gateway-cpp)
+    SERVICE="native-gateway"
+    IMAGE_KIND="native"
+    DOCKERFILE="docker/Dockerfile.native"
+    DOCKER_BUILD_TARGET="gateway-runtime"
+    DEFAULT_IMAGE_REPO="${DOCKERHUB_NAMESPACE}/distributed-layer-inference-native-gateway"
     ;;
+
+  native-stage|stage-cpp|stage-native|cpp-stage|dli-stage-cpp)
+    SERVICE="native-stage"
+    IMAGE_KIND="native"
+    STAGE_RUNTIME="cpp-native-gguf"
+    DOCKERFILE="docker/Dockerfile.native"
+    DOCKER_BUILD_TARGET="stage-runtime"
+    DEFAULT_IMAGE_REPO="${DOCKERHUB_NAMESPACE}/distributed-layer-inference-native-stage"
+    ;;
+
+  native-tools|tools-cpp|cpp-tools|dli-tools-cpp)
+    SERVICE="native-tools"
+    IMAGE_KIND="native"
+    DOCKERFILE="docker/Dockerfile.native"
+    DOCKER_BUILD_TARGET="tools-runtime"
+    DEFAULT_IMAGE_REPO="${DOCKERHUB_NAMESPACE}/distributed-layer-inference-native-tools"
+    ;;
+
   *)
     echo "Unknown service: ${SERVICE}" >&2
     exit 1
@@ -148,8 +179,17 @@ if [[ ! -f "${DOCKERFILE}" ]]; then
   exit 1
 fi
 
-DOCKERFILE_BASE_DEFAULT="$(awk -F= '/^ARG[[:space:]]+BASE_IMAGE=/{print $2; exit}' "${DOCKERFILE}" | tr -d '[:space:]')"
-DOCKERFILE_BASE_DEFAULT="${DOCKERFILE_BASE_DEFAULT:-python:3.11-slim}"
+if [[ "${IMAGE_KIND}" == "native" ]]; then
+  DOCKERFILE_BASE_DEFAULT="$(
+    awk -F= -v arg="${NATIVE_RUNTIME_BASE_ARG}" '
+      $0 ~ "^ARG[[:space:]]+" arg "=" {print $2; exit}
+    ' "${DOCKERFILE}" | tr -d '[:space:]'
+  )"
+  DOCKERFILE_BASE_DEFAULT="${DOCKERFILE_BASE_DEFAULT:-debian:bookworm-slim}"
+else
+  DOCKERFILE_BASE_DEFAULT="$(awk -F= '/^ARG[[:space:]]+BASE_IMAGE=/{print $2; exit}' "${DOCKERFILE}" | tr -d '[:space:]')"
+  DOCKERFILE_BASE_DEFAULT="${DOCKERFILE_BASE_DEFAULT:-python:3.11-slim}"
+fi
 
 IMAGE_REPO="$(prompt "Image repo" "${DEFAULT_IMAGE_REPO}")"
 if [[ -z "${IMAGE_REPO}" ]]; then
@@ -286,22 +326,46 @@ cat <<EOF
 Summary
 -------
 Service        : ${SERVICE}
+Image kind     : ${IMAGE_KIND}
 Builder        : ${BUILDER}
 Image repo     : ${IMAGE_REPO}
 Tag            : ${NEW_TAG}
 Platforms      : ${PLATFORMS[*]}
 Base image     : ${BASE_IMAGE:-<dockerfile-default:${DOCKERFILE_BASE_DEFAULT}>}
 Dockerfile     : ${DOCKERFILE}
+Docker target  : ${DOCKER_BUILD_TARGET:-<default>}
 Build context  : ${REPO_ROOT}
 EOF
 
-if [[ "${SERVICE}" == stage-* ]]; then
+if [[ "${SERVICE}" == *stage* ]]; then
   echo "Stage runtime  : ${STAGE_RUNTIME}"
 fi
-if [[ "${SERVICE}" == "stage-python" ]]; then
-  echo "Model source   : PyTorch .pt partitions from Hugging Face (initContainer)"
-elif [[ "${SERVICE}" == "stage-cpp" ]]; then
-  echo "Model source   : future DLI GGUF stage shards; image is currently a skeleton"
+
+case "${SERVICE}" in
+  stage-python)
+    echo "Model source   : PyTorch .pt partitions from Hugging Face initContainer"
+    ;;
+  native-stage)
+    echo "Model source   : DLI GGUF partition-N.dli.gguf shards from Hugging Face/initContainer"
+    ;;
+  native-gateway)
+    echo "Model source   : full GGUF model for tokenizer, mounted/downloaded at runtime"
+    ;;
+  native-tools)
+    echo "Model source   : offline shard generation/validation image"
+    ;;
+esac
+
+if [[ "${IMAGE_KIND}" == "native" ]]; then
+  echo "Native base arg        : ${NATIVE_RUNTIME_BASE_ARG}"
+  echo "Native CMake type      : ${NATIVE_CMAKE_BUILD_TYPE}"
+  echo "Native GGML_NATIVE     : ${NATIVE_GGML_NATIVE}"
+  echo "Native ARM arch        : ${NATIVE_GGML_CPU_ARM_ARCH}"
+  echo "Native CPU variants    : ${NATIVE_GGML_CPU_ALL_VARIANTS}"
+
+  if [[ -n "${NATIVE_BUILD_IMAGE}" ]]; then
+    echo "Native build image override: ${NATIVE_BUILD_IMAGE}"
+  fi
 fi
 
 for arch in "${ARCH_SUFFIXES[@]}"; do
@@ -332,25 +396,54 @@ for i in "${!PLATFORMS[@]}"; do
 
   docker image rm -f "${local_tag}" 2>/dev/null || true
 
-  CMD=(docker buildx build
-    --builder "${BUILDER}"
-    --platform "${platform}"
+CMD=(docker buildx build
+  --builder "${BUILDER}"
+  --platform "${platform}"
+)
+
+if [[ -n "${DOCKER_BUILD_TARGET}" ]]; then
+  CMD+=(--target "${DOCKER_BUILD_TARGET}")
+fi
+
+if [[ "${IMAGE_KIND}" == "python" ]]; then
+  CMD+=(
     --build-arg "PIP_INDEX_URL=${PIP_INDEX_URL}"
     --build-arg "PIP_TRUSTED_HOST=${PIP_TRUSTED_HOST}"
-    -t "${local_tag}"
-    -f "${DOCKERFILE}"
-    .
-    --load
   )
+fi
+
+if [[ "${IMAGE_KIND}" == "native" ]]; then
+  CMD+=(
+    --build-arg "CMAKE_BUILD_TYPE=${NATIVE_CMAKE_BUILD_TYPE}"
+    --build-arg "GGML_NATIVE=${NATIVE_GGML_NATIVE}"
+    --build-arg "GGML_CPU_ARM_ARCH=${NATIVE_GGML_CPU_ARM_ARCH}"
+    --build-arg "GGML_CPU_ALL_VARIANTS=${NATIVE_GGML_CPU_ALL_VARIANTS}"
+  )
+
+  if [[ -n "${NATIVE_BUILD_IMAGE}" ]]; then
+    CMD+=(--build-arg "BUILD_IMAGE=${NATIVE_BUILD_IMAGE}")
+  fi
+fi
+
+CMD+=(
+  -t "${local_tag}"
+  -f "${DOCKERFILE}"
+  .
+  --load
+)
 
   if [[ "${ENABLE_INLINE_CACHE}" == "1" ]]; then
     CMD+=(--build-arg "BUILDKIT_INLINE_CACHE=1")
   fi
 
   base_for_arch="${BASE_BY_ARCH[${arch}]:-}"
-  if [[ -n "${base_for_arch}" ]]; then
+if [[ -n "${base_for_arch}" ]]; then
+  if [[ "${IMAGE_KIND}" == "native" ]]; then
+    CMD+=(--build-arg "${NATIVE_RUNTIME_BASE_ARG}=${base_for_arch}")
+  else
     CMD+=(--build-arg "BASE_IMAGE=${base_for_arch}")
   fi
+fi
 
   cache_for_arch="${CACHE_FROM_BY_ARCH[${arch}]:-}"
   if [[ -n "${cache_for_arch}" ]]; then

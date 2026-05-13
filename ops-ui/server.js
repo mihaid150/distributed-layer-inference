@@ -37,38 +37,101 @@ const runtimeStats = {
   byPath: {}
 };
 
-const LOG_TARGETS = {
-  gateway: {
-    deployment: "inference-gateway-deployment",
-    appLabel: "inference-gateway",
-    appContainer: "inference-gateway",
-    service: "inference-gateway"
+const RUNTIME_VARIANTS = {
+  python: {
+    id: "python",
+    label: "PyTorch",
+    description: "Python/FastAPI gateway and PyTorch stage pods",
+    supportsChat: true,
+    supportsFeatureFlags: true,
+    targets: {
+      gateway: {
+        deployment: "inference-gateway-deployment",
+        appLabel: "inference-gateway",
+        appContainer: "inference-gateway",
+        service: "inference-gateway"
+      },
+      "stage-1": {
+        deployment: "inference-stage-1-deployment",
+        appLabel: "inference-stage-1",
+        appContainer: "inference-stage-1",
+        initContainer: "fetch-stage-partition",
+        service: "inference-stage-1"
+      },
+      "stage-2": {
+        deployment: "inference-stage-2-deployment",
+        appLabel: "inference-stage-2",
+        appContainer: "inference-stage-2",
+        initContainer: "fetch-stage-partition",
+        service: "inference-stage-2"
+      },
+      "stage-3": {
+        deployment: "inference-stage-3-deployment",
+        appLabel: "inference-stage-3",
+        appContainer: "inference-stage-3",
+        initContainer: "fetch-stage-partition",
+        service: "inference-stage-3"
+      },
+      "stage-4": {
+        deployment: "inference-stage-4-deployment",
+        appLabel: "inference-stage-4",
+        appContainer: "inference-stage-4",
+        initContainer: "fetch-stage-partition",
+        service: "inference-stage-4"
+      }
+    }
   },
-  "stage-1": {
-    deployment: "inference-stage-1-deployment",
-    appLabel: "inference-stage-1",
-    appContainer: "inference-stage-1",
-    service: "inference-stage-1"
-  },
-  "stage-2": {
-    deployment: "inference-stage-2-deployment",
-    appLabel: "inference-stage-2",
-    appContainer: "inference-stage-2",
-    service: "inference-stage-2"
-  },
-  "stage-3": {
-    deployment: "inference-stage-3-deployment",
-    appLabel: "inference-stage-3",
-    appContainer: "inference-stage-3",
-    service: "inference-stage-3"
-  },
-  "stage-4": {
-    deployment: "inference-stage-4-deployment",
-    appLabel: "inference-stage-4",
-    appContainer: "inference-stage-4",
-    service: "inference-stage-4"
+  native: {
+    id: "native",
+    label: "Native C++",
+    description: "C++ gateway/stage pods using llama.cpp and DLI2 binary frames",
+    supportsChat: false,
+    supportsFeatureFlags: false,
+    targets: {
+      gateway: {
+        deployment: "inference-native-gateway-deployment",
+        appLabel: "inference-native-gateway",
+        appContainer: "inference-native-gateway",
+        initContainer: "fetch-native-full-gguf",
+        service: "inference-native-gateway"
+      },
+      "stage-1": {
+        deployment: "inference-native-stage-1-deployment",
+        appLabel: "inference-native-stage-1",
+        appContainer: "inference-native-stage-1",
+        initContainer: "fetch-native-stage-shard",
+        service: "inference-native-stage-1"
+      },
+      "stage-2": {
+        deployment: "inference-native-stage-2-deployment",
+        appLabel: "inference-native-stage-2",
+        appContainer: "inference-native-stage-2",
+        initContainer: "fetch-native-stage-shard",
+        service: "inference-native-stage-2"
+      },
+      "stage-3": {
+        deployment: "inference-native-stage-3-deployment",
+        appLabel: "inference-native-stage-3",
+        appContainer: "inference-native-stage-3",
+        initContainer: "fetch-native-stage-shard",
+        service: "inference-native-stage-3"
+      },
+      "stage-4": {
+        deployment: "inference-native-stage-4-deployment",
+        appLabel: "inference-native-stage-4",
+        appContainer: "inference-native-stage-4",
+        initContainer: "fetch-native-stage-shard",
+        service: "inference-native-stage-4"
+      }
+    }
   }
 };
+const DEFAULT_RUNTIME_VARIANT = Object.prototype.hasOwnProperty.call(
+  RUNTIME_VARIANTS,
+  String(process.env.OPS_UI_RUNTIME_VARIANT || "").trim().toLowerCase()
+)
+  ? String(process.env.OPS_UI_RUNTIME_VARIANT).trim().toLowerCase()
+  : "python";
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -85,6 +148,33 @@ function clampNumber(value, min, max, fallback) {
     return fallback;
   }
   return Math.max(min, Math.min(max, parsed));
+}
+
+function normalizeRuntimeVariant(rawValue) {
+  const value = String(rawValue || "").trim().toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(RUNTIME_VARIANTS, value)) {
+    return value;
+  }
+  return DEFAULT_RUNTIME_VARIANT;
+}
+
+function resolveRuntimeVariant(query, rawValue = "") {
+  const fromQuery = query?.get("variant") || query?.get("runtime") || "";
+  return normalizeRuntimeVariant(rawValue || fromQuery);
+}
+
+function getRuntimeVariantInfo(variant) {
+  return RUNTIME_VARIANTS[normalizeRuntimeVariant(variant)];
+}
+
+function serializeRuntimeVariants() {
+  return Object.values(RUNTIME_VARIANTS).map((variant) => ({
+    id: variant.id,
+    label: variant.label,
+    description: variant.description,
+    supportsChat: variant.supportsChat,
+    supportsFeatureFlags: variant.supportsFeatureFlags
+  }));
 }
 
 function buildLabelSelector(matchLabels) {
@@ -330,34 +420,45 @@ function normalizeService(svc) {
   };
 }
 
-function buildOrchestration(deployments, pods) {
+function buildOrchestration(deployments, pods, runtimeVariantInfo) {
+  const targets = runtimeVariantInfo?.targets || RUNTIME_VARIANTS.python.targets;
   const depByName = new Map(deployments.map((d) => [d.name, d]));
   const podByApp = new Map(pods.map((p) => [p.app, p]));
 
-  const gatewayDeployment = depByName.get("inference-gateway-deployment");
-  const gatewayPod = podByApp.get("inference-gateway");
+  const gatewayTarget = targets.gateway || RUNTIME_VARIANTS.python.targets.gateway;
+  const gatewayDeployment = depByName.get(gatewayTarget.deployment);
+  const gatewayPod = podByApp.get(gatewayTarget.appLabel);
 
-  const stages = [1, 2, 3, 4].map((id) => {
-    const app = `inference-stage-${id}`;
-    const deploymentName = `${app}-deployment`;
-    const deployment = depByName.get(deploymentName) || null;
-    const pod = podByApp.get(app) || null;
-    return {
-      id,
-      app,
-      deploymentName,
-      deploymentStatus: deployment?.status || "missing",
-      readyReplicas: deployment?.ready || 0,
-      desiredReplicas: deployment?.desired || 0,
-      podName: pod?.name || null,
-      podPhase: pod?.phase || "Unknown",
-      node: pod?.node || null
-    };
-  });
+  const stages = Object.entries(targets)
+    .filter(([target]) => /^stage-\d+$/.test(target))
+    .sort((a, b) => {
+      const aId = Number.parseInt(a[0].replace("stage-", ""), 10);
+      const bId = Number.parseInt(b[0].replace("stage-", ""), 10);
+      return aId - bId;
+    })
+    .map(([target, targetConfig]) => {
+      const id = Number.parseInt(target.replace("stage-", ""), 10);
+      const app = targetConfig.appLabel;
+      const deploymentName = targetConfig.deployment;
+      const deployment = depByName.get(deploymentName) || null;
+      const pod = podByApp.get(app) || null;
+      return {
+        id,
+        app,
+        deploymentName,
+        deploymentStatus: deployment?.status || "missing",
+        readyReplicas: deployment?.ready || 0,
+        desiredReplicas: deployment?.desired || 0,
+        podName: pod?.name || null,
+        podPhase: pod?.phase || "Unknown",
+        node: pod?.node || null
+      };
+    });
 
   return {
     gateway: {
-      deploymentName: "inference-gateway-deployment",
+      app: gatewayTarget.appLabel,
+      deploymentName: gatewayTarget.deployment,
       deploymentStatus: gatewayDeployment?.status || "missing",
       readyReplicas: gatewayDeployment?.ready || 0,
       desiredReplicas: gatewayDeployment?.desired || 0,
@@ -471,6 +572,7 @@ function runtimeSnapshot() {
     lastTimeoutCauses: runtimeStats.lastTimeoutCauses,
     inFlightRequests: [...IN_FLIGHT_INVOKES.values()].map((item) => ({
       namespace: item.namespace,
+      variant: item.variant || DEFAULT_RUNTIME_VARIANT,
       target: item.target,
       method: item.method,
       path: item.path,
@@ -894,6 +996,8 @@ async function getAvailableNamespacesSafe() {
 
 async function handleTopology(req, res, query) {
   const namespace = resolveNamespace(query);
+  const variant = resolveRuntimeVariant(query);
+  const runtimeVariant = getRuntimeVariantInfo(variant);
   if (!isValidNamespaceName(namespace)) {
     sendJson(res, 400, {
       error: `Invalid namespace '${namespace}'.`,
@@ -914,11 +1018,20 @@ async function handleTopology(req, res, query) {
     const deployments = (deploymentsJson.items || []).map(normalizeDeployment);
     const pods = (podsJson.items || []).map(normalizePod);
     const services = (servicesJson.items || []).map(normalizeService);
-    const orchestration = buildOrchestration(deployments, pods);
+    const orchestration = buildOrchestration(deployments, pods, runtimeVariant);
 
     sendJson(res, 200, {
       generatedAt: new Date().toISOString(),
       namespace,
+      variant,
+      runtimeVariant: {
+        id: runtimeVariant.id,
+        label: runtimeVariant.label,
+        description: runtimeVariant.description,
+        supportsChat: runtimeVariant.supportsChat,
+        supportsFeatureFlags: runtimeVariant.supportsFeatureFlags
+      },
+      runtimeVariants: serializeRuntimeVariants(),
       nodes,
       deployments,
       pods,
@@ -942,6 +1055,7 @@ async function handleTopology(req, res, query) {
           }
         : {}),
       namespace,
+      variant,
       details
     });
   }
@@ -949,6 +1063,8 @@ async function handleTopology(req, res, query) {
 
 async function handleLogs(req, res, query) {
   const namespace = resolveNamespace(query);
+  const variant = resolveRuntimeVariant(query);
+  const runtimeVariant = getRuntimeVariantInfo(variant);
   if (!isValidNamespaceName(namespace)) {
     sendJson(res, 400, {
       error: `Invalid namespace '${namespace}'.`,
@@ -962,17 +1078,19 @@ async function handleLogs(req, res, query) {
   const previous = query.get("previous") === "1";
   const tail = clampNumber(query.get("tail"), 20, 2000, 300);
 
-  const targetConfig = LOG_TARGETS[target];
+  const targetConfig = runtimeVariant.targets[target];
   if (!targetConfig) {
-    sendJson(res, 400, { error: `Unknown target '${target}'.` });
+    sendJson(res, 400, { error: `Unknown target '${target}' for runtime variant '${variant}'.` });
     return;
   }
 
-  const containerName = source === "init" ? "fetch-stage-partition" : targetConfig.appContainer;
+  const containerName = source === "init" ? targetConfig.initContainer : targetConfig.appContainer;
 
   if (source === "init") {
-    if (!target.startsWith("stage-")) {
-      sendJson(res, 400, { error: "Init logs are available only for stage targets." });
+    if (!targetConfig.initContainer) {
+      sendJson(res, 400, {
+        error: `Init logs are not configured for target '${target}' in runtime variant '${variant}'.`
+      });
       return;
     }
   } else if (source !== "app") {
@@ -1034,12 +1152,14 @@ async function handleLogs(req, res, query) {
     sendJson(res, 200, {
       generatedAt: new Date().toISOString(),
       namespace,
+      variant,
       podName,
       selector,
       deploymentMissing,
       matchedBy,
       target,
       source,
+      containerName,
       previous,
       tail,
       summary,
@@ -1059,6 +1179,7 @@ async function handleLogs(req, res, query) {
     const payload = {
       error: "Failed to fetch logs",
       namespace,
+      variant,
       details,
       stderr
     };
@@ -1320,6 +1441,11 @@ async function handleInvoke(req, res, query) {
   const namespace = resolveNamespace(new URLSearchParams({
     namespace: String(payload.namespace || query.get("namespace") || "")
   }));
+  const variant = resolveRuntimeVariant(
+    query,
+    String(payload.variant || payload.runtime || "")
+  );
+  const runtimeVariant = getRuntimeVariantInfo(variant);
 
   if (!isValidNamespaceName(namespace)) {
     sendJson(res, 400, {
@@ -1330,9 +1456,9 @@ async function handleInvoke(req, res, query) {
   }
 
   const target = String(payload.target || "gateway");
-  const targetConfig = LOG_TARGETS[target];
+  const targetConfig = runtimeVariant.targets[target];
   if (!targetConfig) {
-    sendJson(res, 400, { error: `Unknown target '${target}'.` });
+    sendJson(res, 400, { error: `Unknown target '${target}' for runtime variant '${variant}'.` });
     return;
   }
 
@@ -1379,7 +1505,7 @@ async function handleInvoke(req, res, query) {
 
   let lockKey = null;
   if (longInferenceCall) {
-    lockKey = buildInvokeLockKey(namespace, target, method, pathValue);
+    lockKey = buildInvokeLockKey(namespace, `${variant}:${target}`, method, pathValue);
     const existingInvoke = IN_FLIGHT_INVOKES.get(lockKey);
     if (existingInvoke) {
       const inFlightMs = Math.max(0, Date.now() - existingInvoke.startedAt);
@@ -1388,6 +1514,7 @@ async function handleInvoke(req, res, query) {
         error: "Request discarded because another request is already in progress",
         hint: "Wait for the active /generate or /chat request to finish, then retry.",
         namespace,
+        variant,
         target,
         method,
         path: pathValue,
@@ -1398,6 +1525,7 @@ async function handleInvoke(req, res, query) {
     IN_FLIGHT_INVOKES.set(lockKey, {
       startedAt: Date.now(),
       namespace,
+      variant,
       target,
       method,
       path: pathValue
@@ -1427,6 +1555,7 @@ async function handleInvoke(req, res, query) {
       sendJson(res, 500, {
         error: "Failed to resolve target pods",
         namespace,
+        variant,
         target,
         details,
         stderr
@@ -1451,6 +1580,7 @@ async function handleInvoke(req, res, query) {
     sendJson(res, 404, {
       error: "No pod found for target",
       namespace,
+      variant,
       target,
       selector,
       matchedBy,
@@ -1480,6 +1610,7 @@ async function handleInvoke(req, res, query) {
     sendJson(res, 500, {
       error: "No HTTP candidates available for target",
       namespace,
+      variant,
       target
     });
     return;
@@ -1534,6 +1665,7 @@ async function handleInvoke(req, res, query) {
         sendJson(res, 200, {
           generatedAt: new Date().toISOString(),
           namespace,
+          variant,
           target,
           method,
           path: pathValue,
@@ -1613,6 +1745,7 @@ async function handleInvoke(req, res, query) {
       error: "All endpoint call attempts failed",
       hint: timeoutHint,
       namespace,
+      variant,
       target,
       path: pathValue,
       method,
@@ -1628,6 +1761,7 @@ async function handleInvoke(req, res, query) {
     sendJson(res, 200, {
       generatedAt: new Date().toISOString(),
       namespace,
+      variant,
       target,
       method,
       path: pathValue,
@@ -1657,74 +1791,93 @@ async function handleInvoke(req, res, query) {
 
 function handleEndpointCatalog(req, res, query) {
   const namespace = resolveNamespace(query);
+  const variant = resolveRuntimeVariant(query);
+  const runtimeVariant = getRuntimeVariantInfo(variant);
+  const presets = [
+    {
+      id: "gateway-health",
+      label: "Gateway Health",
+      target: "gateway",
+      method: "GET",
+      path: "/health",
+      source: "gateway"
+    },
+    {
+      id: "gateway-config",
+      label: "Gateway Config",
+      target: "gateway",
+      method: "GET",
+      path: "/config",
+      source: "gateway"
+    },
+    {
+      id: "gateway-generate",
+      label: "Gateway Generate",
+      target: "gateway",
+      method: "POST",
+      path: "/generate",
+      timeoutMs: INVOKE_TIMEOUT_LONG_DEFAULT_MS,
+      source: "gateway",
+      body: {
+        prompt: "Write one short sentence about distributed inference.",
+        max_new_tokens: 24,
+        min_new_tokens: 8,
+        temperature: 0.2
+      }
+    }
+  ];
+
+  if (runtimeVariant.supportsChat) {
+    presets.push({
+      id: "gateway-chat",
+      label: "Gateway Chat",
+      target: "gateway",
+      method: "POST",
+      path: "/chat",
+      timeoutMs: INVOKE_TIMEOUT_LONG_DEFAULT_MS,
+      source: "gateway",
+      body: {
+        messages: [
+          { role: "user", content: "Write one short sentence about distributed inference." }
+        ],
+        max_new_tokens: 48,
+        min_new_tokens: 8,
+        temperature: 0.2
+      }
+    });
+  }
+
+  presets.push({
+    id: "stage-health",
+    label: "Stage Health",
+    target: "stage-1",
+    method: "GET",
+    path: "/health",
+    source: "stage"
+  });
+
   sendJson(res, 200, {
     namespace,
-    targets: Object.keys(LOG_TARGETS),
-    presets: [
-      {
-        id: "gateway-health",
-        label: "Gateway Health",
-        target: "gateway",
-        method: "GET",
-        path: "/health",
-        source: "gateway"
-      },
-      {
-        id: "gateway-config",
-        label: "Gateway Config",
-        target: "gateway",
-        method: "GET",
-        path: "/config",
-        source: "gateway"
-      },
-      {
-        id: "gateway-generate",
-        label: "Gateway Generate",
-        target: "gateway",
-        method: "POST",
-        path: "/generate",
-        timeoutMs: INVOKE_TIMEOUT_LONG_DEFAULT_MS,
-        source: "gateway",
-        body: {
-          prompt: "Write one short sentence about distributed inference.",
-          max_new_tokens: 24,
-          min_new_tokens: 8,
-          temperature: 0.2
-        }
-      },
-      {
-        id: "gateway-chat",
-        label: "Gateway Chat",
-        target: "gateway",
-        method: "POST",
-        path: "/chat",
-        timeoutMs: INVOKE_TIMEOUT_LONG_DEFAULT_MS,
-        source: "gateway",
-        body: {
-          messages: [
-            { role: "user", content: "Write one short sentence about distributed inference." }
-          ],
-          max_new_tokens: 48,
-          min_new_tokens: 8,
-          temperature: 0.2
-        }
-      },
-      {
-        id: "stage-health",
-        label: "Stage Health",
-        target: "stage-1",
-        method: "GET",
-        path: "/health",
-        source: "stage"
-      }
-    ]
+    variant,
+    runtimeVariant: {
+      id: runtimeVariant.id,
+      label: runtimeVariant.label,
+      description: runtimeVariant.description,
+      supportsChat: runtimeVariant.supportsChat,
+      supportsFeatureFlags: runtimeVariant.supportsFeatureFlags
+    },
+    runtimeVariants: serializeRuntimeVariants(),
+    targets: Object.keys(runtimeVariant.targets),
+    presets
   });
 }
 
 function handleRuntime(req, res, query) {
   const namespace = resolveNamespace(query);
+  const variant = resolveRuntimeVariant(query);
   sendJson(res, 200, {
     namespace,
+    variant,
     generatedAt: new Date().toISOString(),
     runtime: runtimeSnapshot()
   });
@@ -1865,6 +2018,8 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, {
         status: "ok",
         namespace: NAMESPACE,
+        defaultRuntimeVariant: DEFAULT_RUNTIME_VARIANT,
+        runtimeVariants: serializeRuntimeVariants(),
         kubectlTimeoutMs: KUBECTL_TIMEOUT_MS
       });
       return;
@@ -1912,7 +2067,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   // eslint-disable-next-line no-console
   console.log(
-    `[ops-ui] listening on http://0.0.0.0:${PORT} (namespace=${NAMESPACE}, kubectl-timeout=${KUBECTL_TIMEOUT_MS}ms)`
+    `[ops-ui] listening on http://0.0.0.0:${PORT} (namespace=${NAMESPACE}, runtime=${DEFAULT_RUNTIME_VARIANT}, kubectl-timeout=${KUBECTL_TIMEOUT_MS}ms)`
   );
 });
 

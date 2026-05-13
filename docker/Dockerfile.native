@@ -1,0 +1,110 @@
+# syntax=docker/dockerfile:1.7
+
+ARG BUILD_IMAGE=debian:bookworm-slim
+ARG RUNTIME_IMAGE=debian:bookworm-slim
+
+FROM ${BUILD_IMAGE} AS build
+
+ARG CMAKE_BUILD_TYPE=Release
+
+WORKDIR /src
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+      build-essential \
+      cmake \
+      git \
+      ca-certificates \
+      pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY src/native ./src/native
+COPY configs ./configs
+
+ARG TARGETARCH
+ARG CMAKE_BUILD_TYPE=Release
+
+# Important for Docker buildx/QEMU arm64 builds:
+# disable auto-detected host CPU flags and use a portable ARM target.
+ARG GGML_NATIVE=OFF
+ARG GGML_CPU_ARM_ARCH=armv8-a
+ARG GGML_CPU_ALL_VARIANTS=OFF
+
+RUN if [ "${TARGETARCH}" = "arm64" ]; then \
+      cmake -S src/native -B /tmp/dli-native-build \
+        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} \
+        -DGGML_NATIVE=${GGML_NATIVE} \
+        -DGGML_CPU_ARM_ARCH=${GGML_CPU_ARM_ARCH} \
+        -DGGML_CPU_ALL_VARIANTS=${GGML_CPU_ALL_VARIANTS}; \
+    else \
+      cmake -S src/native -B /tmp/dli-native-build \
+        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} \
+        -DGGML_NATIVE=${GGML_NATIVE} \
+        -DGGML_CPU_ALL_VARIANTS=${GGML_CPU_ALL_VARIANTS}; \
+    fi \
+    && cmake --build /tmp/dli-native-build -j"$(nproc)"
+
+# ------------------------------------------------------------
+# Shared minimal runtime base
+# ------------------------------------------------------------
+FROM ${RUNTIME_IMAGE} AS runtime-base
+
+WORKDIR /app
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+      libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /tmp/dli-native-build/bin/libggml*.so* /usr/local/lib/
+COPY --from=build /tmp/dli-native-build/bin/libllama*.so* /usr/local/lib/
+
+COPY configs ./configs
+
+ENV LD_LIBRARY_PATH=/usr/local/lib
+ENV STAGE_MAP_PATH=/app/configs/stage_map.yaml
+
+EXPOSE 8000
+
+# ------------------------------------------------------------
+# Gateway runtime image
+# Contains only gateway binary + shared native libraries.
+# Does not contain stage binary or shard writer tools.
+# ------------------------------------------------------------
+FROM runtime-base AS gateway-runtime
+
+COPY --from=build /tmp/dli-native-build/bin/dli-gateway-cpp /usr/local/bin/dli-gateway-cpp
+
+CMD ["/usr/local/bin/dli-gateway-cpp", "--config", "/app/configs/stage_map.yaml", "--port", "8000", "--first-stage-url", "http://inference-stage-1:8000/forward-binary"]
+
+# ------------------------------------------------------------
+# Stage runtime image
+# Contains only stage binary + shared native libraries.
+# Does not contain gateway binary or shard writer tools.
+# ------------------------------------------------------------
+FROM runtime-base AS stage-runtime
+
+COPY --from=build /tmp/dli-native-build/bin/dli-stage-cpp /usr/local/bin/dli-stage-cpp
+
+CMD ["/usr/local/bin/dli-stage-cpp","--config", "/app/configs/stage_map.yaml","--port", "8000","--backend", "llama"]
+
+# ------------------------------------------------------------
+# Tools runtime image, optional
+# Use for offline manifest/shard generation/validation.
+# Do not deploy this in the inference pipeline.
+# ------------------------------------------------------------
+FROM runtime-base AS tools-runtime
+
+COPY --from=build /tmp/dli-native-build/bin/dli-partition-manifest /usr/local/bin/dli-partition-manifest
+COPY --from=build /tmp/dli-native-build/bin/dli-gguf-shard-writer /usr/local/bin/dli-gguf-shard-writer
+COPY --from=build /tmp/dli-native-build/bin/dli-gguf-shard-validate /usr/local/bin/dli-gguf-shard-validate
+
+CMD ["/bin/sh"]

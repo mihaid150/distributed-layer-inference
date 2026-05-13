@@ -7,6 +7,7 @@ Small JavaScript UI for:
 - stage/gateway logs with lightweight interpretation hints
 - endpoint interaction (health/config/generate/custom calls) via UI
 - chat against distributed gateway (`/chat`) with per-turn metric evolution
+- runtime switch between the PyTorch track and the native C++/llama.cpp track
 
 ## Run
 
@@ -31,6 +32,7 @@ Environment variables:
 
 - `OPS_UI_PORT` (default `4070`)
 - `OPS_UI_NAMESPACE` (default `inference`)
+- `OPS_UI_RUNTIME_VARIANT` (default `python`; set `native` for C++/llama.cpp pods)
 - `OPS_UI_KUBECTL_TIMEOUT_MS` (default `15000`)
 
 ## Notes
@@ -38,6 +40,8 @@ Environment variables:
 - Logs are pulled via `kubectl logs` on demand.
 - For init container logs, use `source=init` in the UI.
 - Endpoint calls are executed server-side from `ops-ui/server.js` and proxied back to UI.
+- The runtime switch changes Kubernetes targets from `inference-*` to `inference-native-*`.
+- Native C++ gateway responses are normalized in the browser so aggregate and per-step native metrics render in the same dashboard as PyTorch responses.
 - Chat metrics timeline can be exported as JSON for evaluation datasets.
 - If running on master, use `KUBECONFIG=/etc/rancher/k3s/k3s.yaml npm start`.
 - This folder is excluded from Docker build context for stage/gateway images.

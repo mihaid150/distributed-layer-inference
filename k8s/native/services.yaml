@@ -1,0 +1,70 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-native-stage-1
+  namespace: inference
+spec:
+  selector:
+    app: inference-native-stage-1
+  ports:
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-native-stage-2
+  namespace: inference
+spec:
+  selector:
+    app: inference-native-stage-2
+  ports:
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-native-stage-3
+  namespace: inference
+spec:
+  selector:
+    app: inference-native-stage-3
+  ports:
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-native-stage-4
+  namespace: inference
+spec:
+  selector:
+    app: inference-native-stage-4
+  ports:
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-native-gateway
+  namespace: inference
+spec:
+  type: NodePort
+  selector:
+    app: inference-native-gateway
+  ports:
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000
+      nodePort: 30081

@@ -1,0 +1,785 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference-native-stage-1-deployment
+  namespace: inference
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inference-native-stage-1
+  template:
+    metadata:
+      labels:
+        app: inference-native-stage-1
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: pinode7
+      initContainers:
+        - name: fetch-native-stage-shard
+          image: python:3.11-slim
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              FILE="partition-${STAGE_ID}.dli.gguf"
+              OUTPUT="/models/${FILE}"
+              if [ -f "${OUTPUT}" ]; then
+                echo "Using cached ${OUTPUT}"
+                ls -lh "${OUTPUT}"
+                exit 0
+              fi
+              URL="https://huggingface.co/${HF_NATIVE_STAGE_REPO}/resolve/${HF_NATIVE_STAGE_REVISION}/${FILE}"
+              echo "Downloading ${URL}"
+              export FILE URL HF_TOKEN
+              python - <<'PY'
+              import os
+              import pathlib
+              import time
+              import urllib.request
+
+              file_name = os.environ["FILE"]
+              url = os.environ["URL"]
+              token = os.environ.get("HF_TOKEN", "")
+              timeout_seconds = float(os.environ.get("HF_DOWNLOAD_TIMEOUT_SECONDS", "900"))
+              output_path = pathlib.Path("/models") / file_name
+              tmp_path = pathlib.Path(str(output_path) + ".tmp")
+
+              headers = {}
+              if token:
+                  headers["Authorization"] = f"Bearer {token}"
+
+              last_error = None
+              for attempt in range(1, 7):
+                  try:
+                      request = urllib.request.Request(url, headers=headers)
+                      with urllib.request.urlopen(request, timeout=timeout_seconds) as response, tmp_path.open("wb") as handle:
+                          while True:
+                              chunk = response.read(1024 * 1024)
+                              if not chunk:
+                                  break
+                              handle.write(chunk)
+                      tmp_path.replace(output_path)
+                      print(f"Downloaded {output_path}")
+                      break
+                  except Exception as exc:
+                      last_error = exc
+                      print(f"Attempt {attempt}/6 failed: {exc}", flush=True)
+                      if tmp_path.exists():
+                          tmp_path.unlink()
+                      if attempt < 6:
+                          time.sleep(3)
+              else:
+                  raise SystemExit(f"Download failed after 6 attempts: {last_error}")
+              PY
+              ls -lh "${OUTPUT}"
+          env:
+            - name: STAGE_ID
+              value: "1"
+            - name: HF_NATIVE_STAGE_REPO
+              valueFrom:
+                configMapKeyRef:
+                  name: dli-native-config
+                  key: HF_NATIVE_STAGE_REPO
+            - name: HF_NATIVE_STAGE_REVISION
+              valueFrom:
+                configMapKeyRef:
+                  name: dli-native-config
+                  key: HF_NATIVE_STAGE_REVISION
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-hub
+                  key: HF_TOKEN
+                  optional: true
+            - name: HF_DOWNLOAD_TIMEOUT_SECONDS
+              value: "900"
+          volumeMounts:
+            - name: stage-model
+              mountPath: /models
+      containers:
+        - name: inference-native-stage-1
+          image: mipeda150/distributed-layer-inference-native-stage:v2026-13-05-0800
+          imagePullPolicy: Always
+          command: ["/usr/local/bin/dli-stage-cpp"]
+          args:
+            - "--config"
+            - "/app/configs/stage_map.yaml"
+            - "--stage-id"
+            - "1"
+            - "--port"
+            - "8000"
+            - "--backend"
+            - "llama"
+            - "--model"
+            - "/app/models/partition-1.dli.gguf"
+          ports:
+            - containerPort: 8000
+          volumeMounts:
+            - name: stage-model
+              mountPath: /app/models
+            - name: native-config
+              mountPath: /app/configs
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "1000m"
+            limits:
+              memory: "2000Mi"
+              cpu: "4000m"
+      volumes:
+        - name: stage-model
+          persistentVolumeClaim:
+            claimName: dli-native-stage-1-model-pvc
+        - name: native-config
+          configMap:
+            name: dli-native-config
+            items:
+              - key: stage_map.yaml
+                path: stage_map.yaml
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference-native-stage-2-deployment
+  namespace: inference
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inference-native-stage-2
+  template:
+    metadata:
+      labels:
+        app: inference-native-stage-2
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: pinode8
+      initContainers:
+        - name: fetch-native-stage-shard
+          image: python:3.11-slim
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              FILE="partition-${STAGE_ID}.dli.gguf"
+              OUTPUT="/models/${FILE}"
+              if [ -f "${OUTPUT}" ]; then
+                echo "Using cached ${OUTPUT}"
+                ls -lh "${OUTPUT}"
+                exit 0
+              fi
+              URL="https://huggingface.co/${HF_NATIVE_STAGE_REPO}/resolve/${HF_NATIVE_STAGE_REVISION}/${FILE}"
+              echo "Downloading ${URL}"
+              export FILE URL HF_TOKEN
+              python - <<'PY'
+              import os
+              import pathlib
+              import time
+              import urllib.request
+
+              file_name = os.environ["FILE"]
+              url = os.environ["URL"]
+              token = os.environ.get("HF_TOKEN", "")
+              timeout_seconds = float(os.environ.get("HF_DOWNLOAD_TIMEOUT_SECONDS", "900"))
+              output_path = pathlib.Path("/models") / file_name
+              tmp_path = pathlib.Path(str(output_path) + ".tmp")
+
+              headers = {}
+              if token:
+                  headers["Authorization"] = f"Bearer {token}"
+
+              last_error = None
+              for attempt in range(1, 7):
+                  try:
+                      request = urllib.request.Request(url, headers=headers)
+                      with urllib.request.urlopen(request, timeout=timeout_seconds) as response, tmp_path.open("wb") as handle:
+                          while True:
+                              chunk = response.read(1024 * 1024)
+                              if not chunk:
+                                  break
+                              handle.write(chunk)
+                      tmp_path.replace(output_path)
+                      print(f"Downloaded {output_path}")
+                      break
+                  except Exception as exc:
+                      last_error = exc
+                      print(f"Attempt {attempt}/6 failed: {exc}", flush=True)
+                      if tmp_path.exists():
+                          tmp_path.unlink()
+                      if attempt < 6:
+                          time.sleep(3)
+              else:
+                  raise SystemExit(f"Download failed after 6 attempts: {last_error}")
+              PY
+              ls -lh "${OUTPUT}"
+          env:
+            - name: STAGE_ID
+              value: "2"
+            - name: HF_NATIVE_STAGE_REPO
+              valueFrom:
+                configMapKeyRef:
+                  name: dli-native-config
+                  key: HF_NATIVE_STAGE_REPO
+            - name: HF_NATIVE_STAGE_REVISION
+              valueFrom:
+                configMapKeyRef:
+                  name: dli-native-config
+                  key: HF_NATIVE_STAGE_REVISION
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-hub
+                  key: HF_TOKEN
+                  optional: true
+            - name: HF_DOWNLOAD_TIMEOUT_SECONDS
+              value: "900"
+          volumeMounts:
+            - name: stage-model
+              mountPath: /models
+      containers:
+        - name: inference-native-stage-2
+          image: mipeda150/distributed-layer-inference-native-stage:v2026-13-05-0800
+          imagePullPolicy: Always
+          command: ["/usr/local/bin/dli-stage-cpp"]
+          args:
+            - "--config"
+            - "/app/configs/stage_map.yaml"
+            - "--stage-id"
+            - "2"
+            - "--port"
+            - "8000"
+            - "--backend"
+            - "llama"
+            - "--model"
+            - "/app/models/partition-2.dli.gguf"
+          ports:
+            - containerPort: 8000
+          volumeMounts:
+            - name: stage-model
+              mountPath: /app/models
+            - name: native-config
+              mountPath: /app/configs
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "1000m"
+            limits:
+              memory: "2000Mi"
+              cpu: "4000m"
+      volumes:
+        - name: stage-model
+          persistentVolumeClaim:
+            claimName: dli-native-stage-2-model-pvc
+        - name: native-config
+          configMap:
+            name: dli-native-config
+            items:
+              - key: stage_map.yaml
+                path: stage_map.yaml
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference-native-stage-3-deployment
+  namespace: inference
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inference-native-stage-3
+  template:
+    metadata:
+      labels:
+        app: inference-native-stage-3
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: pinode9
+      initContainers:
+        - name: fetch-native-stage-shard
+          image: python:3.11-slim
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              FILE="partition-${STAGE_ID}.dli.gguf"
+              OUTPUT="/models/${FILE}"
+              if [ -f "${OUTPUT}" ]; then
+                echo "Using cached ${OUTPUT}"
+                ls -lh "${OUTPUT}"
+                exit 0
+              fi
+              URL="https://huggingface.co/${HF_NATIVE_STAGE_REPO}/resolve/${HF_NATIVE_STAGE_REVISION}/${FILE}"
+              echo "Downloading ${URL}"
+              export FILE URL HF_TOKEN
+              python - <<'PY'
+              import os
+              import pathlib
+              import time
+              import urllib.request
+
+              file_name = os.environ["FILE"]
+              url = os.environ["URL"]
+              token = os.environ.get("HF_TOKEN", "")
+              timeout_seconds = float(os.environ.get("HF_DOWNLOAD_TIMEOUT_SECONDS", "900"))
+              output_path = pathlib.Path("/models") / file_name
+              tmp_path = pathlib.Path(str(output_path) + ".tmp")
+
+              headers = {}
+              if token:
+                  headers["Authorization"] = f"Bearer {token}"
+
+              last_error = None
+              for attempt in range(1, 7):
+                  try:
+                      request = urllib.request.Request(url, headers=headers)
+                      with urllib.request.urlopen(request, timeout=timeout_seconds) as response, tmp_path.open("wb") as handle:
+                          while True:
+                              chunk = response.read(1024 * 1024)
+                              if not chunk:
+                                  break
+                              handle.write(chunk)
+                      tmp_path.replace(output_path)
+                      print(f"Downloaded {output_path}")
+                      break
+                  except Exception as exc:
+                      last_error = exc
+                      print(f"Attempt {attempt}/6 failed: {exc}", flush=True)
+                      if tmp_path.exists():
+                          tmp_path.unlink()
+                      if attempt < 6:
+                          time.sleep(3)
+              else:
+                  raise SystemExit(f"Download failed after 6 attempts: {last_error}")
+              PY
+              ls -lh "${OUTPUT}"
+          env:
+            - name: STAGE_ID
+              value: "3"
+            - name: HF_NATIVE_STAGE_REPO
+              valueFrom:
+                configMapKeyRef:
+                  name: dli-native-config
+                  key: HF_NATIVE_STAGE_REPO
+            - name: HF_NATIVE_STAGE_REVISION
+              valueFrom:
+                configMapKeyRef:
+                  name: dli-native-config
+                  key: HF_NATIVE_STAGE_REVISION
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-hub
+                  key: HF_TOKEN
+                  optional: true
+            - name: HF_DOWNLOAD_TIMEOUT_SECONDS
+              value: "900"
+          volumeMounts:
+            - name: stage-model
+              mountPath: /models
+      containers:
+        - name: inference-native-stage-3
+          image: mipeda150/distributed-layer-inference-native-stage:v2026-13-05-0800
+          imagePullPolicy: Always
+          command: ["/usr/local/bin/dli-stage-cpp"]
+          args:
+            - "--config"
+            - "/app/configs/stage_map.yaml"
+            - "--stage-id"
+            - "3"
+            - "--port"
+            - "8000"
+            - "--backend"
+            - "llama"
+            - "--model"
+            - "/app/models/partition-3.dli.gguf"
+          ports:
+            - containerPort: 8000
+          volumeMounts:
+            - name: stage-model
+              mountPath: /app/models
+            - name: native-config
+              mountPath: /app/configs
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "1000m"
+            limits:
+              memory: "2000Mi"
+              cpu: "4000m"
+      volumes:
+        - name: stage-model
+          persistentVolumeClaim:
+            claimName: dli-native-stage-3-model-pvc
+        - name: native-config
+          configMap:
+            name: dli-native-config
+            items:
+              - key: stage_map.yaml
+                path: stage_map.yaml
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference-native-stage-4-deployment
+  namespace: inference
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inference-native-stage-4
+  template:
+    metadata:
+      labels:
+        app: inference-native-stage-4
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: pinode10
+      initContainers:
+        - name: fetch-native-stage-shard
+          image: python:3.11-slim
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              FILE="partition-${STAGE_ID}.dli.gguf"
+              OUTPUT="/models/${FILE}"
+              if [ -f "${OUTPUT}" ]; then
+                echo "Using cached ${OUTPUT}"
+                ls -lh "${OUTPUT}"
+                exit 0
+              fi
+              URL="https://huggingface.co/${HF_NATIVE_STAGE_REPO}/resolve/${HF_NATIVE_STAGE_REVISION}/${FILE}"
+              echo "Downloading ${URL}"
+              export FILE URL HF_TOKEN
+              python - <<'PY'
+              import os
+              import pathlib
+              import time
+              import urllib.request
+
+              file_name = os.environ["FILE"]
+              url = os.environ["URL"]
+              token = os.environ.get("HF_TOKEN", "")
+              timeout_seconds = float(os.environ.get("HF_DOWNLOAD_TIMEOUT_SECONDS", "900"))
+              output_path = pathlib.Path("/models") / file_name
+              tmp_path = pathlib.Path(str(output_path) + ".tmp")
+
+              headers = {}
+              if token:
+                  headers["Authorization"] = f"Bearer {token}"
+
+              last_error = None
+              for attempt in range(1, 7):
+                  try:
+                      request = urllib.request.Request(url, headers=headers)
+                      with urllib.request.urlopen(request, timeout=timeout_seconds) as response, tmp_path.open("wb") as handle:
+                          while True:
+                              chunk = response.read(1024 * 1024)
+                              if not chunk:
+                                  break
+                              handle.write(chunk)
+                      tmp_path.replace(output_path)
+                      print(f"Downloaded {output_path}")
+                      break
+                  except Exception as exc:
+                      last_error = exc
+                      print(f"Attempt {attempt}/6 failed: {exc}", flush=True)
+                      if tmp_path.exists():
+                          tmp_path.unlink()
+                      if attempt < 6:
+                          time.sleep(3)
+              else:
+                  raise SystemExit(f"Download failed after 6 attempts: {last_error}")
+              PY
+              ls -lh "${OUTPUT}"
+          env:
+            - name: STAGE_ID
+              value: "4"
+            - name: HF_NATIVE_STAGE_REPO
+              valueFrom:
+                configMapKeyRef:
+                  name: dli-native-config
+                  key: HF_NATIVE_STAGE_REPO
+            - name: HF_NATIVE_STAGE_REVISION
+              valueFrom:
+                configMapKeyRef:
+                  name: dli-native-config
+                  key: HF_NATIVE_STAGE_REVISION
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-hub
+                  key: HF_TOKEN
+                  optional: true
+            - name: HF_DOWNLOAD_TIMEOUT_SECONDS
+              value: "900"
+          volumeMounts:
+            - name: stage-model
+              mountPath: /models
+      containers:
+        - name: inference-native-stage-4
+          image: mipeda150/distributed-layer-inference-native-stage:v2026-13-05-0800
+          imagePullPolicy: Always
+          command: ["/usr/local/bin/dli-stage-cpp"]
+          args:
+            - "--config"
+            - "/app/configs/stage_map.yaml"
+            - "--stage-id"
+            - "4"
+            - "--port"
+            - "8000"
+            - "--backend"
+            - "llama"
+            - "--model"
+            - "/app/models/partition-4.dli.gguf"
+          ports:
+            - containerPort: 8000
+          volumeMounts:
+            - name: stage-model
+              mountPath: /app/models
+            - name: native-config
+              mountPath: /app/configs
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "1000m"
+            limits:
+              memory: "2000Mi"
+              cpu: "4000m"
+      volumes:
+        - name: stage-model
+          persistentVolumeClaim:
+            claimName: dli-native-stage-4-model-pvc
+        - name: native-config
+          configMap:
+            name: dli-native-config
+            items:
+              - key: stage_map.yaml
+                path: stage_map.yaml
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference-native-gateway-deployment
+  namespace: inference
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inference-native-gateway
+  template:
+    metadata:
+      labels:
+        app: inference-native-gateway
+    spec:
+      nodeSelector:
+        role: master
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+        - operator: Exists
+          effect: NoExecute
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      initContainers:
+        - name: fetch-native-full-gguf
+          image: python:3.11-slim
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              FILE="${HF_NATIVE_FULL_GGUF_FILE}"
+              OUTPUT="/models/${FILE}"
+              if [ -f "${OUTPUT}" ]; then
+                echo "Using cached ${OUTPUT}"
+                ls -lh "${OUTPUT}"
+                exit 0
+              fi
+              URL="https://huggingface.co/${HF_NATIVE_FULL_GGUF_REPO}/resolve/${HF_NATIVE_FULL_GGUF_REVISION}/${FILE}"
+              echo "Downloading ${URL}"
+              export FILE URL HF_TOKEN
+              python - <<'PY'
+              import os
+              import pathlib
+              import time
+              import urllib.request
+
+              file_name = os.environ["FILE"]
+              url = os.environ["URL"]
+              token = os.environ.get("HF_TOKEN", "")
+              timeout_seconds = float(os.environ.get("HF_DOWNLOAD_TIMEOUT_SECONDS", "900"))
+              output_path = pathlib.Path("/models") / file_name
+              tmp_path = pathlib.Path(str(output_path) + ".tmp")
+
+              headers = {}
+              if token:
+                  headers["Authorization"] = f"Bearer {token}"
+
+              last_error = None
+              for attempt in range(1, 7):
+                  try:
+                      request = urllib.request.Request(url, headers=headers)
+                      with urllib.request.urlopen(request, timeout=timeout_seconds) as response, tmp_path.open("wb") as handle:
+                          while True:
+                              chunk = response.read(1024 * 1024)
+                              if not chunk:
+                                  break
+                              handle.write(chunk)
+                      tmp_path.replace(output_path)
+                      print(f"Downloaded {output_path}")
+                      break
+                  except Exception as exc:
+                      last_error = exc
+                      print(f"Attempt {attempt}/6 failed: {exc}", flush=True)
+                      if tmp_path.exists():
+                          tmp_path.unlink()
+                      if attempt < 6:
+                          time.sleep(3)
+              else:
+                  raise SystemExit(f"Download failed after 6 attempts: {last_error}")
+              PY
+              ls -lh "${OUTPUT}"
+          env:
+            - name: HF_NATIVE_FULL_GGUF_REPO
+              valueFrom:
+                configMapKeyRef:
+                  name: dli-native-config
+                  key: HF_NATIVE_FULL_GGUF_REPO
+            - name: HF_NATIVE_FULL_GGUF_REVISION
+              valueFrom:
+                configMapKeyRef:
+                  name: dli-native-config
+                  key: HF_NATIVE_FULL_GGUF_REVISION
+            - name: HF_NATIVE_FULL_GGUF_FILE
+              valueFrom:
+                configMapKeyRef:
+                  name: dli-native-config
+                  key: HF_NATIVE_FULL_GGUF_FILE
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-hub
+                  key: HF_TOKEN
+                  optional: true
+            - name: HF_DOWNLOAD_TIMEOUT_SECONDS
+              value: "900"
+          volumeMounts:
+            - name: gateway-model
+              mountPath: /models
+      containers:
+        - name: inference-native-gateway
+          image: mipeda150/distributed-layer-inference-native-gateway:v2026-13-05-0800
+          imagePullPolicy: Always
+          command: ["/usr/local/bin/dli-gateway-cpp"]
+          args:
+            - "--config"
+            - "/app/configs/stage_map.yaml"
+            - "--port"
+            - "8000"
+            - "--first-stage-url"
+            - "http://inference-native-stage-1:8000/forward-binary"
+            - "--model"
+            - "/app/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
+          ports:
+            - containerPort: 8000
+          volumeMounts:
+            - name: gateway-model
+              mountPath: /app/models
+            - name: native-config
+              mountPath: /app/configs
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "768Mi"
+              cpu: "500m"
+            limits:
+              memory: "2000Mi"
+              cpu: "2000m"
+      volumes:
+        - name: gateway-model
+          persistentVolumeClaim:
+            claimName: dli-native-gateway-model-pvc
+        - name: native-config
+          configMap:
+            name: dli-native-config
+            items:
+              - key: stage_map.yaml
+                path: stage_map.yaml

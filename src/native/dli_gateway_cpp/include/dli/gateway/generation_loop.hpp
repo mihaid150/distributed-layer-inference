@@ -29,6 +29,7 @@ struct GenerationStepTrace {
 
     int stage_http_status = 0;
     std::string stage_http_reason;
+    double stage_http_elapsed_ms = 0.0;
     std::string stage_metadata_json;
     std::size_t stage_tensor_bytes = 0;
     std::string error_body;

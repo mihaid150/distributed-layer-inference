@@ -7,6 +7,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <chrono>
 
 namespace dli::gateway {
 
@@ -64,12 +65,15 @@ StageClientResult StageClient::forward_frame(
     const std::vector<std::uint8_t> request_body =
         dli::common::encode_frame(frame);
 
+    const auto start = std::chrono::steady_clock::now();
     const dli::common::HttpClientResponse http_response =
         dli::common::http_post_binary(stage_url, request_body);
+    const auto end = std::chrono::steady_clock::now();
 
     StageClientResult result;
     result.http_status = http_response.status_code;
     result.http_reason = http_response.reason;
+    result.elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
 
     if (http_response.status_code >= 200 && http_response.status_code < 300) {
         result.response_frame = dli::common::decode_frame(http_response.body);
