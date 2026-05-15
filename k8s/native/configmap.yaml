@@ -6,10 +6,10 @@ metadata:
 data:
   STAGE_MAP_PATH: "/app/configs/stage_map.yaml"
 
-  HF_NATIVE_STAGE_REPO: "mipeda150/dli-tinyllama-native-gguf-4stage"
+  HF_NATIVE_STAGE_REPO: "mipedadsrl150/dli-tinyllama-native-gguf-4stage"
   HF_NATIVE_STAGE_REVISION: "main"
 
-  HF_NATIVE_FULL_GGUF_REPO: "mipeda150/dli-tinyllama-native-gguf-4stage"
+  HF_NATIVE_FULL_GGUF_REPO: "mipedadsrl150/dli-tinyllama-native-gguf-4stage"
   HF_NATIVE_FULL_GGUF_REVISION: "main"
   HF_NATIVE_FULL_GGUF_FILE: "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
 

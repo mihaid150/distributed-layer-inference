@@ -734,7 +734,7 @@ spec:
               mountPath: /models
       containers:
         - name: inference-native-gateway
-          image: mipeda150/distributed-layer-inference-native-gateway:v2026-13-05-0800
+          image: mipeda150/distributed-layer-inference-native-gateway:v2026-13-05-1200
           imagePullPolicy: Always
           command: ["/usr/local/bin/dli-gateway-cpp"]
           args:

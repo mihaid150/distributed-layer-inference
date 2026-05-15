@@ -1,110 +1,154 @@
+cat > ~/dli/deploy_k3s.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+K8S_DIR="${ROOT_DIR}/k8s"
 
-if [[ -d "${SCRIPT_DIR}/k8s" ]]; then
-  K8S_DIR="${SCRIPT_DIR}/k8s"
-elif [[ -d "${REPO_ROOT}/k8s" ]]; then
-  K8S_DIR="${REPO_ROOT}/k8s"
-else
-  echo "[deploy_k3s] Could not find k8s directory." >&2
-  echo "[deploy_k3s] Checked: ${SCRIPT_DIR}/k8s and ${REPO_ROOT}/k8s" >&2
+KUBECONFIG_PATH="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
+export KUBECONFIG="${KUBECONFIG_PATH}"
+
+usage() {
+  cat <<USAGE
+Usage:
+  ./deploy_k3s.sh <profile> [action]
+
+Profiles:
+  python    Deploy YAMLs from k8s/python
+  native    Deploy YAMLs from k8s/native
+
+Actions:
+  apply     Apply manifests. Default.
+  delete    Delete manifests.
+  diff      Show kubectl diff.
+
+Examples:
+  ./deploy_k3s.sh native
+  ./deploy_k3s.sh native apply
+  ./deploy_k3s.sh python apply
+  ./deploy_k3s.sh native delete
+  ./deploy_k3s.sh native diff
+USAGE
+}
+
+PROFILE="${1:-}"
+ACTION="${2:-apply}"
+
+if [[ -z "${PROFILE}" || "${PROFILE}" == "-h" || "${PROFILE}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+case "${PROFILE}" in
+  python|pytorch)
+    PROFILE="python"
+    ;;
+  native|cpp|llama|gguf)
+    PROFILE="native"
+    ;;
+  *)
+    echo "Unknown profile: ${PROFILE}" >&2
+    usage
+    exit 1
+    ;;
+esac
+
+case "${ACTION}" in
+  apply|delete|diff)
+    ;;
+  *)
+    echo "Unknown action: ${ACTION}" >&2
+    usage
+    exit 1
+    ;;
+esac
+
+PROFILE_DIR="${K8S_DIR}/${PROFILE}"
+
+if [[ ! -d "${PROFILE_DIR}" ]]; then
+  echo "Profile directory not found: ${PROFILE_DIR}" >&2
+  echo "Available profiles:" >&2
+  find "${K8S_DIR}" -maxdepth 1 -mindepth 1 -type d -printf "  %f\n" | sort >&2
   exit 1
 fi
 
-APPLY_RETRIES="${APPLY_RETRIES:-10}"
-APPLY_RETRY_SLEEP_SECONDS="${APPLY_RETRY_SLEEP_SECONDS:-3}"
-API_WAIT_RETRIES="${API_WAIT_RETRIES:-45}"
-API_WAIT_SLEEP_SECONDS="${API_WAIT_SLEEP_SECONDS:-2}"
-KUBECTL_REQUEST_TIMEOUT="${KUBECTL_REQUEST_TIMEOUT:-20s}"
+echo "DLI K3s deploy"
+echo "--------------"
+echo "Root       : ${ROOT_DIR}"
+echo "Kubeconfig : ${KUBECONFIG}"
+echo "Profile    : ${PROFILE}"
+echo "Directory  : ${PROFILE_DIR}"
+echo "Action     : ${ACTION}"
+echo
 
-# `--validate=false` avoids OpenAPI download failures when API server is under load.
-KUBECTL_VALIDATE_FLAG="${KUBECTL_VALIDATE_FLAG:---validate=false}"
+kubectl version --client=true >/dev/null
 
-kubectl_safe() {
-  kubectl --request-timeout="${KUBECTL_REQUEST_TIMEOUT}" "$@"
-}
+ordered_files=()
 
-required_manifests=(
-  "namespace.yaml"
-  "configmap.yaml"
-  "inference-stage-1-service.yaml"
-  "inference-stage-2-service.yaml"
-  "inference-stage-3-service.yaml"
-  "inference-stage-4-service.yaml"
-  "inference-gateway-service.yaml"
-  "inference-stage-1-deployment.yaml"
-  "inference-stage-2-deployment.yaml"
-  "inference-stage-3-deployment.yaml"
-  "inference-stage-4-deployment.yaml"
-  "inference-gateway-deployment.yaml"
-)
-
-validate_manifest_set() {
-  local missing=0
-  local manifest
-
-  for manifest in "${required_manifests[@]}"; do
-    if [[ ! -f "${K8S_DIR}/${manifest}" ]]; then
-      echo "[deploy_k3s] Missing required file: ${K8S_DIR}/${manifest}" >&2
-      missing=1
-    fi
-  done
-
-  if [[ "${missing}" -ne 0 ]]; then
-    echo "[deploy_k3s] Deployment aborted due to missing manifests." >&2
-    return 1
+for name in \
+  namespace.yaml \
+  persistent-volumes.yaml \
+  configmap.yaml \
+  services.yaml \
+  deployments.yaml
+do
+  if [[ -f "${PROFILE_DIR}/${name}" ]]; then
+    ordered_files+=("${PROFILE_DIR}/${name}")
   fi
-}
+done
 
-wait_for_api_server() {
-  local i
-  for ((i = 1; i <= API_WAIT_RETRIES; i++)); do
-    if kubectl_safe version >/dev/null 2>&1; then
-      return 0
+# Also include any additional YAML files not already included.
+while IFS= read -r file; do
+  skip=0
+  for existing in "${ordered_files[@]}"; do
+    if [[ "${file}" == "${existing}" ]]; then
+      skip=1
+      break
     fi
-    echo "[deploy_k3s] waiting for Kubernetes API (${i}/${API_WAIT_RETRIES})..."
-    sleep "${API_WAIT_SLEEP_SECONDS}"
+  done
+  if [[ "${skip}" -eq 0 ]]; then
+    ordered_files+=("${file}")
+  fi
+done < <(find "${PROFILE_DIR}" -maxdepth 1 -type f \( -name "*.yaml" -o -name "*.yml" \) | sort)
+
+if [[ "${#ordered_files[@]}" -eq 0 ]]; then
+  echo "No YAML files found in ${PROFILE_DIR}" >&2
+  exit 1
+fi
+
+echo "Manifest order:"
+for file in "${ordered_files[@]}"; do
+  echo "  - ${file#${ROOT_DIR}/}"
+done
+echo
+
+if [[ "${ACTION}" == "apply" ]]; then
+  for file in "${ordered_files[@]}"; do
+    echo "Applying ${file#${ROOT_DIR}/}"
+    kubectl apply -f "${file}"
   done
 
-  echo "[deploy_k3s] Kubernetes API did not become ready in time." >&2
-  return 1
-}
+  echo
+  echo "Current inference resources:"
+  kubectl -n inference get pods -o wide || true
+  kubectl -n inference get svc || true
+  kubectl -n inference get deploy || true
+fi
 
-apply_with_retry() {
-  local manifest_file="$1"
-  local i
-
-  for ((i = 1; i <= APPLY_RETRIES; i++)); do
-    if kubectl_safe apply "${KUBECTL_VALIDATE_FLAG}" -f "${manifest_file}"; then
-      return 0
-    fi
-    echo "[deploy_k3s] apply failed for ${manifest_file} (${i}/${APPLY_RETRIES}), retrying..."
-    sleep "${APPLY_RETRY_SLEEP_SECONDS}"
+if [[ "${ACTION}" == "delete" ]]; then
+  for (( idx=${#ordered_files[@]}-1 ; idx>=0 ; idx-- )); do
+    file="${ordered_files[$idx]}"
+    echo "Deleting ${file#${ROOT_DIR}/}"
+    kubectl delete -f "${file}" --ignore-not-found=true
   done
+fi
 
-  echo "[deploy_k3s] failed to apply ${manifest_file} after ${APPLY_RETRIES} attempts." >&2
-  return 1
-}
+if [[ "${ACTION}" == "diff" ]]; then
+  for file in "${ordered_files[@]}"; do
+    echo "Diff ${file#${ROOT_DIR}/}"
+    kubectl diff -f "${file}" || true
+  done
+fi
+EOF
 
-wait_for_api_server
-validate_manifest_set
-
-apply_with_retry "${K8S_DIR}/namespace.yaml"
-apply_with_retry "${K8S_DIR}/configmap.yaml"
-
-apply_with_retry "${K8S_DIR}/inference-stage-1-service.yaml"
-apply_with_retry "${K8S_DIR}/inference-stage-2-service.yaml"
-apply_with_retry "${K8S_DIR}/inference-stage-3-service.yaml"
-apply_with_retry "${K8S_DIR}/inference-stage-4-service.yaml"
-apply_with_retry "${K8S_DIR}/inference-gateway-service.yaml"
-
-apply_with_retry "${K8S_DIR}/inference-stage-1-deployment.yaml"
-apply_with_retry "${K8S_DIR}/inference-stage-2-deployment.yaml"
-apply_with_retry "${K8S_DIR}/inference-stage-3-deployment.yaml"
-apply_with_retry "${K8S_DIR}/inference-stage-4-deployment.yaml"
-apply_with_retry "${K8S_DIR}/inference-gateway-deployment.yaml"
-
-kubectl_safe get pods -n inference -o wide || true
+chmod +x ~/dli/deploy_k3s.sh
