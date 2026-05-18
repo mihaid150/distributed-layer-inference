@@ -376,7 +376,7 @@ void validate_runtime_request_matches_partition(
     dli::common::validate_hidden_states_tensor(
         request.input_tensor,
         shard.hidden_size,
-        false
+        true
     );
 }
 
@@ -443,34 +443,28 @@ LlamaPartialRuntime::LlamaPartialRuntime(LlamaPartialRuntimeConfig config)
         const auto load_end = std::chrono::steady_clock::now();
         model_load_ms_ = elapsed_ms(load_start, load_end);
 
-        LlamaExecutorHyperparams hp;
-        hp.architecture = model_metadata_.architecture;
-        hp.hidden_size = model_metadata_.n_embd;
-        hp.ffn_size = model_meta_int(model_, "llama.feed_forward_length");
-        hp.n_head = model_metadata_.n_head;
-        hp.n_head_kv = model_metadata_.n_head_kv;
-        hp.head_dim = model_meta_int(model_, "llama.rope.dimension_count");
-        hp.vocab_size = model_metadata_.n_vocab;
-        hp.rms_eps = model_meta_float(
+        executor_hparams_.architecture = model_metadata_.architecture;
+        executor_hparams_.hidden_size = model_metadata_.n_embd;
+        executor_hparams_.ffn_size = model_meta_int(model_, "llama.feed_forward_length");
+        executor_hparams_.n_head = model_metadata_.n_head;
+        executor_hparams_.n_head_kv = model_metadata_.n_head_kv;
+        executor_hparams_.head_dim = model_meta_int(model_, "llama.rope.dimension_count");
+        executor_hparams_.vocab_size = model_metadata_.n_vocab;
+        executor_hparams_.rms_eps = model_meta_float(
             model_,
             "llama.attention.layer_norm_rms_epsilon",
             1.0e-5f
         );
-        hp.rope_theta = model_meta_float(
+        executor_hparams_.rope_theta = model_meta_float(
             model_,
             "llama.rope.freq_base",
             10000.0f
-        );
-
-        executor_ = std::make_unique<LlamaCpuExecutor>(
-            tensor_data_ctx_,
-            hp
         );
     }
 }
 
 LlamaPartialRuntime::~LlamaPartialRuntime() {
-    executor_.reset();
+    executor_.clear();
 
     if (tensor_data_ctx_ != nullptr) {
         ggml_free(tensor_data_ctx_);
@@ -646,6 +640,29 @@ dli::common::TensorBuffer LlamaPartialRuntime::execute_token_embedding_only(
     return out;
 }
 
+LlamaRequestSession& LlamaPartialRuntime::session_for_request(
+    const RuntimeRequest& request
+) {
+    const std::string key =
+        request.request_id.empty()
+            ? "__default__"
+            : request.request_id;
+
+    auto it = sessions_.find(key);
+
+    if (it == sessions_.end()) {
+        LlamaRequestSession session;
+        session.executor = std::make_unique<LlamaCpuExecutor>(
+            tensor_data_ctx_,
+            executor_hparams_
+        );
+
+        it = sessions_.emplace(key, std::move(session)).first;
+    }
+
+    return it->second;
+}
+
 RuntimeResponse LlamaPartialRuntime::forward(const RuntimeRequest& request) {
     if (!shard_metadata_.shard_loaded) {
         throw std::runtime_error("LlamaPartialRuntime has no loaded DLI GGUF shard");
@@ -690,10 +707,11 @@ std::uint64_t LlamaPartialRuntime::estimate_kv_cache_bytes(int seq_len) const {
 }
 
 PartitionKvCacheStep LlamaPartialRuntime::update_kv_cache_for_request(
-    const RuntimeRequest& request
+    const RuntimeRequest& request,
+    LlamaRequestSession& session
 ) {
     PartitionKvCacheStep step;
-    step.seq_before = kv_cache_.seq_len;
+    step.seq_before = session.kv_cache.seq_len;
 
     const int input_seq =
         static_cast<int>(dli::common::dli2_sequence_length(request.input_tensor));
@@ -709,23 +727,23 @@ PartitionKvCacheStep LlamaPartialRuntime::update_kv_cache_for_request(
         if (input_seq <= 0) {
             step.valid = false;
         } else {
-            kv_cache_.seq_len += input_seq;
+            session.kv_cache.seq_len += input_seq;
         }
     } else if (request.generation_mode == "decode") {
         if (input_seq != 1) {
             step.valid = false;
         } else {
-            kv_cache_.seq_len += 1;
+            session.kv_cache.seq_len += 1;
         }
     } else {
         step.valid = false;
     }
 
-    kv_cache_.valid = kv_cache_.valid && step.valid;
+    session.kv_cache.valid = session.kv_cache.valid && step.valid;
 
-    step.seq_after = kv_cache_.seq_len;
+    step.seq_after = session.kv_cache.seq_len;
     step.bytes = estimate_kv_cache_bytes(step.seq_after);
-    step.valid = kv_cache_.valid;
+    step.valid = session.kv_cache.valid;
 
     return step;
 }
@@ -741,15 +759,19 @@ RuntimeResponse LlamaPartialRuntime::forward_source_partition(
 
     const PartitionKvCacheStep kv_step = update_kv_cache_for_request(request);
 
+    LlamaRequestSession& session = session_for_request(request);
+    const PartitionKvCacheStep kv_step = update_kv_cache_for_request(request, session);
+
     RuntimeResponse response;
     response.is_final_stage = false;
     response.next_token_id = -1;
 
-    response.output_tensor = executor_->execute_source(
+    response.output_tensor = session.executor->execute_source(
         request.input_tensor,
         shard_metadata_.layers,
         request.generation_mode,
-        kv_step.seq_before
+        kv_step.seq_before,
+        request.activation_precision
     );
 
     response.output_metadata_json = request.input_metadata_json;
@@ -774,7 +796,7 @@ RuntimeResponse LlamaPartialRuntime::forward_source_partition(
     response.metrics.kv_cache_step_valid = kv_step.valid;
     response.metrics.kv_cache_seq_before = kv_step.seq_before;
     response.metrics.kv_cache_seq_after = kv_step.seq_after;
-    response.metrics.kv_cache_bytes = executor_->kv_cache_bytes();
+    response.metrics.kv_cache_bytes = session.executor->kv_cache_bytes();
     response.metrics.kv_cache_valid = kv_step.valid;
 
     response.metrics.model_load_ms = model_load_ms_;
@@ -794,15 +816,19 @@ RuntimeResponse LlamaPartialRuntime::forward_intermediate_partition(
 
     const PartitionKvCacheStep kv_step = update_kv_cache_for_request(request);
 
+    LlamaRequestSession& session = session_for_request(request);
+    const PartitionKvCacheStep kv_step = update_kv_cache_for_request(request, session);
+
     RuntimeResponse response;
     response.is_final_stage = false;
     response.next_token_id = -1;
 
-    response.output_tensor = executor_->execute_intermediate(
+    response.output_tensor = session.executor->execute_intermediate(
         request.input_tensor,
         shard_metadata_.layers,
         request.generation_mode,
-        kv_step.seq_before
+        kv_step.seq_before,
+        request.activation_precision
     );
 
     response.output_metadata_json = request.input_metadata_json;
@@ -827,7 +853,7 @@ RuntimeResponse LlamaPartialRuntime::forward_intermediate_partition(
     response.metrics.kv_cache_step_valid = kv_step.valid;
     response.metrics.kv_cache_seq_before = kv_step.seq_before;
     response.metrics.kv_cache_seq_after = kv_step.seq_after;
-    response.metrics.kv_cache_bytes = executor_->kv_cache_bytes();
+    response.metrics.kv_cache_bytes = session.executor->kv_cache_bytes();
     response.metrics.kv_cache_valid = kv_step.valid;
 
     response.metrics.model_load_ms = model_load_ms_;
@@ -847,9 +873,12 @@ RuntimeResponse LlamaPartialRuntime::forward_terminal_partition(
 
     const PartitionKvCacheStep kv_step = update_kv_cache_for_request(request);
 
+    LlamaRequestSession& session = session_for_request(request);
+    const PartitionKvCacheStep kv_step = update_kv_cache_for_request(request, session);
+
     RuntimeResponse response;
     response.is_final_stage = true;
-    response.next_token_id = executor_->execute_terminal(
+    response.next_token_id = session.executor->execute_terminal(
         request.input_tensor,
         shard_metadata_.layers,
         request.generation_mode,
@@ -880,7 +909,7 @@ RuntimeResponse LlamaPartialRuntime::forward_terminal_partition(
     response.metrics.kv_cache_step_valid = kv_step.valid;
     response.metrics.kv_cache_seq_before = kv_step.seq_before;
     response.metrics.kv_cache_seq_after = kv_step.seq_after;
-    response.metrics.kv_cache_bytes = executor_->kv_cache_bytes();
+    response.metrics.kv_cache_bytes = session.executor->kv_cache_bytes();
     response.metrics.kv_cache_valid = kv_step.valid;
 
     response.metrics.model_load_ms = model_load_ms_;
@@ -936,10 +965,8 @@ std::string LlamaPartialRuntime::backend_metadata_json() const {
         << "\"hidden_size\":" << shard_metadata_.hidden_size << ","
         << "\"source_model\":\"" << dli::common::json_escape(shard_metadata_.source_model) << "\""
         << "},"
-        << "\"kv_cache\":{"
-        << "\"seq_len\":" << kv_cache_.seq_len << ","
-        << "\"bytes\":" << estimate_kv_cache_bytes(kv_cache_.seq_len) << ","
-        << "\"valid\":" << (kv_cache_.valid ? "true" : "false")
+        << "\"sessions\":{"
+        << "\"count\":" << sessions_.size()
         << "}"
         << "}";
 

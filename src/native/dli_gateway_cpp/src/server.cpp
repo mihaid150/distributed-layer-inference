@@ -241,6 +241,34 @@ std::string config_json(const GatewayConfig& config) {
     return out.str();
 }
 
+bool parse_bool_field_or_default(
+    const std::string& json,
+    const std::string& field_name,
+    bool default_value
+) {
+    const std::regex pattern(
+        "\\\"" + field_name + R"dli(\"\\s*:\\s*(true|false))dli"
+    );
+
+    std::smatch match;
+    if (!std::regex_search(json, match, pattern)) {
+        return default_value;
+    }
+
+    return match[1].str() == "true";
+}
+
+std::string parse_string_field_or_default(
+    const std::string& json,
+    const std::string& field_name,
+    const std::string& default_value
+) {
+    if (const auto value = parse_string_field(json, field_name)) {
+        return *value;
+    }
+    return default_value;
+}
+
 std::string generate_loop_json(
     const dli::common::HttpRequest& request,
     const GatewayConfig& config,
@@ -259,6 +287,12 @@ std::string generate_loop_json(
         512
     );
 
+    const std::string feature_activation_precision =
+        parse_string_field_or_default(body_text, "activation_precision", activation_precision);
+
+    const bool feature_persistent_sessions_enabled =
+        parse_bool_field_or_default(body_text, "persistent_sessions_enabled", persistent_sessions_enabled);
+
     std::string prompt;
     if (const auto parsed_prompt = parse_string_field(body_text, "prompt")) {
         prompt = *parsed_prompt;
@@ -269,6 +303,8 @@ std::string generate_loop_json(
     loop_config.model_path = config.model_path;
     loop_config.max_new_tokens = max_new_tokens;
     loop_config.partitions = config.partitions;
+    loop_config.activation_precision = feature_activation_precision;
+    loop_config.persistent_sessions_enabled = feature_persistent_sessions_enabled;
 
     GenerationLoop loop(loop_config, tokenizer);
 

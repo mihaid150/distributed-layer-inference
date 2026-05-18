@@ -182,6 +182,26 @@ ParsedRequestMetadata parse_request_metadata(const std::string& metadata_json) {
         parsed.generation_mode = *value;
     }
 
+    if (const auto value = extract_string_field(metadata_json, "activation_precision")) {
+    parsed.activation_precision = *value;
+}
+
+    if (const auto value = extract_string_field(metadata_json, "transport_mode")) {
+        parsed.transport_mode = *value;
+    }
+
+    if (const auto value = extract_string_field(metadata_json, "rebalance_profile")) {
+        parsed.rebalance_profile = *value;
+    }
+
+    if (const auto value = extract_bool_field(metadata_json, "persistent_sessions_enabled")) {
+        parsed.persistent_sessions_enabled = *value;
+    }
+
+    if (const auto value = extract_bool_field(metadata_json, "topology_aware_routing")) {
+        parsed.topology_aware_routing = *value;
+    }
+
     if (const auto value = extract_string_field(metadata_json, "dtype")) {
         parsed.tensor.dtype = *value;
     }

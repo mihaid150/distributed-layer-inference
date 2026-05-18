@@ -181,7 +181,9 @@ std::string request_metadata_json(
     int token_index,
     const std::string& generation_mode,
     const std::string& dtype,
-    const std::vector<std::int64_t>& shape
+    const std::vector<std::int64_t>& shape,
+    const std::string& activation_precision,
+    bool persistent_sessions_enabled
 ) {
     std::ostringstream out;
 
@@ -196,7 +198,10 @@ std::string request_metadata_json(
         << "\"byte_order\":\"little\""
         << "},"
         << "\"feature_flags\":{"
-        << "\"kv_cache_enabled\":true"
+        << "\"kv_cache_enabled\":true,"
+        << "\"transport_mode\":\"binary_octet_stream\","
+        << "\"activation_precision\":\"" << dli::common::json_escape(activation_precision) << "\","
+        << "\"persistent_sessions_enabled\":" << (persistent_sessions_enabled ? "true" : "false")
         << "},"
         << "\"sampling\":{"
         << "\"temperature\":0.0,"
@@ -388,7 +393,9 @@ GenerationLoopResult GenerationLoop::run_stub_generation(
             0,
             "prefill",
             "int64",
-            {1, static_cast<std::int64_t>(tokenized.token_ids.size())}
+            {1, static_cast<std::int64_t>(tokenized.token_ids.size())},
+            config_.activation_precision,
+            config_.persistent_sessions_enabled
         );
         prefill.tensor_bytes = int64_tokens_to_bytes(tokenized.token_ids);
 
@@ -426,7 +433,9 @@ GenerationLoopResult GenerationLoop::run_stub_generation(
                 i,
                 "decode",
                 "int64",
-                {1, 1}
+                {1, 1},
+                config_.activation_precision,
+                config_.persistent_sessions_enabled
             );
 
             decode.tensor_bytes = int64_tokens_to_bytes(

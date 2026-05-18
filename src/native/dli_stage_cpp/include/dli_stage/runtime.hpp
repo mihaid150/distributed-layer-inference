@@ -31,6 +31,14 @@ struct RuntimeRequest {
     int next_token_id = -1;
 
     int stage_input_token_count = 0;
+
+    bool kv_cache_enabled = false;
+
+    std::string activation_precision = "fp32";
+    std::string transport_mode = "binary_octet_stream";
+    std::string rebalance_profile = "baseline";
+    bool persistent_sessions_enabled = false;
+    bool topology_aware_routing = false;
 };
 
 struct RuntimeResponse {

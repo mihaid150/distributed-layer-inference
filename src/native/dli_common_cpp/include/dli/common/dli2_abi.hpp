@@ -141,6 +141,14 @@ inline void validate_hidden_states_tensor(
         );
     }
 
+    if (!is_f32 && !(allow_float16 && is_f16)) {
+    throw std::runtime_error(
+        allow_float16
+            ? "DLI2 hidden states tensor must have dtype=float32 or float16"
+            : "DLI2 hidden states tensor must have dtype=float32"
+    );
+}
+
     validate_tensor_byte_size(tensor);
 }
 

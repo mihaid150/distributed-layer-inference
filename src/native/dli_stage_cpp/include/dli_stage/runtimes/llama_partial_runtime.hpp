@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 struct gguf_context;
 struct ggml_context;
@@ -76,6 +77,11 @@ struct PartitionKvCacheStep {
     bool valid = true;
 };
 
+struct LlamaRequestSession {
+    PartitionKvCacheState kv_cache;
+    std::unique_ptr<LlamaCpuExecutor> executor;
+};
+
 class LlamaPartialRuntime final : public StageRuntime {
 public:
     explicit LlamaPartialRuntime(LlamaPartialRuntimeConfig config);
@@ -100,9 +106,8 @@ private:
     LlamaModelMetadata model_metadata_;
     LlamaShardMetadata shard_metadata_;
 
-    PartitionKvCacheState kv_cache_;
-
-    std::unique_ptr<LlamaCpuExecutor> executor_;
+    std::unordered_map<std::string, LlamaRequestSession> sessions_;
+    LlamaExecutorHyperparams executor_hparams_;
 
     llama_model* model_ = nullptr;
     const llama_vocab* vocab_ = nullptr;
@@ -117,8 +122,9 @@ private:
     RuntimeResponse forward_source_partition(const RuntimeRequest& request);
     RuntimeResponse forward_intermediate_partition(const RuntimeRequest& request);
     RuntimeResponse forward_terminal_partition(const RuntimeRequest& request);
+    LlamaRequestSession& session_for_request(const RuntimeRequest& request);
 
-    PartitionKvCacheStep update_kv_cache_for_request(const RuntimeRequest& request);
+    PartitionKvCacheStep update_kv_cache_for_request(const RuntimeRequest& request, LlamaRequestSession& session);
     std::uint64_t estimate_kv_cache_bytes(int seq_len) const;
 
     void load_raw_tensor_context();

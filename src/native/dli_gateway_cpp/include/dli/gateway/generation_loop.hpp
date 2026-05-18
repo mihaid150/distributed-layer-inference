@@ -17,6 +17,9 @@ struct GenerationLoopConfig {
     int max_new_tokens = 2;
 
     std::vector<PartitionNodeConfig> partitions;
+
+    bool persistent_sessions_enabled = false;
+    std::string activation_precision = "fp32";
 };
 
 struct GenerationStepTrace {

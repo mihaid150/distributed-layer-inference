@@ -675,13 +675,102 @@ std::vector<float> LlamaCpuExecutor::run_layer(
     return output;
 }
 
+std::uint16_t float_to_f16_bits(float value) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(float));
+
+    const std::uint32_t sign = (bits >> 16u) & 0x8000u;
+    std::int32_t exponent = static_cast<std::int32_t>((bits >> 23u) & 0xffu) - 127 + 15;
+    std::uint32_t mantissa = bits & 0x007fffffu;
+
+    if (exponent <= 0) {
+        if (exponent < -10) {
+            return static_cast<std::uint16_t>(sign);
+        }
+
+        mantissa = (mantissa | 0x00800000u) >> static_cast<unsigned>(1 - exponent);
+        return static_cast<std::uint16_t>(sign | ((mantissa + 0x00001000u) >> 13u));
+    }
+
+    if (exponent >= 31) {
+        return static_cast<std::uint16_t>(sign | 0x7c00u);
+    }
+
+    return static_cast<std::uint16_t>(
+        sign |
+        (static_cast<std::uint32_t>(exponent) << 10u) |
+        ((mantissa + 0x00001000u) >> 13u)
+    );
+}
+
+float f16_bits_to_float(std::uint16_t value) {
+    const std::uint32_t sign = static_cast<std::uint32_t>(value & 0x8000u) << 16u;
+    std::uint32_t exponent = (value >> 10u) & 0x1fu;
+    std::uint32_t mantissa = value & 0x03ffu;
+
+    std::uint32_t bits = 0;
+
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            bits = sign;
+        } else {
+            exponent = 1;
+            while ((mantissa & 0x0400u) == 0) {
+                mantissa <<= 1u;
+                --exponent;
+            }
+            mantissa &= 0x03ffu;
+            exponent = exponent + (127 - 15);
+            bits = sign | (exponent << 23u) | (mantissa << 13u);
+        }
+    } else if (exponent == 31) {
+        bits = sign | 0x7f800000u | (mantissa << 13u);
+    } else {
+        exponent = exponent + (127 - 15);
+        bits = sign | (exponent << 23u) | (mantissa << 13u);
+    }
+
+    float result = 0.0f;
+    std::memcpy(&result, &bits, sizeof(float));
+    return result;
+}
+
+float read_f16_le(
+    const std::vector<std::uint8_t>& bytes,
+    std::size_t offset
+) {
+    if (offset + 2 > bytes.size()) {
+        throw std::runtime_error("cannot read float16 past hidden tensor");
+    }
+
+    const std::uint16_t raw =
+        static_cast<std::uint16_t>(bytes[offset]) |
+        static_cast<std::uint16_t>(bytes[offset + 1]) << 8u;
+
+    return f16_bits_to_float(raw);
+}
+
+void write_f16_le(
+    std::vector<std::uint8_t>& bytes,
+    std::size_t offset,
+    float value
+) {
+    if (offset + 2 > bytes.size()) {
+        throw std::runtime_error("cannot write float16 past hidden tensor");
+    }
+
+    const std::uint16_t raw = float_to_f16_bits(value);
+    bytes[offset] = static_cast<std::uint8_t>(raw & 0xffu);
+    bytes[offset + 1] = static_cast<std::uint8_t>((raw >> 8u) & 0xffu);
+}
+
 std::vector<float> LlamaCpuExecutor::tensor_to_hidden_f32(
     const dli::common::TensorBuffer& tensor
 ) const {
     dli::common::validate_hidden_states_tensor(
         tensor,
         hp_.hidden_size,
-        false
+        true
     );
 
     const std::int64_t batch = tensor.metadata.shape[0];
@@ -697,11 +786,21 @@ std::vector<float> LlamaCpuExecutor::tensor_to_hidden_f32(
 
     std::vector<float> values(count, 0.0f);
 
-    for (std::size_t i = 0; i < count; ++i) {
-        values[i] = read_f32_le(tensor.bytes, i * sizeof(float));
+    if (tensor.metadata.dtype == "float32") {
+        for (std::size_t i = 0; i < count; ++i) {
+            values[i] = read_f32_le(tensor.bytes, i * sizeof(float));
+        }
+        return values;
     }
 
-    return values;
+    if (tensor.metadata.dtype == "float16") {
+        for (std::size_t i = 0; i < count; ++i) {
+            values[i] = read_f16_le(tensor.bytes, i * 2);
+        }
+        return values;
+    }
+
+    throw std::runtime_error("unsupported hidden-state dtype: " + tensor.metadata.dtype);
 }
 
 std::vector<std::int64_t> LlamaCpuExecutor::tensor_to_token_ids(
@@ -728,10 +827,15 @@ std::vector<std::int64_t> LlamaCpuExecutor::tensor_to_token_ids(
 dli::common::TensorBuffer LlamaCpuExecutor::float_hidden_to_tensor(
     const std::vector<float>& hidden,
     int batch,
-    int seq_len
+    int seq_len,
+    const std::string& activation_precision
 ) const {
+    const bool use_f16 =
+        activation_precision == "fp16" ||
+        activation_precision == "float16";
+
     dli::common::TensorBuffer tensor;
-    tensor.metadata.dtype = "float32";
+    tensor.metadata.dtype = use_f16 ? "float16" : "float32";
     tensor.metadata.shape = {
         batch,
         seq_len,
@@ -739,10 +843,16 @@ dli::common::TensorBuffer LlamaCpuExecutor::float_hidden_to_tensor(
     };
     tensor.metadata.byte_order = "little";
 
-    tensor.bytes.resize(hidden.size() * sizeof(float));
-
-    for (std::size_t i = 0; i < hidden.size(); ++i) {
-        write_f32_le(tensor.bytes, i * sizeof(float), hidden[i]);
+    if (use_f16) {
+        tensor.bytes.resize(hidden.size() * 2);
+        for (std::size_t i = 0; i < hidden.size(); ++i) {
+            write_f16_le(tensor.bytes, i * 2, hidden[i]);
+        }
+    } else {
+        tensor.bytes.resize(hidden.size() * sizeof(float));
+        for (std::size_t i = 0; i < hidden.size(); ++i) {
+            write_f32_le(tensor.bytes, i * sizeof(float), hidden[i]);
+        }
     }
 
     return tensor;
@@ -752,7 +862,8 @@ dli::common::TensorBuffer LlamaCpuExecutor::execute_source(
     const dli::common::TensorBuffer& token_ids,
     const std::vector<int>& layers,
     const std::string&,
-    int kv_seq_before
+    int kv_seq_before,
+    const std::string& output_activation_precision
 ) {
     const std::vector<std::int64_t> tokens =
         tensor_to_token_ids(token_ids);
@@ -796,15 +907,16 @@ dli::common::TensorBuffer LlamaCpuExecutor::execute_source(
         hidden = run_layer(layer_id, hidden, seq_len, kv_seq_before);
     }
 
-    return float_hidden_to_tensor(hidden, 1, seq_len);
+    return float_hidden_to_tensor(hidden, 1, seq_len, output_activation_precision);
 }
 
 dli::common::TensorBuffer LlamaCpuExecutor::execute_intermediate(
     const dli::common::TensorBuffer& hidden_states,
     const std::vector<int>& layers,
     const std::string&,
-    int kv_seq_before
-) {
+    int kv_seq_before,
+    const std::string& output_activation_precision
+){
     const int seq_len =
         static_cast<int>(hidden_states.metadata.shape[1]);
 
@@ -815,7 +927,7 @@ dli::common::TensorBuffer LlamaCpuExecutor::execute_intermediate(
         hidden = run_layer(layer_id, hidden, seq_len, kv_seq_before);
     }
 
-    return float_hidden_to_tensor(hidden, 1, seq_len);
+    return float_hidden_to_tensor(hidden, 1, seq_len, output_activation_precision);
 }
 
 int LlamaCpuExecutor::argmax_lm_head(

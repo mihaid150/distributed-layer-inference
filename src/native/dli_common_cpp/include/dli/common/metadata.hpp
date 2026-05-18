@@ -15,6 +15,12 @@ struct ParsedRequestMetadata {
 
     bool kv_cache_enabled = false;
 
+    std::string activation_precision = "fp32";
+    std::string transport_mode = "binary_octet_stream";
+    std::string rebalance_profile = "baseline";
+    bool persistent_sessions_enabled = false;
+    bool topology_aware_routing = false;
+
     bool has_temperature = false;
     double temperature = 0.0;
 
@@ -29,7 +35,6 @@ struct ParsedRequestMetadata {
 
     int stage_input_token_count = 0;
 };
-
 ParsedRequestMetadata parse_request_metadata(const std::string& metadata_json);
 
 } // namespace dli::common

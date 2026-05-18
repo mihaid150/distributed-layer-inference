@@ -200,6 +200,12 @@ RuntimeRequest make_runtime_request(
 
     request.kv_cache_enabled = parsed.kv_cache_enabled;
 
+    request.activation_precision = parsed.activation_precision;
+    request.transport_mode = parsed.transport_mode;
+    request.rebalance_profile = parsed.rebalance_profile;
+    request.persistent_sessions_enabled = parsed.persistent_sessions_enabled;
+    request.topology_aware_routing = parsed.topology_aware_routing;
+
     request.has_temperature = parsed.has_temperature;
     request.temperature = parsed.temperature;
 
