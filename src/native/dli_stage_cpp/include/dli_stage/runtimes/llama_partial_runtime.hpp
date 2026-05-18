@@ -1,6 +1,7 @@
 #pragma once
 
 #include "dli_stage/runtime.hpp"
+#include "dli_stage/runtimes/llama_cpu_executor.hpp"
 
 #include <memory>
 #include <cstdint>
@@ -15,7 +16,6 @@ struct llama_vocab;
 
 namespace dli_stage {
 
-class LlamaCpuExecutor;
 
 struct LlamaPartialRuntimeConfig {
     std::string model_path;

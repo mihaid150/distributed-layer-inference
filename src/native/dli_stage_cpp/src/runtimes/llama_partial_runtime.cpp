@@ -464,7 +464,7 @@ LlamaPartialRuntime::LlamaPartialRuntime(LlamaPartialRuntimeConfig config)
 }
 
 LlamaPartialRuntime::~LlamaPartialRuntime() {
-    executor_.clear();
+    sessions_.clear();
 
     if (tensor_data_ctx_ != nullptr) {
         ggml_free(tensor_data_ctx_);
@@ -484,6 +484,8 @@ LlamaPartialRuntime::~LlamaPartialRuntime() {
 
     model_metadata_.model_loaded = false;
 }
+
+
 
 void LlamaPartialRuntime::load_raw_tensor_context() {
     if (config_.model_path.empty()) {
@@ -751,16 +753,12 @@ PartitionKvCacheStep LlamaPartialRuntime::update_kv_cache_for_request(
 RuntimeResponse LlamaPartialRuntime::forward_source_partition(
     const RuntimeRequest& request
 ) {
-    if (!executor_) {
-        throw std::runtime_error("source execution requested before executor initialization");
-    }
+    LlamaRequestSession& session = session_for_request(request);
 
     const auto start = std::chrono::steady_clock::now();
 
-    const PartitionKvCacheStep kv_step = update_kv_cache_for_request(request);
-
-    LlamaRequestSession& session = session_for_request(request);
-    const PartitionKvCacheStep kv_step = update_kv_cache_for_request(request, session);
+    const PartitionKvCacheStep kv_step =
+        update_kv_cache_for_request(request, session);
 
     RuntimeResponse response;
     response.is_final_stage = false;
@@ -805,19 +803,17 @@ RuntimeResponse LlamaPartialRuntime::forward_source_partition(
     return response;
 }
 
+
+
 RuntimeResponse LlamaPartialRuntime::forward_intermediate_partition(
     const RuntimeRequest& request
 ) {
-    if (!executor_) {
-        throw std::runtime_error("intermediate execution requested before executor initialization");
-    }
+    LlamaRequestSession& session = session_for_request(request);
 
     const auto start = std::chrono::steady_clock::now();
 
-    const PartitionKvCacheStep kv_step = update_kv_cache_for_request(request);
-
-    LlamaRequestSession& session = session_for_request(request);
-    const PartitionKvCacheStep kv_step = update_kv_cache_for_request(request, session);
+    const PartitionKvCacheStep kv_step =
+        update_kv_cache_for_request(request, session);
 
     RuntimeResponse response;
     response.is_final_stage = false;
@@ -862,19 +858,17 @@ RuntimeResponse LlamaPartialRuntime::forward_intermediate_partition(
     return response;
 }
 
+
+
 RuntimeResponse LlamaPartialRuntime::forward_terminal_partition(
     const RuntimeRequest& request
 ) {
-    if (!executor_) {
-        throw std::runtime_error("terminal execution requested before executor initialization");
-    }
+    LlamaRequestSession& session = session_for_request(request);
 
     const auto start = std::chrono::steady_clock::now();
 
-    const PartitionKvCacheStep kv_step = update_kv_cache_for_request(request);
-
-    LlamaRequestSession& session = session_for_request(request);
-    const PartitionKvCacheStep kv_step = update_kv_cache_for_request(request, session);
+    const PartitionKvCacheStep kv_step =
+        update_kv_cache_for_request(request, session);
 
     RuntimeResponse response;
     response.is_final_stage = true;
@@ -917,6 +911,8 @@ RuntimeResponse LlamaPartialRuntime::forward_terminal_partition(
 
     return response;
 }
+
+
 
 
 std::string LlamaPartialRuntime::backend_name() const {

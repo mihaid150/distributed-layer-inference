@@ -18,6 +18,12 @@ struct RuntimeRequest {
 
     bool kv_cache_enabled = false;
 
+    std::string activation_precision = "fp32";
+    std::string transport_mode = "binary_octet_stream";
+    std::string rebalance_profile = "baseline";
+    bool persistent_sessions_enabled = false;
+    bool topology_aware_routing = false;
+
     bool has_temperature = false;
     double temperature = 0.0;
 
@@ -31,29 +37,17 @@ struct RuntimeRequest {
     int next_token_id = -1;
 
     int stage_input_token_count = 0;
-
-    bool kv_cache_enabled = false;
-
-    std::string activation_precision = "fp32";
-    std::string transport_mode = "binary_octet_stream";
-    std::string rebalance_profile = "baseline";
-    bool persistent_sessions_enabled = false;
-    bool topology_aware_routing = false;
 };
 
 struct RuntimeResponse {
     bool is_final_stage = false;
     int next_token_id = -1;
 
-    
-
     std::string output_metadata_json;
     dli::common::TensorBuffer output_tensor;
 
     dli::common::StageMetrics metrics;
 
-    // Optional runtime-specific metadata, already serialized as JSON object text.
-    // Example: {"model_loaded":true,"n_layer":22}
     std::string backend_metadata_json;
 };
 

@@ -12,11 +12,16 @@ inference_stages:
   service_name: inference-native-stage-1
   physical_node: pinode7
   partition_file: /app/models/stage_1.pt
-  native_partition_file: /app/models/latency_balanced_v1/partition-1.dli.gguf
+  native_partition_file: /app/models/partition-1.dli.gguf
   backend: llama
   components:
     embedding: true
-    layers: [0, 1, 2, 3, 4]
+    layers:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
     norm: false
     lm_head: false
   next_stage_url: http://inference-native-stage-2:8000/forward-binary
@@ -26,11 +31,16 @@ inference_stages:
   service_name: inference-native-stage-2
   physical_node: pinode8
   partition_file: /app/models/stage_2.pt
-  native_partition_file: /app/models/latency_balanced_v1/partition-2.dli.gguf
+  native_partition_file: /app/models/partition-2.dli.gguf
   backend: llama
   components:
     embedding: false
-    layers: [5, 6, 7, 8, 9]
+    layers:
+    - 5
+    - 6
+    - 7
+    - 8
+    - 9
     norm: false
     lm_head: false
   next_stage_url: http://inference-native-stage-3:8000/forward-binary
@@ -40,11 +50,17 @@ inference_stages:
   service_name: inference-native-stage-3
   physical_node: pinode9
   partition_file: /app/models/stage_3.pt
-  native_partition_file: /app/models/latency_balanced_v1/partition-3.dli.gguf
+  native_partition_file: /app/models/partition-3.dli.gguf
   backend: llama
   components:
     embedding: false
-    layers: [10, 11, 12, 13, 14, 15]
+    layers:
+    - 10
+    - 11
+    - 12
+    - 13
+    - 14
+    - 15
     norm: false
     lm_head: false
   next_stage_url: http://inference-native-stage-4:8000/forward-binary
@@ -54,11 +70,27 @@ inference_stages:
   service_name: inference-native-stage-4
   physical_node: pinode10
   partition_file: /app/models/stage_4.pt
-  native_partition_file: /app/models/latency_balanced_v1/partition-4.dli.gguf
+  native_partition_file: /app/models/partition-4.dli.gguf
   backend: llama
   components:
     embedding: false
-    layers: [16, 17, 18, 19, 20, 21]
+    layers:
+    - 16
+    - 17
+    - 18
+    - 19
+    - 20
+    - 21
     norm: true
     lm_head: true
   next_stage_url: null
+
+topology:
+  probe_timeout_seconds: 0.25
+  route_candidates:
+    "1":
+    - http://inference-native-stage-2:8000/forward-binary
+    "2":
+    - http://inference-native-stage-3:8000/forward-binary
+    "3":
+    - http://inference-native-stage-4:8000/forward-binary

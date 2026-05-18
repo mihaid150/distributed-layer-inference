@@ -47,19 +47,19 @@ public:
     );
 
     dli::common::TensorBuffer execute_source(
-    const dli::common::TensorBuffer& token_ids,
-    const std::vector<int>& layers,
-    const std::string& generation_mode,
-    int kv_seq_before,
-    const std::string& output_activation_precision
+        const dli::common::TensorBuffer& token_ids,
+        const std::vector<int>& layers,
+        const std::string& generation_mode,
+        int kv_seq_before,
+        const std::string& output_activation_precision
     );
 
     dli::common::TensorBuffer execute_intermediate(
-    const dli::common::TensorBuffer& hidden_states,
-    const std::vector<int>& layers,
-    const std::string& generation_mode,
-    int kv_seq_before,
-    const std::string& output_activation_precision
+        const dli::common::TensorBuffer& hidden_states,
+        const std::vector<int>& layers,
+        const std::string& generation_mode,
+        int kv_seq_before,
+        const std::string& output_activation_precision
     );
 
     int execute_terminal(
@@ -122,13 +122,12 @@ private:
         int kv_seq_before
     );
 
-    dli::common::TensorBuffer execute_intermediate(
-    const dli::common::TensorBuffer& hidden_states,
-    const std::vector<int>& layers,
-    const std::string& generation_mode,
-    int kv_seq_before,
-    const std::string& output_activation_precision
-    );
+    dli::common::TensorBuffer float_hidden_to_tensor(
+        const std::vector<float>& hidden,
+        int batch,
+        int seq_len,
+        const std::string& activation_precision
+    ) const;
 
     std::vector<float> tensor_to_hidden_f32(
         const dli::common::TensorBuffer& tensor
@@ -140,12 +139,5 @@ private:
 
     int argmax_lm_head(const std::vector<float>& last_hidden) const;
 };
-
-dli::common::TensorBuffer float_hidden_to_tensor(
-    const std::vector<float>& hidden,
-    int batch,
-    int seq_len,
-    const std::string& activation_precision
-) const;
 
 } // namespace dli_stage

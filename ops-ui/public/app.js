@@ -544,6 +544,31 @@ function isBaselineFeatureFlags(flags) {
 }
 
 function readFeatureFlagsFromControls() {
+
+  if (getRuntimeVariant() === "native") {
+    const activationPrecision = getCheckedRadioValue(
+      "feature-precision",
+      "fp32"
+    );
+
+    const rebalanceProfile = getCheckedRadioValue(
+      "feature-rebalance",
+      "baseline"
+    );
+
+    return normalizeFeatureFlags({
+      transport_mode: "binary_octet_stream",
+      activation_precision: activationPrecision,
+      kv_cache_enabled: true,
+      forward_dedupe_enabled: false,
+      rebalance_profile: rebalanceProfile,
+      topology_aware_routing: false,
+      persistent_sessions_enabled: false,
+      backpressure_enabled: false,
+      backpressure_queue_size: 0
+    });
+  }
+
   const backpressureEnabled = toBool(els.featureBackpressure?.checked);
   const queueSize = Math.round(
     clampNumber(els.featureBackpressureQueue?.value, 0, 256, 0)
@@ -616,6 +641,71 @@ function syncFeatureFlagControlState() {
   els.featureBackpressureQueue.disabled = !enabled;
 }
 
+function syncNativeFeatureControls() {
+  const isNative = getRuntimeVariant() === "native";
+
+  if (!isNative) {
+    return;
+  }
+
+  // Native always uses binary DLI2 frames.
+  if (els.featureTransportBinary) {
+    els.featureTransportBinary.checked = true;
+  }
+  if (els.featureTransportJson) {
+    els.featureTransportJson.disabled = true;
+  }
+  if (els.featureTransportBinary) {
+    els.featureTransportBinary.disabled = true;
+  }
+
+  // Native currently supports fp32, and fp16 only if the C++ fp16 patch is deployed.
+  // Keep fp32 enabled. Enable fp16 only when you have deployed that implementation.
+  if (els.featurePrecisionFp32) {
+    els.featurePrecisionFp32.disabled = false;
+  }
+  if (els.featurePrecisionFp16) {
+    els.featurePrecisionFp16.disabled = false;
+  }
+  if (els.featurePrecisionBf16) {
+    els.featurePrecisionBf16.disabled = true;
+  }
+  if (els.featurePrecisionInt8) {
+    els.featurePrecisionInt8.disabled = true;
+  }
+
+  // Native can use baseline vs latency-balanced as a deployment profile label.
+  if (els.featureRebalanceBaseline) {
+    els.featureRebalanceBaseline.disabled = false;
+  }
+  if (els.featureRebalanceLatency) {
+    els.featureRebalanceLatency.disabled = false;
+  }
+
+  // KV cache is part of native runtime. Keep visible.
+  if (els.featureKvCache) {
+    els.featureKvCache.disabled = false;
+    els.featureKvCache.checked = true;
+  }
+
+  // These are not implemented in native yet.
+  if (els.featureForwardDedupe) {
+    els.featureForwardDedupe.disabled = true;
+  }
+  if (els.featureTopologyAware) {
+    els.featureTopologyAware.disabled = true;
+  }
+  if (els.featurePersistentSessions) {
+    els.featurePersistentSessions.disabled = true;
+  }
+  if (els.featureBackpressure) {
+    els.featureBackpressure.disabled = true;
+  }
+  if (els.featureBackpressureQueue) {
+    els.featureBackpressureQueue.disabled = true;
+  }
+}
+
 function syncRuntimeUiState() {
   const featureControls = [
     els.featureTransportJson,
@@ -644,6 +734,7 @@ function syncRuntimeUiState() {
   if (featureFlagsEnabled) {
     syncFeatureFlagControlState();
   }
+  syncNativeFeatureControls();
 }
 
 function syncFeatureFlagControlsFromBody() {
@@ -671,6 +762,7 @@ function syncBodyFromFeatureFlagControls() {
 
   const nextBody = { ...parsed };
   const flags = readFeatureFlagsFromControls();
+  
   if (isBaselineFeatureFlags(flags)) {
     delete nextBody.feature_flags;
   } else {

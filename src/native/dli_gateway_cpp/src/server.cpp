@@ -288,10 +288,10 @@ std::string generate_loop_json(
     );
 
     const std::string feature_activation_precision =
-        parse_string_field_or_default(body_text, "activation_precision", activation_precision);
+        parse_string_field_or_default(body_text, "activation_precision", "fp32");
 
     const bool feature_persistent_sessions_enabled =
-        parse_bool_field_or_default(body_text, "persistent_sessions_enabled", persistent_sessions_enabled);
+        parse_bool_field_or_default(body_text, "persistent_sessions_enabled", false);
 
     std::string prompt;
     if (const auto parsed_prompt = parse_string_field(body_text, "prompt")) {

@@ -86,7 +86,7 @@ const RUNTIME_VARIANTS = {
     label: "Native C++",
     description: "C++ gateway/stage pods using llama.cpp and DLI2 binary frames",
     supportsChat: false,
-    supportsFeatureFlags: false,
+    supportsFeatureFlags: true,
     targets: {
       gateway: {
         deployment: "inference-native-gateway-deployment",
@@ -1822,7 +1822,18 @@ function handleEndpointCatalog(req, res, query) {
         prompt: "Write one short sentence about distributed inference.",
         max_new_tokens: 24,
         min_new_tokens: 8,
-        temperature: 0.2
+        temperature: 0.2,
+        feature_flags: {
+          transport_mode: "binary_octet_stream",
+          activation_precision: "fp32",
+          kv_cache_enabled: true,
+          forward_dedupe_enabled: false,
+          rebalance_profile: "baseline",
+          topology_aware_routing: false,
+          persistent_sessions_enabled: false,
+          backpressure_enabled: false,
+          backpressure_queue_size: 0
+        }
       }
     }
   ];
