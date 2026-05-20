@@ -59,7 +59,13 @@ std::string metrics_json(const dli::common::StageMetrics& metrics) {
         << "\"kv_cache_bytes\":" << metrics.kv_cache_bytes << ","
         << "\"kv_cache_valid\":" << (metrics.kv_cache_valid ? "true" : "false") << ","
         << "\"model_load_ms\":" << metrics.model_load_ms << ","
-        << "\"memory_rss_mb\":" << metrics.memory_rss_mb
+        << "\"memory_rss_mb\":" << metrics.memory_rss_mb << ","
+        << "\"memory_cgroup_current_mb\":" << metrics.memory_cgroup_current_mb << ","
+        << "\"memory_cgroup_limit_mb\":" << metrics.memory_cgroup_limit_mb << ","
+        << "\"memory_cgroup_percent\":" << metrics.memory_cgroup_percent << ","
+        << "\"model_file_size_mb\":" << metrics.model_file_size_mb << ","
+        << "\"session_count\":" << metrics.session_count << ","
+        << "\"session_kv_cache_bytes\":" << metrics.session_kv_cache_bytes
         << "}";
 
     return out.str();

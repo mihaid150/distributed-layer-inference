@@ -28,6 +28,13 @@ struct StageMetrics {
 
     double model_load_ms = 0.0;
     std::uint64_t memory_rss_mb = 0;
+    std::uint64_t memory_cgroup_current_mb = 0;
+    std::uint64_t memory_cgroup_limit_mb = 0;
+    double memory_cgroup_percent = 0.0;
+
+    std::uint64_t model_file_size_mb = 0;
+    std::uint64_t session_count = 0;
+    std::uint64_t session_kv_cache_bytes = 0;
 };
 
 } // namespace dli::common

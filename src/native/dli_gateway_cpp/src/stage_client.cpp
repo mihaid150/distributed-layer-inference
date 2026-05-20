@@ -74,6 +74,9 @@ StageClientResult StageClient::forward_frame(
     result.http_status = http_response.status_code;
     result.http_reason = http_response.reason;
     result.elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
+    result.request_body_bytes = request_body.size();
+    result.response_body_bytes = http_response.body.size();
+    result.transport_payload_bytes = result.request_body_bytes + result.response_body_bytes;
 
     if (http_response.status_code >= 200 && http_response.status_code < 300) {
         result.response_frame = dli::common::decode_frame(http_response.body);

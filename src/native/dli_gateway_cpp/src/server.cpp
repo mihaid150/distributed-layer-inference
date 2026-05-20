@@ -247,7 +247,7 @@ bool parse_bool_field_or_default(
     bool default_value
 ) {
     const std::regex pattern(
-        "\\\"" + field_name + R"dli(\"\\s*:\\s*(true|false))dli"
+        "\"" + field_name + R"dli("\s*:\s*(true|false))dli"
     );
 
     std::smatch match;
@@ -257,6 +257,7 @@ bool parse_bool_field_or_default(
 
     return match[1].str() == "true";
 }
+
 
 std::string parse_string_field_or_default(
     const std::string& json,
@@ -287,6 +288,14 @@ std::string generate_loop_json(
         512
     );
 
+    const int min_new_tokens = std::min(
+        max_new_tokens,
+        parse_int_field_or_default(body_text, "min_new_tokens", 0, 0, 512)
+    );
+
+    const bool apply_chat_template =
+        parse_bool_field_or_default(body_text, "apply_chat_template", true);
+
     const std::string feature_activation_precision =
         parse_string_field_or_default(body_text, "activation_precision", "fp32");
 
@@ -302,6 +311,8 @@ std::string generate_loop_json(
     loop_config.first_stage_url = config.first_stage_url;
     loop_config.model_path = config.model_path;
     loop_config.max_new_tokens = max_new_tokens;
+    loop_config.min_new_tokens = min_new_tokens;
+    loop_config.apply_chat_template = apply_chat_template;
     loop_config.partitions = config.partitions;
     loop_config.activation_precision = feature_activation_precision;
     loop_config.persistent_sessions_enabled = feature_persistent_sessions_enabled;

@@ -21,6 +21,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <cstdlib>
+#include <limits>
 
 namespace dli_stage {
 
@@ -47,6 +49,71 @@ std::uint64_t current_rss_mb() {
     }
 
     return 0;
+}
+
+
+std::uint64_t read_u64_text_file(const std::filesystem::path& path) {
+    std::ifstream input(path);
+    if (!input.is_open()) {
+        return 0;
+    }
+
+    std::string value;
+    input >> value;
+
+    if (value.empty() || value == "max") {
+        return 0;
+    }
+
+    try {
+        return static_cast<std::uint64_t>(std::stoull(value));
+    } catch (const std::exception&) {
+        return 0;
+    }
+}
+
+std::uint64_t bytes_to_rounded_mb(std::uint64_t bytes) {
+    if (bytes == 0) {
+        return 0;
+    }
+    return (bytes + 1024ull * 1024ull - 1ull) / (1024ull * 1024ull);
+}
+
+std::uint64_t cgroup_memory_current_mb() {
+    const std::uint64_t v2 = read_u64_text_file("/sys/fs/cgroup/memory.current");
+    if (v2 > 0) {
+        return bytes_to_rounded_mb(v2);
+    }
+
+    const std::uint64_t v1 = read_u64_text_file("/sys/fs/cgroup/memory/memory.usage_in_bytes");
+    return bytes_to_rounded_mb(v1);
+}
+
+std::uint64_t cgroup_memory_limit_mb() {
+    const std::uint64_t v2 = read_u64_text_file("/sys/fs/cgroup/memory.max");
+    if (v2 > 0 && v2 < static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+        return bytes_to_rounded_mb(v2);
+    }
+
+    const std::uint64_t v1 = read_u64_text_file("/sys/fs/cgroup/memory/memory.limit_in_bytes");
+    if (v1 > 0 && v1 < static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+        return bytes_to_rounded_mb(v1);
+    }
+
+    return 0;
+}
+
+std::uint64_t env_u64_or_default(const char* name, std::uint64_t fallback) {
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || raw[0] == '\0') {
+        return fallback;
+    }
+
+    try {
+        return static_cast<std::uint64_t>(std::stoull(raw));
+    } catch (const std::exception&) {
+        return fallback;
+    }
 }
 
 std::int64_t read_i64_le(
@@ -389,6 +456,14 @@ LlamaPartialRuntime::LlamaPartialRuntime(LlamaPartialRuntimeConfig config)
     model_metadata_.model_path = config_.model_path;
 
     if (!config_.model_path.empty()) {
+        try {
+            model_file_size_mb_ = bytes_to_rounded_mb(
+                static_cast<std::uint64_t>(std::filesystem::file_size(config_.model_path))
+            );
+        } catch (const std::exception&) {
+            model_file_size_mb_ = 0;
+        }
+
         const auto load_start = std::chrono::steady_clock::now();
 
         shard_metadata_ = load_shard_metadata_from_gguf(config_.model_path);
@@ -642,6 +717,30 @@ dli::common::TensorBuffer LlamaPartialRuntime::execute_token_embedding_only(
     return out;
 }
 
+
+void LlamaPartialRuntime::prune_sessions_except(const std::string& keep_request_id) {
+    const std::uint64_t max_sessions =
+        std::max<std::uint64_t>(1, env_u64_or_default("DLI_NATIVE_MAX_SESSIONS", 8));
+
+    while (sessions_.size() > max_sessions) {
+        auto victim = sessions_.begin();
+
+        if (
+            victim != sessions_.end() &&
+            !keep_request_id.empty() &&
+            victim->first == keep_request_id
+        ) {
+            ++victim;
+        }
+
+        if (victim == sessions_.end()) {
+            break;
+        }
+
+        sessions_.erase(victim);
+    }
+}
+
 LlamaRequestSession& LlamaPartialRuntime::session_for_request(
     const RuntimeRequest& request
 ) {
@@ -649,6 +748,10 @@ LlamaRequestSession& LlamaPartialRuntime::session_for_request(
         request.request_id.empty()
             ? "__default__"
             : request.request_id;
+
+    if (request.generation_mode == "prefill" && request.token_index == 0) {
+        sessions_.erase(key);
+    }
 
     auto it = sessions_.find(key);
 
@@ -662,7 +765,43 @@ LlamaRequestSession& LlamaPartialRuntime::session_for_request(
         it = sessions_.emplace(key, std::move(session)).first;
     }
 
+    prune_sessions_except(key);
+
     return it->second;
+}
+
+
+
+std::uint64_t LlamaPartialRuntime::total_session_kv_cache_bytes() const {
+    std::uint64_t total = 0;
+
+    for (const auto& item : sessions_) {
+        if (item.second.executor) {
+            total += item.second.executor->kv_cache_bytes();
+        }
+    }
+
+    return total;
+}
+
+void LlamaPartialRuntime::populate_resource_metrics(
+    dli::common::StageMetrics& metrics
+) const {
+    metrics.memory_rss_mb = current_rss_mb();
+
+    metrics.memory_cgroup_current_mb = cgroup_memory_current_mb();
+    metrics.memory_cgroup_limit_mb = cgroup_memory_limit_mb();
+
+    if (metrics.memory_cgroup_current_mb > 0 && metrics.memory_cgroup_limit_mb > 0) {
+        metrics.memory_cgroup_percent =
+            100.0 *
+            static_cast<double>(metrics.memory_cgroup_current_mb) /
+            static_cast<double>(metrics.memory_cgroup_limit_mb);
+    }
+
+    metrics.model_file_size_mb = model_file_size_mb_;
+    metrics.session_count = static_cast<std::uint64_t>(sessions_.size());
+    metrics.session_kv_cache_bytes = total_session_kv_cache_bytes();
 }
 
 RuntimeResponse LlamaPartialRuntime::forward(const RuntimeRequest& request) {
@@ -798,7 +937,7 @@ RuntimeResponse LlamaPartialRuntime::forward_source_partition(
     response.metrics.kv_cache_valid = kv_step.valid;
 
     response.metrics.model_load_ms = model_load_ms_;
-    response.metrics.memory_rss_mb = current_rss_mb();
+    populate_resource_metrics(response.metrics);
 
     return response;
 }
@@ -853,7 +992,7 @@ RuntimeResponse LlamaPartialRuntime::forward_intermediate_partition(
     response.metrics.kv_cache_valid = kv_step.valid;
 
     response.metrics.model_load_ms = model_load_ms_;
-    response.metrics.memory_rss_mb = current_rss_mb();
+    populate_resource_metrics(response.metrics);
 
     return response;
 }
@@ -907,7 +1046,7 @@ RuntimeResponse LlamaPartialRuntime::forward_terminal_partition(
     response.metrics.kv_cache_valid = kv_step.valid;
 
     response.metrics.model_load_ms = model_load_ms_;
-    response.metrics.memory_rss_mb = current_rss_mb();
+    populate_resource_metrics(response.metrics);
 
     return response;
 }

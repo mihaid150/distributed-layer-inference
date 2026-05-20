@@ -13,6 +13,9 @@ struct StageClientResult {
     std::string http_reason;
     double elapsed_ms = 0.0;
     dli::common::DliFrame response_frame;
+    std::size_t request_body_bytes = 0;
+    std::size_t response_body_bytes = 0;
+    std::size_t transport_payload_bytes = 0;
     std::string error_body;
 };
 

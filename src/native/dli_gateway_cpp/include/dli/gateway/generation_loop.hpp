@@ -15,6 +15,8 @@ struct GenerationLoopConfig {
     std::string first_stage_url;
     std::string model_path;
     int max_new_tokens = 2;
+    int min_new_tokens = 0;
+    bool apply_chat_template = true;
 
     std::vector<PartitionNodeConfig> partitions;
 
@@ -35,6 +37,10 @@ struct GenerationStepTrace {
     double stage_http_elapsed_ms = 0.0;
     std::string stage_metadata_json;
     std::size_t stage_tensor_bytes = 0;
+    std::size_t request_body_bytes = 0;
+    std::size_t response_body_bytes = 0;
+    std::size_t transport_payload_bytes = 0;
+    double estimated_true_comm_ms = 0.0;
     std::string error_body;
 };
 
@@ -45,10 +51,17 @@ struct GatewayAggregatedMetrics {
 
     std::uint64_t tensor_bytes_in = 0;
     std::uint64_t tensor_bytes_out = 0;
+    std::uint64_t transport_payload_bytes = 0;
 
     double model_load_ms = 0.0;
     std::uint64_t kv_cache_bytes = 0;
     std::uint64_t memory_rss_mb = 0;
+    std::uint64_t memory_cgroup_current_mb = 0;
+    std::uint64_t memory_cgroup_limit_mb = 0;
+    double memory_cgroup_percent = 0.0;
+    std::uint64_t model_file_size_mb = 0;
+    std::uint64_t session_count = 0;
+    std::uint64_t session_kv_cache_bytes = 0;
 };
 
 struct GenerationLoopResult {

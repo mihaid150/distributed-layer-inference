@@ -116,6 +116,9 @@ private:
     ggml_context* tensor_data_ctx_ = nullptr;
 
     double model_load_ms_ = 0.0;
+    std::uint64_t model_file_size_mb_ = 0;
+
+    void prune_sessions_except(const std::string& keep_request_id);
 
     std::string backend_metadata_json() const;
 
@@ -126,6 +129,8 @@ private:
 
     PartitionKvCacheStep update_kv_cache_for_request(const RuntimeRequest& request, LlamaRequestSession& session);
     std::uint64_t estimate_kv_cache_bytes(int seq_len) const;
+    std::uint64_t total_session_kv_cache_bytes() const;
+    void populate_resource_metrics(dli::common::StageMetrics& metrics) const;
 
     void load_raw_tensor_context();
     dli::common::TensorBuffer execute_token_embedding_only(

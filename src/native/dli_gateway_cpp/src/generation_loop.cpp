@@ -14,10 +14,93 @@
 #include <utility>
 #include <vector>
 #include <regex>
+#include <atomic>
+#include <cctype>
+#include <cstdlib>
 
 namespace dli::gateway {
 
 namespace {
+
+
+std::string trim_copy(const std::string& value) {
+    std::size_t begin = 0;
+    while (begin < value.size() && std::isspace(static_cast<unsigned char>(value[begin]))) {
+        ++begin;
+    }
+
+    std::size_t end = value.size();
+    while (end > begin && std::isspace(static_cast<unsigned char>(value[end - 1]))) {
+        --end;
+    }
+
+    return value.substr(begin, end - begin);
+}
+
+bool contains_generation_control_marker(const std::string& text) {
+    return
+        text.find("</s>") != std::string::npos ||
+        text.find("<s>") != std::string::npos ||
+        text.find("<|user|>") != std::string::npos ||
+        text.find("<|assistant|>") != std::string::npos ||
+        text.find("<|system|>") != std::string::npos;
+}
+
+std::string format_prompt_for_generation(
+    const std::string& prompt,
+    bool apply_chat_template
+) {
+    if (!apply_chat_template) {
+        return prompt;
+    }
+
+    if (
+        prompt.find("<|user|>") != std::string::npos ||
+        prompt.find("<|assistant|>") != std::string::npos
+    ) {
+        return prompt;
+    }
+
+    std::ostringstream out;
+    out
+        << "<|user|>\n"
+        << prompt
+        << "</s>\n<|assistant|>\n";
+    return out.str();
+}
+
+std::string cleanup_generated_text(std::string text) {
+    const std::vector<std::string> cut_markers = {
+        "<|user|>",
+        "<|system|>",
+        "<|assistant|>"
+    };
+
+    for (const std::string& marker : cut_markers) {
+        const std::size_t pos = text.find(marker);
+        if (pos != std::string::npos) {
+            text = text.substr(0, pos);
+        }
+    }
+
+    const std::vector<std::string> erase_markers = {
+        "</s>",
+        "<s>"
+    };
+
+    for (const std::string& marker : erase_markers) {
+        std::size_t pos = 0;
+        while ((pos = text.find(marker, pos)) != std::string::npos) {
+            text.erase(pos, marker.size());
+        }
+    }
+
+    return trim_copy(text);
+}
+
+bool token_text_is_stop_marker(const std::string& token_text) {
+    return contains_generation_control_marker(token_text);
+}
 
 bool extract_number_field(
     const std::string& json,
@@ -100,11 +183,51 @@ void aggregate_stage_metrics(
         result.aggregate_metrics.memory_rss_mb =
             std::max(result.aggregate_metrics.memory_rss_mb, u);
     }
+
+    if (extract_u64_field(metadata_json, "memory_cgroup_current_mb", u)) {
+        result.aggregate_metrics.memory_cgroup_current_mb =
+            std::max(result.aggregate_metrics.memory_cgroup_current_mb, u);
+    }
+
+    if (extract_u64_field(metadata_json, "memory_cgroup_limit_mb", u)) {
+        result.aggregate_metrics.memory_cgroup_limit_mb =
+            std::max(result.aggregate_metrics.memory_cgroup_limit_mb, u);
+    }
+
+    if (extract_number_field(metadata_json, "memory_cgroup_percent", d)) {
+        result.aggregate_metrics.memory_cgroup_percent =
+            std::max(result.aggregate_metrics.memory_cgroup_percent, d);
+    }
+
+    if (extract_u64_field(metadata_json, "model_file_size_mb", u)) {
+        result.aggregate_metrics.model_file_size_mb =
+            std::max(result.aggregate_metrics.model_file_size_mb, u);
+    }
+
+    if (extract_u64_field(metadata_json, "session_count", u)) {
+        result.aggregate_metrics.session_count =
+            std::max(result.aggregate_metrics.session_count, u);
+    }
+
+    if (extract_u64_field(metadata_json, "session_kv_cache_bytes", u)) {
+        result.aggregate_metrics.session_kv_cache_bytes =
+            std::max(result.aggregate_metrics.session_kv_cache_bytes, u);
+    }
 }
     
 std::string make_request_id() {
-    return "gateway-loop-native-routing-request";
+    static std::atomic<std::uint64_t> counter{0};
+
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    const auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
+
+    return
+        "gateway-loop-native-routing-request-" +
+        std::to_string(static_cast<long long>(nanos)) +
+        "-" +
+        std::to_string(++counter);
 }
+
 
 double elapsed_ms(
     const std::chrono::steady_clock::time_point& start,
@@ -183,15 +306,21 @@ std::string request_metadata_json(
     const std::string& dtype,
     const std::vector<std::int64_t>& shape,
     const std::string& activation_precision,
-    bool persistent_sessions_enabled
+    bool persistent_sessions_enabled,
+    int min_new_tokens,
+    bool apply_chat_template
 ) {
     std::ostringstream out;
+
+    const std::int64_t sequence_length =
+        shape.size() >= 2 ? shape[1] : 0;
 
     out
         << "{"
         << "\"request_id\":\"" << dli::common::json_escape(request_id) << "\","
         << "\"token_index\":" << token_index << ","
         << "\"generation_mode\":\"" << dli::common::json_escape(generation_mode) << "\","
+        << "\"sequence_length\":" << sequence_length << ","
         << "\"tensor\":{"
         << "\"dtype\":\"" << dli::common::json_escape(dtype) << "\","
         << "\"shape\":" << shape_json(shape) << ","
@@ -201,17 +330,20 @@ std::string request_metadata_json(
         << "\"kv_cache_enabled\":true,"
         << "\"transport_mode\":\"binary_octet_stream\","
         << "\"activation_precision\":\"" << dli::common::json_escape(activation_precision) << "\","
-        << "\"persistent_sessions_enabled\":" << (persistent_sessions_enabled ? "true" : "false")
+        << "\"persistent_sessions_enabled\":" << (persistent_sessions_enabled ? "true" : "false") << ","
+        << "\"apply_chat_template\":" << (apply_chat_template ? "true" : "false")
         << "},"
         << "\"sampling\":{"
         << "\"temperature\":0.0,"
         << "\"top_k\":1,"
-        << "\"top_p\":null"
+        << "\"top_p\":null,"
+        << "\"min_new_tokens\":" << min_new_tokens
         << "}"
         << "}";
 
     return out.str();
 }
+
 
 bool is_terminal_partition(const PartitionNodeConfig& partition) {
     return partition.next_stage_url.empty() || partition.components.lm_head;
@@ -261,9 +393,19 @@ GenerationStepTrace make_step_trace(
     trace.stage_http_elapsed_ms = stage_result.elapsed_ms;
     trace.stage_metadata_json = stage_result.response_frame.metadata_json;
     trace.stage_tensor_bytes = stage_result.response_frame.tensor_bytes.size();
+    trace.request_body_bytes = stage_result.request_body_bytes;
+    trace.response_body_bytes = stage_result.response_body_bytes;
+    trace.transport_payload_bytes = stage_result.transport_payload_bytes;
     trace.error_body = stage_result.error_body;
+
+    double compute_ms = 0.0;
+    if (extract_number_field(trace.stage_metadata_json, "compute_time_ms", compute_ms)) {
+        trace.estimated_true_comm_ms = std::max(0.0, trace.stage_http_elapsed_ms - compute_ms);
+    }
+
     return trace;
 }
+
 
 int next_token_id_from_terminal_response(
     const StageClientResult& stage_result
@@ -330,6 +472,13 @@ StageClientResult forward_through_partition_graph(
 
         aggregate_stage_metrics(result, current_frame.metadata_json);
         result.aggregate_metrics.rpc_wall_ms += last_result.elapsed_ms;
+        result.aggregate_metrics.transport_payload_bytes += last_result.transport_payload_bytes;
+
+        double stage_compute_ms = 0.0;
+        if (extract_number_field(current_frame.metadata_json, "compute_time_ms", stage_compute_ms)) {
+            result.aggregate_metrics.true_comm_ms +=
+                std::max(0.0, last_result.elapsed_ms - stage_compute_ms);
+        }
 
         if (is_terminal_partition(partition)) {
             return last_result;
@@ -353,6 +502,10 @@ std::string step_json(const GenerationStepTrace& step) {
         << "\"stage_http_elapsed_ms\":" << step.stage_http_elapsed_ms << ","
         << "\"stage_metadata\":\"" << dli::common::json_escape(step.stage_metadata_json) << "\","
         << "\"stage_tensor_bytes\":" << step.stage_tensor_bytes << ","
+        << "\"request_body_bytes\":" << step.request_body_bytes << ","
+        << "\"response_body_bytes\":" << step.response_body_bytes << ","
+        << "\"transport_payload_bytes\":" << step.transport_payload_bytes << ","
+        << "\"estimated_true_comm_ms\":" << step.estimated_true_comm_ms << ","
         << "\"error_body\":\"" << dli::common::json_escape(step.error_body) << "\""
         << "}";
 
@@ -380,7 +533,10 @@ GenerationLoopResult GenerationLoop::run_stub_generation(
     result.tokenizer_backend = tokenizer_.backend_name();
 
     try {
-        const TokenizedPrompt tokenized = tokenizer_.tokenize(prompt);
+        const std::string prompt_for_model =
+            format_prompt_for_generation(prompt, config_.apply_chat_template);
+
+        const TokenizedPrompt tokenized = tokenizer_.tokenize(prompt_for_model);
         result.prompt_token_ids = tokenized.token_ids;
 
         const int decode_steps = std::max(0, max_new_tokens);
@@ -395,19 +551,21 @@ GenerationLoopResult GenerationLoop::run_stub_generation(
             "int64",
             {1, static_cast<std::int64_t>(tokenized.token_ids.size())},
             config_.activation_precision,
-            config_.persistent_sessions_enabled
+            config_.persistent_sessions_enabled,
+            config_.min_new_tokens,
+            config_.apply_chat_template
         );
         prefill.tensor_bytes = int64_tokens_to_bytes(tokenized.token_ids);
 
         StageClientResult terminal_prefill_response =
-        forward_through_partition_graph(
-            config_,
-            client,
-            prefill,
-            0,
-            "prefill",
-            result
-        );
+            forward_through_partition_graph(
+                config_,
+                client,
+                prefill,
+                0,
+                "prefill",
+                result
+            );
 
         int last_token_id =
             tokenized.token_ids.empty()
@@ -415,6 +573,18 @@ GenerationLoopResult GenerationLoop::run_stub_generation(
                 : static_cast<int>(tokenized.token_ids.back());
 
         int decode_start = 0;
+        result.termination_reason = "max_new_tokens";
+
+        auto should_stop_after = [&](int token_id) -> bool {
+            if (static_cast<int>(result.generated_token_ids.size()) < config_.min_new_tokens) {
+                return false;
+            }
+
+            const std::string token_text =
+                tokenizer_.detokenize(std::vector<int>{token_id});
+
+            return token_text_is_stop_marker(token_text);
+        };
 
         if (decode_steps > 0) {
             const int first_generated_token =
@@ -423,6 +593,11 @@ GenerationLoopResult GenerationLoop::run_stub_generation(
             result.generated_token_ids.push_back(first_generated_token);
             last_token_id = first_generated_token;
             decode_start = 1;
+
+            if (should_stop_after(first_generated_token)) {
+                result.termination_reason = "stop_marker";
+                decode_start = decode_steps;
+            }
         }
 
         for (int i = decode_start; i < decode_steps; ++i) {
@@ -435,7 +610,9 @@ GenerationLoopResult GenerationLoop::run_stub_generation(
                 "int64",
                 {1, 1},
                 config_.activation_precision,
-                config_.persistent_sessions_enabled
+                config_.persistent_sessions_enabled,
+                config_.min_new_tokens,
+                config_.apply_chat_template
             );
 
             decode.tensor_bytes = int64_tokens_to_bytes(
@@ -457,11 +634,17 @@ GenerationLoopResult GenerationLoop::run_stub_generation(
 
             result.generated_token_ids.push_back(next_token_id);
             last_token_id = next_token_id;
+
+            if (should_stop_after(next_token_id)) {
+                result.termination_reason = "stop_marker";
+                break;
+            }
         }
 
-        result.generated_text = tokenizer_.detokenize(result.generated_token_ids);
+        result.generated_text = cleanup_generated_text(
+            tokenizer_.detokenize(result.generated_token_ids)
+        );
         result.generated_token_count = static_cast<int>(result.generated_token_ids.size());
-        result.termination_reason = "terminal_next_token";
     } catch (const std::exception& exc) {
         result.ok = false;
         result.error = exc.what();
@@ -480,6 +663,7 @@ GenerationLoopResult GenerationLoop::run_stub_generation(
 
     return result;
 }
+
 
 std::string generation_loop_result_json(
     const GenerationLoopResult& result,
@@ -509,9 +693,17 @@ std::string generation_loop_result_json(
         << "\"true_comm_ms\":" << result.aggregate_metrics.true_comm_ms << ","
         << "\"tensor_bytes_in\":" << result.aggregate_metrics.tensor_bytes_in << ","
         << "\"tensor_bytes_out\":" << result.aggregate_metrics.tensor_bytes_out << ","
+        << "\"transport_payload_bytes\":" << result.aggregate_metrics.transport_payload_bytes << ","
+        << "\"transport_payload_mebibytes\":" << (static_cast<double>(result.aggregate_metrics.transport_payload_bytes) / (1024.0 * 1024.0)) << ","
         << "\"model_load_ms\":" << result.aggregate_metrics.model_load_ms << ","
         << "\"kv_cache_bytes\":" << result.aggregate_metrics.kv_cache_bytes << ","
-        << "\"memory_rss_mb\":" << result.aggregate_metrics.memory_rss_mb
+        << "\"memory_rss_mb\":" << result.aggregate_metrics.memory_rss_mb << ","
+        << "\"memory_cgroup_current_mb\":" << result.aggregate_metrics.memory_cgroup_current_mb << ","
+        << "\"memory_cgroup_limit_mb\":" << result.aggregate_metrics.memory_cgroup_limit_mb << ","
+        << "\"memory_cgroup_percent\":" << result.aggregate_metrics.memory_cgroup_percent << ","
+        << "\"model_file_size_mb\":" << result.aggregate_metrics.model_file_size_mb << ","
+        << "\"session_count\":" << result.aggregate_metrics.session_count << ","
+        << "\"session_kv_cache_bytes\":" << result.aggregate_metrics.session_kv_cache_bytes
         << "},"
         << "\"termination_reason\":\"" << dli::common::json_escape(result.termination_reason) << "\","
         << "\"error\":\"" << dli::common::json_escape(result.error) << "\","
