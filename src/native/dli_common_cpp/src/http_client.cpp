@@ -398,4 +398,71 @@ HttpClientResponse http_post_binary(
     }
 }
 
+
+
+PersistentHttpClient::PersistentHttpClient(std::string url, int timeout_seconds)
+    : parsed_(parse_http_url(url)),
+      timeout_seconds_(timeout_seconds) {}
+
+PersistentHttpClient::~PersistentHttpClient() {
+    close_connection();
+}
+
+void PersistentHttpClient::close_connection() {
+    if (fd_ >= 0) {
+        close_fd(fd_);
+        fd_ = -1;
+    }
+}
+
+void PersistentHttpClient::ensure_connected() {
+    if (fd_ >= 0) {
+        return;
+    }
+    fd_ = connect_tcp(parsed_, timeout_seconds_);
+}
+
+HttpClientResponse PersistentHttpClient::post_binary_once(
+    const std::vector<std::uint8_t>& body
+) {
+    ensure_connected();
+
+    std::ostringstream request_header;
+    request_header << "POST " << parsed_.path << " HTTP/1.1\r\n";
+    request_header << "Host: " << parsed_.host << ":" << parsed_.port << "\r\n";
+    request_header << "Content-Type: application/octet-stream\r\n";
+    request_header << "Content-Length: " << body.size() << "\r\n";
+    request_header << "Connection: keep-alive\r\n";
+    request_header << "\r\n";
+
+    const std::string header_text = request_header.str();
+
+    if (!send_all(fd_, header_text)) {
+        throw std::runtime_error("failed to send HTTP keep-alive request header");
+    }
+
+    if (!body.empty() && !send_all(fd_, body.data(), body.size())) {
+        throw std::runtime_error("failed to send HTTP keep-alive request body");
+    }
+
+    HttpClientResponse response = read_http_response(fd_);
+    const auto it = response.headers.find("connection");
+    if (it != response.headers.end() && lower_copy(trim_copy(it->second)) == "close") {
+        close_connection();
+    }
+    return response;
+}
+
+HttpClientResponse PersistentHttpClient::post_binary(
+    const std::vector<std::uint8_t>& body
+) {
+    try {
+        return post_binary_once(body);
+    } catch (...) {
+        close_connection();
+    }
+
+    return post_binary_once(body);
+}
+
 } // namespace dli::common

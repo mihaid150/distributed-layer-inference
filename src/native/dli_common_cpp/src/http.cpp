@@ -240,12 +240,26 @@ HttpRequest read_http_request(int fd) {
     }
 }
 
+
+
+bool request_wants_keep_alive(const HttpRequest& request) {
+    const auto it = request.headers.find("connection");
+    if (it == request.headers.end()) {
+        return true;
+    }
+
+    const std::string value = lower_copy(trim_copy(it->second));
+    return value != "close";
+}
+
 void send_http_response(int fd, const HttpResponse& response) {
     std::ostringstream header;
     header << "HTTP/1.1 " << response.status_code << " " << response.reason << "\r\n";
     header << "Content-Type: " << response.content_type << "\r\n";
     header << "Content-Length: " << response.body.size() << "\r\n";
-    header << "Connection: close\r\n";
+    header << "Connection: "
+           << (response.keep_alive ? "keep-alive" : "close")
+           << "\r\n";
     header << "\r\n";
 
     const std::string header_text = header.str();

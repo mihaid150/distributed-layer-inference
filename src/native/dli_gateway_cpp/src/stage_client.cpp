@@ -58,6 +58,20 @@ std::string build_stub_metadata_json(const StageForwardStubRequest& request) {
 StageClient::StageClient(std::string first_stage_url)
     : first_stage_url_(std::move(first_stage_url)) {}
 
+dli::common::PersistentHttpClient& StageClient::client_for_url(
+    const std::string& stage_url
+) const {
+    std::lock_guard<std::mutex> lock(clients_mutex_);
+    auto it = clients_.find(stage_url);
+    if (it == clients_.end()) {
+        it = clients_.emplace(
+            stage_url,
+            std::make_unique<dli::common::PersistentHttpClient>(stage_url)
+        ).first;
+    }
+    return *it->second;
+}
+
 StageClientResult StageClient::forward_frame(
     const std::string& stage_url,
     const dli::common::DliFrame& frame
@@ -67,7 +81,7 @@ StageClientResult StageClient::forward_frame(
 
     const auto start = std::chrono::steady_clock::now();
     const dli::common::HttpClientResponse http_response =
-        dli::common::http_post_binary(stage_url, request_body);
+        client_for_url(stage_url).post_binary(request_body);
     const auto end = std::chrono::steady_clock::now();
 
     StageClientResult result;

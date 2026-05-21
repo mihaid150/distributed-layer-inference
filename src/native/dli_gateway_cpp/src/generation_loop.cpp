@@ -102,6 +102,11 @@ bool token_text_is_stop_marker(const std::string& token_text) {
     return contains_generation_control_marker(token_text);
 }
 
+
+bool metadata_level_is_compact(const std::string& metadata_level) {
+    return metadata_level == "compact" || metadata_level == "minimal";
+}
+
 bool extract_number_field(
     const std::string& json,
     const std::string& key,
@@ -150,15 +155,38 @@ void aggregate_stage_metrics(
     double d = 0.0;
     std::uint64_t u = 0;
 
-    if (extract_number_field(metadata_json, "compute_time_ms", d)) {
+    bool has_chain_compute = false;
+    bool has_chain_rpc = false;
+    bool has_chain_true_comm = false;
+
+    if (extract_number_field(metadata_json, "chain_compute_time_ms", d)) {
+        result.aggregate_metrics.compute_ms += d;
+        has_chain_compute = true;
+    }
+
+    if (extract_number_field(metadata_json, "chain_rpc_wall_time_ms", d)) {
+        result.aggregate_metrics.rpc_wall_ms += d;
+        has_chain_rpc = true;
+    }
+
+    if (extract_number_field(metadata_json, "chain_true_comm_ms", d)) {
+        result.aggregate_metrics.true_comm_ms += d;
+        has_chain_true_comm = true;
+    }
+
+    if (extract_u64_field(metadata_json, "chain_transport_payload_bytes", u)) {
+        result.aggregate_metrics.transport_payload_bytes += u;
+    }
+
+    if (!has_chain_compute && extract_number_field(metadata_json, "compute_time_ms", d)) {
         result.aggregate_metrics.compute_ms += d;
     }
 
-    if (extract_number_field(metadata_json, "rpc_wall_time_ms", d)) {
+    if (!has_chain_rpc && extract_number_field(metadata_json, "rpc_wall_time_ms", d)) {
         result.aggregate_metrics.rpc_wall_ms += d;
     }
 
-    if (extract_number_field(metadata_json, "true_comm_ms", d)) {
+    if (!has_chain_true_comm && extract_number_field(metadata_json, "true_comm_ms", d)) {
         result.aggregate_metrics.true_comm_ms += d;
     }
 
@@ -307,13 +335,33 @@ std::string request_metadata_json(
     const std::vector<std::int64_t>& shape,
     const std::string& activation_precision,
     bool persistent_sessions_enabled,
+    bool native_stage_chaining_enabled,
     int min_new_tokens,
-    bool apply_chat_template
+    bool apply_chat_template,
+    const std::string& metadata_level
 ) {
     std::ostringstream out;
 
     const std::int64_t sequence_length =
         shape.size() >= 2 ? shape[1] : 0;
+
+    if (metadata_level_is_compact(metadata_level)) {
+        out
+            << "{"
+            << "\"rid\":\"" << dli::common::json_escape(request_id) << "\","
+            << "\"ti\":" << token_index << ","
+            << "\"gm\":\"" << dli::common::json_escape(generation_mode) << "\","
+            << "\"dt\":\"" << dli::common::json_escape(dtype) << "\","
+            << "\"sh\":" << shape_json(shape) << ","
+            << "\"bo\":\"little\","
+            << "\"ap\":\"" << dli::common::json_escape(activation_precision) << "\","
+            << "\"kv\":true,"
+            << "\"ps\":" << (persistent_sessions_enabled ? "true" : "false") << ","
+            << "\"nsc\":" << (native_stage_chaining_enabled ? "true" : "false") << ","
+            << "\"m\":" << min_new_tokens
+            << "}";
+        return out.str();
+    }
 
     out
         << "{"
@@ -331,6 +379,8 @@ std::string request_metadata_json(
         << "\"transport_mode\":\"binary_octet_stream\","
         << "\"activation_precision\":\"" << dli::common::json_escape(activation_precision) << "\","
         << "\"persistent_sessions_enabled\":" << (persistent_sessions_enabled ? "true" : "false") << ","
+        << "\"native_stage_chaining_enabled\":" << (native_stage_chaining_enabled ? "true" : "false") << ","
+        << "\"metadata_level\":\"" << dli::common::json_escape(metadata_level) << "\","
         << "\"apply_chat_template\":" << (apply_chat_template ? "true" : "false")
         << "},"
         << "\"sampling\":{"
@@ -436,6 +486,36 @@ StageClientResult forward_through_partition_graph(
 ) {
     if (config.partitions.empty()) {
         throw std::runtime_error("gateway partition graph is empty");
+    }
+
+
+    if (config.native_stage_chaining_enabled) {
+        const PartitionNodeConfig& first_partition = config.partitions.front();
+        const std::string stage_url = config.first_stage_url;
+
+        StageClientResult stage_result = client.forward_frame(stage_url, input_frame);
+
+        result.steps.push_back(
+            make_step_trace(
+                token_index,
+                generation_mode,
+                first_partition,
+                stage_url,
+                stage_result
+            )
+        );
+
+        if (stage_result.http_status < 200 || stage_result.http_status >= 300) {
+            throw std::runtime_error(
+                "native chained stage call failed with HTTP " +
+                std::to_string(stage_result.http_status) +
+                ": " +
+                stage_result.error_body
+            );
+        }
+
+        aggregate_stage_metrics(result, stage_result.response_frame.metadata_json);
+        return stage_result;
     }
 
     dli::common::DliFrame current_frame = input_frame;
@@ -552,8 +632,10 @@ GenerationLoopResult GenerationLoop::run_stub_generation(
             {1, static_cast<std::int64_t>(tokenized.token_ids.size())},
             config_.activation_precision,
             config_.persistent_sessions_enabled,
+            config_.native_stage_chaining_enabled,
             config_.min_new_tokens,
-            config_.apply_chat_template
+            config_.apply_chat_template,
+            config_.metadata_level
         );
         prefill.tensor_bytes = int64_tokens_to_bytes(tokenized.token_ids);
 
@@ -611,8 +693,10 @@ GenerationLoopResult GenerationLoop::run_stub_generation(
                 {1, 1},
                 config_.activation_precision,
                 config_.persistent_sessions_enabled,
+                config_.native_stage_chaining_enabled,
                 config_.min_new_tokens,
-                config_.apply_chat_template
+                config_.apply_chat_template,
+                config_.metadata_level
             );
 
             decode.tensor_bytes = int64_tokens_to_bytes(

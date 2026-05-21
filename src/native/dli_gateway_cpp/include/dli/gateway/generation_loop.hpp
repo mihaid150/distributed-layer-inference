@@ -21,7 +21,9 @@ struct GenerationLoopConfig {
     std::vector<PartitionNodeConfig> partitions;
 
     bool persistent_sessions_enabled = false;
+    bool native_stage_chaining_enabled = false;
     std::string activation_precision = "fp32";
+    std::string metadata_level = "debug";
 };
 
 struct GenerationStepTrace {

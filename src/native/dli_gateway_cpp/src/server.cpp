@@ -8,6 +8,9 @@
 #include "dli/common/partition_tensor_assignment.hpp"
 
 #include <cerrno>
+#include <thread>
+#include <mutex>
+#include <functional>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -302,6 +305,12 @@ std::string generate_loop_json(
     const bool feature_persistent_sessions_enabled =
         parse_bool_field_or_default(body_text, "persistent_sessions_enabled", false);
 
+    const bool native_stage_chaining_enabled =
+        parse_bool_field_or_default(body_text, "native_stage_chaining_enabled", false);
+
+    const std::string metadata_level =
+        parse_string_field_or_default(body_text, "metadata_level", "debug");
+
     std::string prompt;
     if (const auto parsed_prompt = parse_string_field(body_text, "prompt")) {
         prompt = *parsed_prompt;
@@ -316,6 +325,8 @@ std::string generate_loop_json(
     loop_config.partitions = config.partitions;
     loop_config.activation_precision = feature_activation_precision;
     loop_config.persistent_sessions_enabled = feature_persistent_sessions_enabled;
+    loop_config.native_stage_chaining_enabled = native_stage_chaining_enabled;
+    loop_config.metadata_level = metadata_level;
 
     GenerationLoop loop(loop_config, tokenizer);
 
@@ -341,7 +352,8 @@ std::string not_found_json(const dli::common::HttpRequest& request) {
 dli::common::HttpResponse handle_request(
     const dli::common::HttpRequest& request,
     const GatewayConfig& config,
-    const Tokenizer& tokenizer
+    const Tokenizer& tokenizer,
+    std::mutex& generation_mutex
 ){
     if (request.method == "GET" && request.path == "/health") {
         return dli::common::make_json_response(
@@ -361,6 +373,7 @@ dli::common::HttpResponse handle_request(
 
     if (request.method == "POST" && request.path == "/generate") {
         try {
+            std::lock_guard<std::mutex> lock(generation_mutex);
             const std::string response_json =
                 generate_loop_json(request, config, tokenizer);
 
@@ -399,6 +412,52 @@ void close_fd(int fd) {
         }
     }
 }
+
+void handle_gateway_client_connection(
+    int client_fd,
+    const GatewayConfig& config,
+    const Tokenizer& tokenizer,
+    std::mutex& generation_mutex,
+    std::atomic<bool>& stop_requested
+) {
+    while (!stop_requested.load()) {
+        try {
+            const dli::common::HttpRequest request =
+                dli::common::read_http_request(client_fd);
+
+            dli::common::HttpResponse response =
+                handle_request(request, config, tokenizer, generation_mutex);
+            response.keep_alive = dli::common::request_wants_keep_alive(request);
+            dli::common::send_http_response(client_fd, response);
+            if (!response.keep_alive) {
+                break;
+            }
+        } catch (const std::exception& exc) {
+            dli::common::HttpResponse response =
+                dli::common::make_json_response(
+                    400,
+                    "Bad Request",
+                    dli::common::http_error_json(exc.what())
+                );
+            response.keep_alive = false;
+            dli::common::send_http_response(client_fd, response);
+            break;
+        } catch (...) {
+            dli::common::HttpResponse response =
+                dli::common::make_json_response(
+                    400,
+                    "Bad Request",
+                    dli::common::http_error_json("unknown gateway connection failure")
+                );
+            response.keep_alive = false;
+            dli::common::send_http_response(client_fd, response);
+            break;
+        }
+    }
+
+    close_fd(client_fd);
+}
+
 
 } // namespace
 
@@ -452,6 +511,8 @@ int GatewayServer::run() {
 
     std::cerr << "[dli-gateway-cpp] listening on 0.0.0.0:" << config_.port << "\n";
 
+    std::mutex generation_mutex;
+
     while (!stop_requested_.load()) {
         sockaddr_in client_address{};
         socklen_t client_len = sizeof(client_address);
@@ -471,26 +532,14 @@ int GatewayServer::run() {
             continue;
         }
 
-        try {
-            const dli::common::HttpRequest request =
-                dli::common::read_http_request(client_fd);
-
-            const dli::common::HttpResponse response = 
-                handle_request(request, config_, *tokenizer_);
-
-            dli::common::send_http_response(client_fd, response);
-        } catch (const std::exception& exc) {
-            const dli::common::HttpResponse response =
-                dli::common::make_json_response(
-                    400,
-                    "Bad Request",
-                    dli::common::http_error_json(exc.what())
-                );
-
-            dli::common::send_http_response(client_fd, response);
-        }
-
-        close_fd(client_fd);
+        std::thread(
+            handle_gateway_client_connection,
+            client_fd,
+            std::cref(config_),
+            std::cref(*tokenizer_),
+            std::ref(generation_mutex),
+            std::ref(stop_requested_)
+        ).detach();
     }
 
     close_fd(server_fd);

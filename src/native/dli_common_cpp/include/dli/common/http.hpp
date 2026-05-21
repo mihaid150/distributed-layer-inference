@@ -19,9 +19,12 @@ struct HttpResponse {
     std::string reason = "OK";
     std::string content_type = "application/json";
     std::vector<std::uint8_t> body;
+    bool keep_alive = false;
 };
 
 HttpRequest read_http_request(int fd);
+
+bool request_wants_keep_alive(const HttpRequest& request);
 
 void send_http_response(int fd, const HttpResponse& response);
 

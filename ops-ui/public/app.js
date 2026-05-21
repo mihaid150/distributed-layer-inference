@@ -1474,15 +1474,33 @@ function buildInvokeAlerts({
   transferComputeRatio,
   maxProcessCpu,
   maxMemoryMb,
+  maxCgroupPercent = 0,
+  maxSessionCount = 0,
   runtime
 }) {
   const alerts = [];
+
   if (Number(transferP95Ms || 0) > ALERT_THRESHOLDS.transferP95Ms) {
     alerts.push({
       level: "warn",
       message: `RPC wall p95 is high (${formatNumber(transferP95Ms, 1)} ms). Blocking stage waits dominate token latency.`
     });
   }
+
+  if (Number(maxCgroupPercent || 0) >= 85) {
+    alerts.push({
+      level: "warn",
+      message: `Container memory pressure: cgroup memory reached ${formatNumber(maxCgroupPercent, 1)}%.`
+    });
+  }
+
+  if (Number(maxSessionCount || 0) > 4) {
+    alerts.push({
+      level: "warn",
+      message: `Native stage retained ${Math.round(maxSessionCount)} sessions. Check request cleanup/session pruning.`
+    });
+  }
+
   if (Number(transferComputeRatio || 0) > ALERT_THRESHOLDS.transferComputeRatio) {
     alerts.push({
       level: "warn",
@@ -1492,18 +1510,21 @@ function buildInvokeAlerts({
       )} is above target (${ALERT_THRESHOLDS.transferComputeRatio}).`
     });
   }
+
   if (Number(maxProcessCpu || 0) >= ALERT_THRESHOLDS.processCpuPct) {
     alerts.push({
       level: "err",
       message: `Node CPU saturation detected (max process CPU ${formatNumber(maxProcessCpu, 1)}%).`
     });
   }
+
   if (Number(maxMemoryMb || 0) >= ALERT_THRESHOLDS.memoryMb) {
     alerts.push({
       level: "warn",
       message: `Memory cliff risk: peak process memory ${formatNumber(maxMemoryMb, 1)} MB.`
     });
   }
+
   const inFlight = Number(asObject(runtime).inFlight || 0);
   const dropped = Number(asObject(runtime).droppedInFlight || 0);
   if (inFlight > 0) {
@@ -1518,6 +1539,7 @@ function buildInvokeAlerts({
       message: `Dropped requests due to busy pipeline: ${dropped}.`
     });
   }
+
   return alerts;
 }
 
@@ -1729,6 +1751,18 @@ function metricNetworkDeltaBytes(metric) {
 
 function metricPayloadBytes(metric) {
   const m = asObject(metric);
+
+  const transportPayloadBytes = toFiniteNumber(m.transport_payload_bytes);
+  if (transportPayloadBytes != null) {
+    return transportPayloadBytes;
+  }
+
+  const requestBodyBytes = toFiniteNumber(m.request_body_bytes);
+  const responseBodyBytes = toFiniteNumber(m.response_body_bytes);
+  if (requestBodyBytes != null || responseBodyBytes != null) {
+    return Number(requestBodyBytes || 0) + Number(responseBodyBytes || 0);
+  }
+
   const tensorWireBytes = toFiniteNumber(m.tensor_wire_bytes);
   if (tensorWireBytes != null) {
     return tensorWireBytes;
@@ -1758,6 +1792,7 @@ function metricPayloadBytes(metric) {
     "outbound_payload_b64_bytes",
     "inbound_payload_b64_bytes"
   ];
+
   let total = 0;
   for (const key of keys) {
     const value = toFiniteNumber(m[key]);
@@ -1787,11 +1822,30 @@ function nativeStepToStageMetric(step) {
   const metrics = asObject(metadata.metrics);
   const stageId = Number(metadata.stage_id ?? s.stage_id ?? 0);
   const serviceName = String(metadata.service || metadata.service_name || `native-stage-${stageId}`);
+
   const inputTensorBytes = Number(metrics.input_tensor_bytes || 0);
   const outputTensorBytes = Number(metrics.output_tensor_bytes ?? s.stage_tensor_bytes ?? 0);
+
+  const requestBodyBytes = Number(s.request_body_bytes || 0);
+  const responseBodyBytes = Number(s.response_body_bytes || 0);
+  const explicitTransportPayloadBytes = Number(s.transport_payload_bytes || 0);
+  const transportPayloadBytes =
+    explicitTransportPayloadBytes > 0
+      ? explicitTransportPayloadBytes
+      : requestBodyBytes + responseBodyBytes > 0
+      ? requestBodyBytes + responseBodyBytes
+      : inputTensorBytes + outputTensorBytes;
+
   const stageHttpElapsedMs = Number(s.stage_http_elapsed_ms || 0);
   const rpcWallMs = Number(metrics.rpc_wall_time_ms || stageHttpElapsedMs || 0);
-  const trueCommMs = Number(metrics.true_comm_ms || 0);
+  const trueCommMs = Number(metrics.true_comm_ms || s.estimated_true_comm_ms || 0);
+
+  const cgroupCurrentMb = Number(metrics.memory_cgroup_current_mb || 0);
+  const cgroupLimitMb = Number(metrics.memory_cgroup_limit_mb || 0);
+  const cgroupPercent = Number(metrics.memory_cgroup_percent || 0);
+  const sessionCount = Number(metrics.session_count || 0);
+  const sessionKvCacheBytes = Number(metrics.session_kv_cache_bytes || 0);
+  const modelFileSizeMb = Number(metrics.model_file_size_mb || 0);
 
   return {
     timestamp_ms: 0,
@@ -1807,22 +1861,43 @@ function nativeStepToStageMetric(step) {
     stage_http_status: Number(s.stage_http_status || 0),
     stage_http_reason: String(s.stage_http_reason || ""),
     stage_http_elapsed_ms: stageHttpElapsedMs,
+
     compute_time_ms: Number(metrics.compute_time_ms || 0),
     rpc_wall_time_ms: rpcWallMs,
     transfer_time_ms: rpcWallMs,
     true_comm_ms: trueCommMs,
+    estimated_true_comm_ms: Number(s.estimated_true_comm_ms || 0),
+
     input_tensor_bytes: inputTensorBytes,
     output_tensor_bytes: outputTensorBytes,
-    request_wire_bytes: inputTensorBytes,
-    response_wire_bytes: outputTensorBytes,
-    tensor_wire_bytes: inputTensorBytes + outputTensorBytes,
+
+    request_body_bytes: requestBodyBytes,
+    response_body_bytes: responseBodyBytes,
+    transport_payload_bytes: transportPayloadBytes,
+    transport_payload_mib: transportPayloadBytes / (1024 * 1024),
+
+    request_wire_bytes: requestBodyBytes,
+    response_wire_bytes: responseBodyBytes,
+    tensor_wire_bytes: transportPayloadBytes,
+
     process_memory_mb: Number(metrics.memory_rss_mb || 0),
     memory_rss_mb: Number(metrics.memory_rss_mb || 0),
+    memory_cgroup_current_mb: cgroupCurrentMb,
+    memory_cgroup_limit_mb: cgroupLimitMb,
+    memory_cgroup_percent: cgroupPercent,
+
     model_load_ms: Number(metrics.model_load_ms || 0),
+    model_file_size_mb: modelFileSizeMb,
+
     kv_cache_bytes: Number(metrics.kv_cache_bytes || 0),
     kv_cache_seq_before: Number(metrics.kv_cache_seq_before || 0),
     kv_cache_seq_after: Number(metrics.kv_cache_seq_after || 0),
     kv_cache_valid: Boolean(metrics.kv_cache_valid),
+
+    session_count: sessionCount,
+    session_kv_cache_bytes: sessionKvCacheBytes,
+    session_kv_cache_mib: sessionKvCacheBytes / (1024 * 1024),
+
     native_stage_metadata: metadata
   };
 }
@@ -1883,13 +1958,53 @@ function normalizeNativeResponseMetrics(responseJson, callMeta = {}) {
       stageSamples.reduce((sum, sample) => sum + Number(sample.true_comm_ms || 0), 0)
   );
   const payloadBytes = Number(
-    (aggregateMetrics.tensor_bytes_in || 0) +
-      (aggregateMetrics.tensor_bytes_out || 0) ||
+    aggregateMetrics.transport_payload_bytes ||
+      aggregateMetrics.payload_bytes_sum ||
+      ((aggregateMetrics.tensor_bytes_in || 0) + (aggregateMetrics.tensor_bytes_out || 0)) ||
       stageSamples.reduce((sum, sample) => sum + metricPayloadBytes(sample), 0)
   );
   const maxMemoryMb = Number(
     aggregateMetrics.memory_rss_mb ||
       stageSamples.reduce((max, sample) => Math.max(max, Number(sample.process_memory_mb || 0)), 0)
+  );
+  const maxCgroupMemMb = Number(
+    aggregateMetrics.memory_cgroup_current_mb ||
+      stageSamples.reduce(
+        (max, sample) => Math.max(max, Number(sample.memory_cgroup_current_mb || 0)),
+        0
+      )
+  );
+  const maxCgroupLimitMb = Number(
+    aggregateMetrics.memory_cgroup_limit_mb ||
+      stageSamples.reduce(
+        (max, sample) => Math.max(max, Number(sample.memory_cgroup_limit_mb || 0)),
+        0
+      )
+  );
+  const maxCgroupPercent = Number(
+    aggregateMetrics.memory_cgroup_percent ||
+      stageSamples.reduce(
+        (max, sample) => Math.max(max, Number(sample.memory_cgroup_percent || 0)),
+        0
+      )
+  );
+  const maxSessionCount = Number(
+    aggregateMetrics.session_count ||
+      stageSamples.reduce((max, sample) => Math.max(max, Number(sample.session_count || 0)), 0)
+  );
+  const maxSessionKvCacheBytes = Number(
+    aggregateMetrics.session_kv_cache_bytes ||
+      stageSamples.reduce(
+        (max, sample) => Math.max(max, Number(sample.session_kv_cache_bytes || 0)),
+        0
+      )
+  );
+  const maxModelFileSizeMb = Number(
+    aggregateMetrics.model_file_size_mb ||
+      stageSamples.reduce(
+        (max, sample) => Math.max(max, Number(sample.model_file_size_mb || 0)),
+        0
+      )
   );
 
   return {
@@ -1912,7 +2027,13 @@ function normalizeNativeResponseMetrics(responseJson, callMeta = {}) {
         payload_mebibytes_sum: payloadBytes / (1024 * 1024),
         network_delta_bytes_sum: 0,
         network_delta_mebibytes_sum: 0,
-        max_process_memory_mb: maxMemoryMb
+        max_process_memory_mb: maxMemoryMb,
+        max_cgroup_memory_mb: maxCgroupMemMb,
+        max_cgroup_memory_limit_mb: maxCgroupLimitMb,
+        max_cgroup_memory_percent: maxCgroupPercent,
+        max_session_count: maxSessionCount,
+        max_session_kv_cache_bytes: maxSessionKvCacheBytes,
+        max_model_file_size_mb: maxModelFileSizeMb
       },
       per_stage: {}
     },
@@ -2020,6 +2141,12 @@ function aggregateStageMetrics(stageSamples, perStageSummary) {
       payloadBytes: Number(s.payload_bytes_sum ?? s.payload_b64_bytes_sum ?? 0),
       networkBytes: Number(s.network_delta_bytes_sum || 0),
       maxMemMb: Number(s.max_process_memory_mb || 0),
+      maxCgroupMemMb: Number(s.max_cgroup_memory_mb || s.memory_cgroup_current_mb || 0),
+      maxCgroupLimitMb: Number(s.max_cgroup_memory_limit_mb || s.memory_cgroup_limit_mb || 0),
+      maxCgroupPercent: Number(s.max_cgroup_memory_percent || s.memory_cgroup_percent || 0),
+      maxSessionCount: Number(s.max_session_count || s.session_count || 0),
+      maxSessionKvCacheBytes: Number(s.max_session_kv_cache_bytes || s.session_kv_cache_bytes || 0),
+      maxModelFileSizeMb: Number(s.max_model_file_size_mb || s.model_file_size_mb || 0),
       maxCpuPct: Number(s.max_cpu_percent || 0),
       maxSystemCpuPct: 0,
       maxBandwidthMbps: 0,
@@ -2041,6 +2168,12 @@ function aggregateStageMetrics(stageSamples, perStageSummary) {
       payloadBytes: 0,
       networkBytes: 0,
       maxMemMb: 0,
+      maxCgroupMemMb: 0,
+      maxCgroupLimitMb: 0,
+      maxCgroupPercent: 0,
+      maxSessionCount: 0,
+      maxSessionKvCacheBytes: 0,
+      maxModelFileSizeMb: 0,
       maxCpuPct: 0,
       maxSystemCpuPct: 0,
       maxBandwidthMbps: 0,
@@ -2055,6 +2188,30 @@ function aggregateStageMetrics(stageSamples, perStageSummary) {
     curr.payloadBytes += metricPayloadBytes(sample);
     curr.networkBytes += metricNetworkDeltaBytes(sample);
     curr.maxMemMb = Math.max(curr.maxMemMb, Number(sample.process_memory_mb || 0));
+    curr.maxCgroupMemMb = Math.max(
+      curr.maxCgroupMemMb,
+      Number(sample.memory_cgroup_current_mb || 0)
+    );
+    curr.maxCgroupLimitMb = Math.max(
+      curr.maxCgroupLimitMb,
+      Number(sample.memory_cgroup_limit_mb || 0)
+    );
+    curr.maxCgroupPercent = Math.max(
+      curr.maxCgroupPercent,
+      Number(sample.memory_cgroup_percent || 0)
+    );
+    curr.maxSessionCount = Math.max(
+      curr.maxSessionCount,
+      Number(sample.session_count || 0)
+    );
+    curr.maxSessionKvCacheBytes = Math.max(
+      curr.maxSessionKvCacheBytes,
+      Number(sample.session_kv_cache_bytes || 0)
+    );
+    curr.maxModelFileSizeMb = Math.max(
+      curr.maxModelFileSizeMb,
+      Number(sample.model_file_size_mb || 0)
+    );
     curr.maxCpuPct = Math.max(
       curr.maxCpuPct,
       Number(sample.process_cpu_percent ?? sample.cpu_percent ?? 0)
@@ -2065,11 +2222,7 @@ function aggregateStageMetrics(stageSamples, perStageSummary) {
     );
     curr.maxBandwidthMbps = Math.max(
       curr.maxBandwidthMbps,
-      Number(
-        sample.estimated_link_mbps ??
-          sample.network_delta?.bandwidth_mbps_total ??
-          0
-      )
+      Number(sample.estimated_link_mbps ?? sample.network_delta?.bandwidth_mbps_total ?? 0)
     );
     curr.maxThreads = Math.max(curr.maxThreads, Number(sample.process_threads || 0));
     curr.ctxSwitches += Number(sample.process_context_switches?.voluntary || 0);
@@ -2107,6 +2260,12 @@ function aggregateNodeMetrics(stageSamples, podNodeMap = null) {
       payloadBytes: 0,
       networkBytes: 0,
       maxMemMb: 0,
+      maxCgroupMemMb: 0,
+      maxCgroupLimitMb: 0,
+      maxCgroupPercent: 0,
+      maxSessionCount: 0,
+      maxSessionKvCacheBytes: 0,
+      maxModelFileSizeMb: 0,
       maxCpuPct: 0,
       maxSystemCpuPct: 0,
       maxBandwidthMbps: 0,
@@ -2128,6 +2287,30 @@ function aggregateNodeMetrics(stageSamples, podNodeMap = null) {
     curr.payloadBytes += metricPayloadBytes(sample);
     curr.networkBytes += metricNetworkDeltaBytes(sample);
     curr.maxMemMb = Math.max(curr.maxMemMb, Number(sample.process_memory_mb || 0));
+    curr.maxCgroupMemMb = Math.max(
+      curr.maxCgroupMemMb,
+      Number(sample.memory_cgroup_current_mb || 0)
+    );
+    curr.maxCgroupLimitMb = Math.max(
+      curr.maxCgroupLimitMb,
+      Number(sample.memory_cgroup_limit_mb || 0)
+    );
+    curr.maxCgroupPercent = Math.max(
+      curr.maxCgroupPercent,
+      Number(sample.memory_cgroup_percent || 0)
+    );
+    curr.maxSessionCount = Math.max(
+      curr.maxSessionCount,
+      Number(sample.session_count || 0)
+    );
+    curr.maxSessionKvCacheBytes = Math.max(
+      curr.maxSessionKvCacheBytes,
+      Number(sample.session_kv_cache_bytes || 0)
+    );
+    curr.maxModelFileSizeMb = Math.max(
+      curr.maxModelFileSizeMb,
+      Number(sample.model_file_size_mb || 0)
+    );
     curr.maxCpuPct = Math.max(
       curr.maxCpuPct,
       Number(sample.process_cpu_percent ?? sample.cpu_percent ?? 0)
@@ -2167,14 +2350,27 @@ function summarizeTokenRows(tokenMetrics) {
     let transferMs = 0;
     let trueCommMs = 0;
     let maxMemMb = 0;
+    let maxCgroupMemMb = 0;
+    let maxCgroupPercent = 0;
+    let maxSessionCount = 0;
+    let maxSessionKvCacheBytes = 0;
     let maxCpu = 0;
+
     for (const sample of samples) {
       computeMs += Number(sample.compute_time_ms || 0);
       transferMs += Number(sample.rpc_wall_time_ms ?? sample.transfer_time_ms ?? 0);
       trueCommMs += Number(sample.true_comm_ms || 0);
       maxMemMb = Math.max(maxMemMb, Number(sample.process_memory_mb || 0));
+      maxCgroupMemMb = Math.max(maxCgroupMemMb, Number(sample.memory_cgroup_current_mb || 0));
+      maxCgroupPercent = Math.max(maxCgroupPercent, Number(sample.memory_cgroup_percent || 0));
+      maxSessionCount = Math.max(maxSessionCount, Number(sample.session_count || 0));
+      maxSessionKvCacheBytes = Math.max(
+        maxSessionKvCacheBytes,
+        Number(sample.session_kv_cache_bytes || 0)
+      );
       maxCpu = Math.max(maxCpu, Number(sample.process_cpu_percent ?? sample.cpu_percent ?? 0));
     }
+
     return {
       tokenIndex: Number(tokenStep.token_index || 0),
       tokenId: safeText(tokenStep.token_id),
@@ -2185,6 +2381,10 @@ function summarizeTokenRows(tokenMetrics) {
       transferMs,
       trueCommMs,
       maxMemMb,
+      maxCgroupMemMb,
+      maxCgroupPercent,
+      maxSessionCount,
+      maxSessionKvCacheBytes,
       maxCpu
     };
   });
@@ -2207,6 +2407,22 @@ function buildInvokeRunSummary({
   const transferSumMs = tokenRows.reduce((sum, row) => sum + Number(row.transferMs || 0), 0);
   const trueCommSumMs = tokenRows.reduce((sum, row) => sum + Number(row.trueCommMs || 0), 0);
   const maxMemoryMb = tokenRows.reduce((max, row) => Math.max(max, Number(row.maxMemMb || 0)), 0);
+  const maxCgroupMemMb = tokenRows.reduce(
+    (max, row) => Math.max(max, Number(row.maxCgroupMemMb || 0)),
+    0
+  );
+  const maxCgroupPercent = tokenRows.reduce(
+    (max, row) => Math.max(max, Number(row.maxCgroupPercent || 0)),
+    0
+  );
+  const maxSessionCount = tokenRows.reduce(
+    (max, row) => Math.max(max, Number(row.maxSessionCount || 0)),
+    0
+  );
+  const maxSessionKvCacheBytes = tokenRows.reduce(
+    (max, row) => Math.max(max, Number(row.maxSessionKvCacheBytes || 0)),
+    0
+  );
   const tokenLatencies = tokenRows.map((row) => Number(row.latencyMs || 0));
   const transferLatencies = tokenRows.map((row) => Number(row.transferMs || 0));
   const aggregate = asObject(summary.aggregate);
@@ -2228,6 +2444,10 @@ function buildInvokeRunSummary({
     rpcComputeRatio,
     trueCommComputeRatio,
     maxMemoryMb,
+    maxCgroupMemMb,
+    maxCgroupPercent,
+    maxSessionCount,
+    maxSessionKvCacheBytes,
     p50TokenLatencyMs: percentile(tokenLatencies, 0.5),
     p95TokenLatencyMs: percentile(tokenLatencies, 0.95),
     p99TokenLatencyMs: percentile(tokenLatencies, 0.99),
@@ -2261,6 +2481,12 @@ function buildInvokeRunSummary({
       transferMs: row.transferMs,
       trueCommMs: row.trueCommMs,
       maxMemMb: row.maxMemMb,
+      maxCgroupMemMb: row.maxCgroupMemMb,
+      maxCgroupLimitMb: row.maxCgroupLimitMb,
+      maxCgroupPercent: row.maxCgroupPercent,
+      maxSessionCount: row.maxSessionCount,
+      maxSessionKvCacheBytes: row.maxSessionKvCacheBytes,
+      maxModelFileSizeMb: row.maxModelFileSizeMb,
       maxCpuPct: row.maxCpuPct,
       maxSystemCpuPct: row.maxSystemCpuPct,
       networkMib: row.networkBytes / (1024 * 1024),
@@ -2272,6 +2498,12 @@ function buildInvokeRunSummary({
       computeMs: row.computeMs,
       transferMs: row.transferMs,
       maxMemMb: row.maxMemMb,
+      maxCgroupMemMb: row.maxCgroupMemMb,
+      maxCgroupLimitMb: row.maxCgroupLimitMb,
+      maxCgroupPercent: row.maxCgroupPercent,
+      maxSessionCount: row.maxSessionCount,
+      maxSessionKvCacheBytes: row.maxSessionKvCacheBytes,
+      maxModelFileSizeMb: row.maxModelFileSizeMb,
       maxCpuPct: row.maxCpuPct,
       maxSystemCpuPct: row.maxSystemCpuPct,
       maxMbps: row.maxBandwidthMbps,
@@ -2418,6 +2650,30 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
     0
   );
   const maxThreads = stageRows.reduce((max, row) => Math.max(max, Number(row.maxThreads || 0)), 0);
+  const maxCgroupMemMb = stageRows.reduce(
+    (max, row) => Math.max(max, Number(row.maxCgroupMemMb || 0)),
+    0
+  );
+  const maxCgroupLimitMb = stageRows.reduce(
+    (max, row) => Math.max(max, Number(row.maxCgroupLimitMb || 0)),
+    0
+  );
+  const maxCgroupPercent = stageRows.reduce(
+    (max, row) => Math.max(max, Number(row.maxCgroupPercent || 0)),
+    0
+  );
+  const maxSessionCount = stageRows.reduce(
+    (max, row) => Math.max(max, Number(row.maxSessionCount || 0)),
+    0
+  );
+  const maxSessionKvCacheBytes = stageRows.reduce(
+    (max, row) => Math.max(max, Number(row.maxSessionKvCacheBytes || 0)),
+    0
+  );
+  const maxModelFileSizeMb = stageRows.reduce(
+    (max, row) => Math.max(max, Number(row.maxModelFileSizeMb || 0)),
+    0
+  );
 
   const cards = [
     { k: "Prompt Tokens", v: String(promptTokenCount) },
@@ -2440,6 +2696,12 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
     { k: "Payload Sum (MiB)", v: formatNumber(aggregate.payload_mebibytes_sum ?? aggregate.payload_b64_mebibytes_sum, 3) },
     { k: "Network Delta (MiB)", v: formatNumber(aggregate.network_delta_mebibytes_sum, 3) },
     { k: "Max Process Mem (MB)", v: formatNumber(aggregate.max_process_memory_mb, 1) },
+    { k: "Max Cgroup Mem (MB)", v: formatNumber(maxCgroupMemMb, 1) },
+    { k: "Cgroup Mem Limit (MB)", v: formatNumber(maxCgroupLimitMb, 1) },
+    { k: "Max Cgroup Mem (%)", v: formatNumber(maxCgroupPercent, 1) },
+    { k: "Max Session Count", v: String(Math.round(maxSessionCount)) },
+    { k: "Max Session KV Cache (MiB)", v: formatNumber(maxSessionKvCacheBytes / (1024 * 1024), 3) },
+    { k: "Model File Size (MB)", v: formatNumber(maxModelFileSizeMb, 1) },
     { k: "Max Process CPU (%)", v: formatNumber(maxProcessCpu, 1) },
     { k: "Max System CPU (%)", v: formatNumber(maxSystemCpu, 1) },
     { k: "Max Link Mbps", v: formatNumber(maxBandwidth, 2) },
@@ -2464,6 +2726,11 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
         <td>${formatNumber(row.computeMs, 1)}</td>
         <td>${formatNumber(row.transferMs, 1)}</td>
         <td>${formatNumber(row.maxMemMb, 1)}</td>
+        <td>${formatNumber(row.maxCgroupMemMb, 1)}</td>
+        <td>${formatNumber(row.maxCgroupLimitMb, 1)}</td>
+        <td>${formatNumber(row.maxCgroupPercent, 1)}</td>
+        <td>${Math.round(row.maxSessionCount || 0)}</td>
+        <td>${formatNumber(row.maxSessionKvCacheBytes / (1024 * 1024), 3)}</td>
         <td>${formatNumber(row.maxCpuPct, 1)}</td>
         <td>${formatNumber(row.maxSystemCpuPct, 1)}</td>
         <td>${formatNumber(row.networkBytes / (1024 * 1024), 3)}</td>
@@ -2646,6 +2913,8 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
     transferComputeRatio,
     maxProcessCpu,
     maxMemoryMb: Number(aggregate.max_process_memory_mb || 0),
+    maxCgroupPercent,
+    maxSessionCount,
     runtime: runtimeSnapshot
   });
   const criticalPathSankey = buildCriticalPathSankey(criticalPath, totalLatencyMs);
@@ -2767,15 +3036,20 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
             <th>Samples</th>
             <th>Compute (ms)</th>
             <th>RPC Wall (ms)</th>
-            <th>Max Mem (MB)</th>
+            <th>Max RSS Mem (MB)</th>
+            <th>Cgroup Mem (MB)</th>
+            <th>Cgroup Limit (MB)</th>
+            <th>Cgroup %</th>
+            <th>Sessions</th>
+            <th>Session KV (MiB)</th>
             <th>Max Proc CPU (%)</th>
             <th>Max Sys CPU (%)</th>
             <th>Net Delta (MiB)</th>
-            <th>Payload (MiB)</th>
+            <th>Transport Payload (MiB)</th>
             <th>Max Mbps</th>
           </tr>
         </thead>
-        <tbody>${stageTableRows || "<tr><td colspan='12'>No stage metrics found.</td></tr>"}</tbody>
+        <tbody>${stageTableRows || "<tr><td colspan='17'>No stage metrics found.</td></tr>"}</tbody>
       </table>
     </div>
 

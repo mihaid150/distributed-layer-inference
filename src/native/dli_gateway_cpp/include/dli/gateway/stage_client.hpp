@@ -1,9 +1,13 @@
 #pragma once
 
 #include "dli/common/protocol.hpp"
+#include "dli/common/http_client.hpp"
 
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace dli::gateway {
@@ -41,7 +45,11 @@ public:
     ) const;
 
 private:
+    dli::common::PersistentHttpClient& client_for_url(const std::string& stage_url) const;
+
     std::string first_stage_url_;
+    mutable std::mutex clients_mutex_;
+    mutable std::unordered_map<std::string, std::unique_ptr<dli::common::PersistentHttpClient>> clients_;
 };
 
 } // namespace dli::gateway

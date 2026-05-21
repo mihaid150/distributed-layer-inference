@@ -130,7 +130,7 @@ std::optional<bool> extract_bool_field(
 }
 
 std::vector<std::int64_t> extract_shape(const std::string& json) {
-    const std::regex shape_pattern(R"dli("shape"\s*:\s*\[([^\]]*)\])dli");
+    const std::regex shape_pattern(R"dli("(?:shape|sh)"\s*:\s*\[([^\]]*)\])dli");
     const std::regex integer_pattern(R"dli(-?\d+)dli");
 
     std::smatch shape_match;
@@ -160,33 +160,68 @@ std::vector<std::int64_t> extract_shape(const std::string& json) {
     return shape;
 }
 
+
+
+std::optional<std::string> extract_string_alias(
+    const std::string& json,
+    const std::string& long_key,
+    const std::string& short_key
+) {
+    if (const auto value = extract_string_field(json, long_key)) {
+        return value;
+    }
+    return extract_string_field(json, short_key);
+}
+
+std::optional<int> extract_int_alias(
+    const std::string& json,
+    const std::string& long_key,
+    const std::string& short_key
+) {
+    if (const auto value = extract_int_field(json, long_key)) {
+        return value;
+    }
+    return extract_int_field(json, short_key);
+}
+
+std::optional<bool> extract_bool_alias(
+    const std::string& json,
+    const std::string& long_key,
+    const std::string& short_key
+) {
+    if (const auto value = extract_bool_field(json, long_key)) {
+        return value;
+    }
+    return extract_bool_field(json, short_key);
+}
+
 } // namespace
 
 ParsedRequestMetadata parse_request_metadata(const std::string& metadata_json) {
     ParsedRequestMetadata parsed;
 
-    if (const auto value = extract_string_field(metadata_json, "request_id")) {
+    if (const auto value = extract_string_alias(metadata_json, "request_id", "rid")) {
         parsed.request_id = *value;
     }
 
-    if (const auto value = extract_int_field(metadata_json, "token_index")) {
+    if (const auto value = extract_int_alias(metadata_json, "token_index", "ti")) {
         parsed.token_index = *value;
     }
 
-    if (const auto value = extract_int_field(metadata_json, "next_token_id")) {
+    if (const auto value = extract_int_alias(metadata_json, "next_token_id", "nt")) {
         parsed.has_next_token_id = true;
         parsed.next_token_id = *value;
     }
 
-    if (const auto value = extract_string_field(metadata_json, "generation_mode")) {
+    if (const auto value = extract_string_alias(metadata_json, "generation_mode", "gm")) {
         parsed.generation_mode = *value;
     }
 
-    if (const auto value = extract_string_field(metadata_json, "activation_precision")) {
+    if (const auto value = extract_string_alias(metadata_json, "activation_precision", "ap")) {
     parsed.activation_precision = *value;
 }
 
-    if (const auto value = extract_string_field(metadata_json, "transport_mode")) {
+    if (const auto value = extract_string_alias(metadata_json, "transport_mode", "tm")) {
         parsed.transport_mode = *value;
     }
 
@@ -194,7 +229,7 @@ ParsedRequestMetadata parse_request_metadata(const std::string& metadata_json) {
         parsed.rebalance_profile = *value;
     }
 
-    if (const auto value = extract_bool_field(metadata_json, "persistent_sessions_enabled")) {
+    if (const auto value = extract_bool_alias(metadata_json, "persistent_sessions_enabled", "ps")) {
         parsed.persistent_sessions_enabled = *value;
     }
 
@@ -202,18 +237,22 @@ ParsedRequestMetadata parse_request_metadata(const std::string& metadata_json) {
         parsed.topology_aware_routing = *value;
     }
 
-    if (const auto value = extract_string_field(metadata_json, "dtype")) {
+    if (const auto value = extract_bool_alias(metadata_json, "native_stage_chaining_enabled", "nsc")) {
+        parsed.native_stage_chaining_enabled = *value;
+    }
+
+    if (const auto value = extract_string_alias(metadata_json, "dtype", "dt")) {
         parsed.tensor.dtype = *value;
     }
 
-    if (const auto value = extract_string_field(metadata_json, "byte_order")) {
+    if (const auto value = extract_string_alias(metadata_json, "byte_order", "bo")) {
         parsed.tensor.byte_order = *value;
     }
 
     parsed.tensor.shape = extract_shape(metadata_json);
     parsed.stage_input_token_count = infer_sequence_length_from_shape(parsed.tensor.shape);
 
-    if (const auto value = extract_bool_field(metadata_json, "kv_cache_enabled")) {
+    if (const auto value = extract_bool_alias(metadata_json, "kv_cache_enabled", "kv")) {
         parsed.kv_cache_enabled = *value;
     }
 

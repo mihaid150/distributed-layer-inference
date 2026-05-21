@@ -1,19 +1,31 @@
 #include "dli_stage/server.hpp"
 
 #include "dli/common/http.hpp"
+#include "dli/common/http_client.hpp"
 #include "dli/common/json_escape.hpp"
 #include "dli/common/metadata.hpp"
 #include "dli/common/protocol.hpp"
 #include "dli/common/tensor.hpp"
 #include "dli_stage/runtime.hpp"
 
+#include <algorithm>
+#include <thread>
+#include <future>
+#include <deque>
+#include <condition_variable>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <memory>
+#include <mutex>
+#include <regex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <arpa/inet.h>
@@ -24,6 +36,292 @@
 namespace dli_stage {
 
 namespace {
+
+
+bool env_bool(const char* name, bool default_value = false) {
+    const char* raw = std::getenv(name);
+    if (raw == nullptr) {
+        return default_value;
+    }
+    const std::string value(raw);
+    return value == "1" || value == "true" || value == "TRUE" || value == "yes" || value == "on";
+}
+
+int env_int(const char* name, int default_value) {
+    const char* raw = std::getenv(name);
+    if (raw == nullptr) {
+        return default_value;
+    }
+    try {
+        return std::stoi(raw);
+    } catch (...) {
+        return default_value;
+    }
+}
+
+bool native_stage_chaining_enabled(const RuntimeRequest& request) {
+    return request.native_stage_chaining_enabled || env_bool("DLI_NATIVE_STAGE_CHAINING", false);
+}
+
+double elapsed_ms(
+    const std::chrono::steady_clock::time_point& start,
+    const std::chrono::steady_clock::time_point& end
+) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
+bool extract_number_field(
+    const std::string& json,
+    const std::string& key,
+    double& out
+) {
+    const std::regex pattern(
+        "\\\"" + key + R"(\\"\s*:\s*(-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?))"
+    );
+    std::smatch match;
+    if (!std::regex_search(json, match, pattern)) {
+        return false;
+    }
+    try {
+        out = std::stod(match[1].str());
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+std::string upsert_number_field(
+    std::string json,
+    const std::string& key,
+    double value
+) {
+    const std::regex pattern(
+        "\\\"" + key + R"(\\"\s*:\s*-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)"
+    );
+    const std::string replacement = "\"" + key + "\":" + std::to_string(value);
+    if (std::regex_search(json, pattern)) {
+        return std::regex_replace(json, pattern, replacement, std::regex_constants::format_first_only);
+    }
+
+    const std::size_t pos = json.rfind('}');
+    if (pos == std::string::npos) {
+        return json;
+    }
+
+    const bool needs_comma = pos > 0 && json[pos - 1] != '{';
+    json.insert(pos, std::string(needs_comma ? "," : "") + replacement);
+    return json;
+}
+
+dli::common::PersistentHttpClient& persistent_client_for_url(const std::string& url) {
+    static std::mutex mutex;
+    static std::unordered_map<std::string, std::unique_ptr<dli::common::PersistentHttpClient>> clients;
+
+    std::lock_guard<std::mutex> lock(mutex);
+    auto it = clients.find(url);
+    if (it == clients.end()) {
+        it = clients.emplace(
+            url,
+            std::make_unique<dli::common::PersistentHttpClient>(
+                url,
+                env_int("DLI_NATIVE_STAGE_FORWARD_TIMEOUT_SECONDS", 120)
+            )
+        ).first;
+    }
+    return *it->second;
+}
+
+std::string append_chain_metrics(
+    std::string downstream_metadata,
+    const dli::common::StageMetrics& local_metrics,
+    double next_rpc_wall_ms,
+    std::size_t request_bytes,
+    std::size_t response_bytes
+) {
+    double downstream_compute = 0.0;
+    double downstream_rpc = 0.0;
+    double downstream_true_comm = 0.0;
+    double downstream_payload = 0.0;
+    double downstream_hops = 0.0;
+
+    if (!extract_number_field(downstream_metadata, "chain_compute_time_ms", downstream_compute)) {
+        (void)extract_number_field(downstream_metadata, "compute_time_ms", downstream_compute);
+    }
+    if (!extract_number_field(downstream_metadata, "chain_rpc_wall_time_ms", downstream_rpc)) {
+        (void)extract_number_field(downstream_metadata, "rpc_wall_time_ms", downstream_rpc);
+    }
+    if (!extract_number_field(downstream_metadata, "chain_true_comm_ms", downstream_true_comm)) {
+        (void)extract_number_field(downstream_metadata, "true_comm_ms", downstream_true_comm);
+    }
+    (void)extract_number_field(downstream_metadata, "chain_transport_payload_bytes", downstream_payload);
+    (void)extract_number_field(downstream_metadata, "chain_hops", downstream_hops);
+
+    const double local_true_comm = std::max(0.0, next_rpc_wall_ms - local_metrics.compute_time_ms);
+
+    downstream_metadata = upsert_number_field(
+        downstream_metadata,
+        "chain_compute_time_ms",
+        downstream_compute + local_metrics.compute_time_ms
+    );
+    downstream_metadata = upsert_number_field(
+        downstream_metadata,
+        "chain_rpc_wall_time_ms",
+        downstream_rpc + next_rpc_wall_ms
+    );
+    downstream_metadata = upsert_number_field(
+        downstream_metadata,
+        "chain_true_comm_ms",
+        downstream_true_comm + local_true_comm
+    );
+    downstream_metadata = upsert_number_field(
+        downstream_metadata,
+        "chain_transport_payload_bytes",
+        downstream_payload + static_cast<double>(request_bytes + response_bytes)
+    );
+    downstream_metadata = upsert_number_field(
+        downstream_metadata,
+        "chain_hops",
+        downstream_hops + 1.0
+    );
+    return downstream_metadata;
+}
+
+
+dli::common::HttpResponse handle_forward_binary(
+    const dli::common::HttpRequest& request,
+    const StageConfig& config,
+    StageRuntime& runtime
+);
+
+
+class ForwardBroker {
+public:
+    ForwardBroker(StageConfig config, StageRuntime& runtime)
+        : config_(std::move(config)),
+          runtime_(runtime),
+          max_queue_size_(std::max(1, env_int("DLI_NATIVE_FORWARD_QUEUE_SIZE", 1))),
+          worker_([this] { run(); }) {}
+
+    ~ForwardBroker() {
+        stop();
+    }
+
+    ForwardBroker(const ForwardBroker&) = delete;
+    ForwardBroker& operator=(const ForwardBroker&) = delete;
+
+    std::future<dli::common::HttpResponse> submit(
+        dli::common::HttpRequest request
+    ) {
+        ForwardJob job;
+        job.request = std::move(request);
+        auto future = job.promise.get_future();
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stop_requested_) {
+                job.promise.set_value(
+                    dli::common::make_json_response(
+                        503,
+                        "Service Unavailable",
+                        dli::common::http_error_json("native forward broker is stopping")
+                    )
+                );
+                return future;
+            }
+
+            if (queue_.size() >= static_cast<std::size_t>(max_queue_size_)) {
+                job.promise.set_value(
+                    dli::common::make_json_response(
+                        429,
+                        "Too Many Requests",
+                        dli::common::http_error_json("native forward queue is full")
+                    )
+                );
+                return future;
+            }
+
+            queue_.push_back(std::move(job));
+        }
+
+        cv_.notify_one();
+        return future;
+    }
+
+    std::size_t queue_depth() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.size();
+    }
+
+private:
+    struct ForwardJob {
+        dli::common::HttpRequest request;
+        std::promise<dli::common::HttpResponse> promise;
+    };
+
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stop_requested_) {
+                return;
+            }
+            stop_requested_ = true;
+        }
+        cv_.notify_all();
+        if (worker_.joinable()) {
+            worker_.join();
+        }
+    }
+
+    void run() {
+        while (true) {
+            ForwardJob job;
+
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait(lock, [this] { return stop_requested_ || !queue_.empty(); });
+
+                if (stop_requested_ && queue_.empty()) {
+                    return;
+                }
+
+                job = std::move(queue_.front());
+                queue_.pop_front();
+            }
+
+            try {
+                job.promise.set_value(
+                    handle_forward_binary(job.request, config_, runtime_)
+                );
+            } catch (const std::exception& exc) {
+                job.promise.set_value(
+                    dli::common::make_json_response(
+                        500,
+                        "Internal Server Error",
+                        dli::common::http_error_json(exc.what())
+                    )
+                );
+            } catch (...) {
+                job.promise.set_value(
+                    dli::common::make_json_response(
+                        500,
+                        "Internal Server Error",
+                        dli::common::http_error_json("unknown native forward broker failure")
+                    )
+                );
+            }
+        }
+    }
+
+    StageConfig config_;
+    StageRuntime& runtime_;
+    int max_queue_size_ = 1;
+
+    mutable std::mutex mutex_;
+    std::condition_variable cv_;
+    std::deque<ForwardJob> queue_;
+    std::thread worker_;
+    bool stop_requested_ = false;
+};
 
 std::string health_json(const StageConfig& config) {
     std::ostringstream out;
@@ -118,7 +416,12 @@ std::string runtime_response_metadata_json(
         << "\"byte_order\":\"" << dli::common::json_escape(tensor_metadata.byte_order) << "\""
         << "},"
         << "\"feature_flags\":{"
-        << "\"kv_cache_enabled\":" << (request.kv_cache_enabled ? "true" : "false")
+        << "\"kv_cache_enabled\":" << (request.kv_cache_enabled ? "true" : "false") << ","
+        << "\"native_stage_chaining_enabled\":" << (request.native_stage_chaining_enabled ? "true" : "false") << ","
+        << "\"transport_mode\":\"" << dli::common::json_escape(request.transport_mode) << "\","
+        << "\"activation_precision\":\"" << dli::common::json_escape(request.activation_precision) << "\","
+        << "\"persistent_sessions_enabled\":" << (request.persistent_sessions_enabled ? "true" : "false") << ","
+        << "\"metadata_level\":\"" << dli::common::json_escape(request.metadata_level) << "\""
         << "},"
         << "\"metrics\":" << metrics_json(response.metrics) << ","
         << "\"backend_metadata\":"
@@ -211,6 +514,8 @@ RuntimeRequest make_runtime_request(
     request.rebalance_profile = parsed.rebalance_profile;
     request.persistent_sessions_enabled = parsed.persistent_sessions_enabled;
     request.topology_aware_routing = parsed.topology_aware_routing;
+    request.native_stage_chaining_enabled = parsed.native_stage_chaining_enabled;
+    request.metadata_level = parsed.metadata_level;
 
     request.has_temperature = parsed.has_temperature;
     request.temperature = parsed.temperature;
@@ -246,6 +551,50 @@ dli::common::HttpResponse handle_forward_binary(
         );
         output.tensor_bytes = runtime_response.output_tensor.bytes;
 
+
+
+        if (
+            native_stage_chaining_enabled(runtime_request) &&
+            !runtime_response.is_final_stage &&
+            !config.next_stage_url.empty()
+        ) {
+            const std::vector<std::uint8_t> next_body =
+                dli::common::encode_frame(output);
+
+            const auto rpc_start = std::chrono::steady_clock::now();
+            const dli::common::HttpClientResponse next_response =
+                persistent_client_for_url(config.next_stage_url).post_binary(next_body);
+            const auto rpc_end = std::chrono::steady_clock::now();
+            const double next_rpc_wall_ms = elapsed_ms(rpc_start, rpc_end);
+
+            if (next_response.status_code < 200 || next_response.status_code >= 300) {
+                return dli::common::make_json_response(
+                    502,
+                    "Bad Gateway",
+                    dli::common::http_error_json(
+                        "next native stage failed with HTTP " +
+                        std::to_string(next_response.status_code)
+                    )
+                );
+            }
+
+            dli::common::DliFrame downstream =
+                dli::common::decode_frame(next_response.body);
+
+            downstream.metadata_json = append_chain_metrics(
+                downstream.metadata_json,
+                runtime_response.metrics,
+                next_rpc_wall_ms,
+                next_body.size(),
+                next_response.body.size()
+            );
+
+            return dli::common::make_binary_response(
+                200,
+                "OK",
+                dli::common::encode_frame(downstream)
+            );
+        }
         return dli::common::make_binary_response(
             200,
             "OK",
@@ -263,7 +612,8 @@ dli::common::HttpResponse handle_forward_binary(
 dli::common::HttpResponse handle_request(
     const dli::common::HttpRequest& request,
     const StageConfig& config,
-    StageRuntime& runtime
+    StageRuntime& runtime,
+    ForwardBroker& forward_broker
 ) {
     if (request.method == "GET" && request.path == "/health") {
         return dli::common::make_json_response(200, "OK", health_json(config));
@@ -274,7 +624,8 @@ dli::common::HttpResponse handle_request(
     }
 
     if (request.method == "POST" && request.path == "/forward-binary") {
-        return handle_forward_binary(request, config, runtime);
+        auto future = forward_broker.submit(request);
+        return future.get();
     }
 
     return dli::common::make_json_response(404, "Not Found", not_found_json(request));
@@ -286,6 +637,52 @@ void close_fd(int fd) {
         }
     }
 }
+
+void handle_stage_client_connection(
+    int client_fd,
+    const StageConfig& config,
+    StageRuntime& runtime,
+    ForwardBroker& forward_broker,
+    std::atomic<bool>& stop_requested
+) {
+    while (!stop_requested.load()) {
+        try {
+            const dli::common::HttpRequest request = dli::common::read_http_request(client_fd);
+            dli::common::HttpResponse response = handle_request(
+                request,
+                config,
+                runtime,
+                forward_broker
+            );
+            response.keep_alive = dli::common::request_wants_keep_alive(request);
+            dli::common::send_http_response(client_fd, response);
+            if (!response.keep_alive) {
+                break;
+            }
+        } catch (const std::exception& exc) {
+            dli::common::HttpResponse response = dli::common::make_json_response(
+                400,
+                "Bad Request",
+                dli::common::http_error_json(exc.what())
+            );
+            response.keep_alive = false;
+            dli::common::send_http_response(client_fd, response);
+            break;
+        } catch (...) {
+            dli::common::HttpResponse response = dli::common::make_json_response(
+                400,
+                "Bad Request",
+                dli::common::http_error_json("unknown stage connection failure")
+            );
+            response.keep_alive = false;
+            dli::common::send_http_response(client_fd, response);
+            break;
+        }
+    }
+
+    close_fd(client_fd);
+}
+
 
 } // namespace
 
@@ -335,6 +732,8 @@ int HttpServer::run() {
 
     std::cerr << "[dli-stage-cpp] listening on 0.0.0.0:" << config_.port << "\n";
 
+    ForwardBroker forward_broker(config_, *runtime_);
+
     while (!stop_requested_.load()) {
         sockaddr_in client_address{};
         socklen_t client_len = sizeof(client_address);
@@ -354,24 +753,14 @@ int HttpServer::run() {
             continue;
         }
 
-        try {
-            const dli::common::HttpRequest request = dli::common::read_http_request(client_fd);
-            const dli::common::HttpResponse response = handle_request(
-                request,
-                config_,
-                *runtime_
-            );
-            dli::common::send_http_response(client_fd, response);
-        } catch (const std::exception& exc) {
-            const dli::common::HttpResponse response = dli::common::make_json_response(
-                400,
-                "Bad Request",
-                dli::common::http_error_json(exc.what())
-            );
-            dli::common::send_http_response(client_fd, response);
-        }
-
-        close_fd(client_fd);
+        std::thread(
+            handle_stage_client_connection,
+            client_fd,
+            std::cref(config_),
+            std::ref(*runtime_),
+            std::ref(forward_broker),
+            std::ref(stop_requested_)
+        ).detach();
     }
 
     close_fd(server_fd);

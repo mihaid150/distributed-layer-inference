@@ -126,14 +126,18 @@ spec:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 5
-            periodSeconds: 5
+            initialDelaySeconds: 10
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 12
           livenessProbe:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 20
-            periodSeconds: 10
+            initialDelaySeconds: 30
+            timeoutSeconds: 5
+            periodSeconds: 20
+            failureThreshold: 18
           resources:
             requests:
               memory: "512Mi"
@@ -281,14 +285,18 @@ spec:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 5
-            periodSeconds: 5
+            initialDelaySeconds: 10
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 12
           livenessProbe:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 20
-            periodSeconds: 10
+            initialDelaySeconds: 30
+            timeoutSeconds: 5
+            periodSeconds: 20
+            failureThreshold: 18
           resources:
             requests:
               memory: "512Mi"
@@ -436,14 +444,18 @@ spec:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 5
-            periodSeconds: 5
+            initialDelaySeconds: 10
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 12
           livenessProbe:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 20
-            periodSeconds: 10
+            initialDelaySeconds: 30
+            timeoutSeconds: 5
+            periodSeconds: 20
+            failureThreshold: 18
           resources:
             requests:
               memory: "512Mi"
@@ -591,14 +603,18 @@ spec:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 5
-            periodSeconds: 5
+            initialDelaySeconds: 10
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 12
           livenessProbe:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 20
-            periodSeconds: 10
+            initialDelaySeconds: 30
+            timeoutSeconds: 5
+            periodSeconds: 20
+            failureThreshold: 18
           resources:
             requests:
               memory: "512Mi"
