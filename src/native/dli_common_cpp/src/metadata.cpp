@@ -237,6 +237,12 @@ ParsedRequestMetadata parse_request_metadata(const std::string& metadata_json) {
         parsed.topology_aware_routing = *value;
     }
 
+    if (const auto value = extract_string_field(metadata_json, "metadata_level")) {
+        parsed.metadata_level = *value;
+    } else if (const auto value = extract_string_field(metadata_json, "ml")) {
+        parsed.metadata_level = *value;
+    }
+
     if (const auto value = extract_bool_alias(metadata_json, "native_stage_chaining_enabled", "nsc")) {
         parsed.native_stage_chaining_enabled = *value;
     }

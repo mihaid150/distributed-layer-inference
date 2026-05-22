@@ -23,6 +23,7 @@ struct RuntimeRequest {
     std::string rebalance_profile = "baseline";
     bool persistent_sessions_enabled = false;
     bool topology_aware_routing = false;
+    std::string metadata_level = "debug";
     bool native_stage_chaining_enabled = false;
 
     bool has_temperature = false;
