@@ -195,13 +195,106 @@ scripts/generate_native_shards.sh \
 The native tools create partition manifests, write `.dli.gguf` shards, and
 validate that every partition owns the expected tensor subset.
 
-### 5. Build container images
+### 5. Upload native shards to Hugging Face Hub
+
+The native Kubernetes profile downloads model artifacts from Hugging Face during
+pod startup. Each stage init container downloads one file named
+`partition-${STAGE_ID}.dli.gguf`; the native gateway init container downloads
+the full GGUF file used for tokenizer/model metadata.
+
+Install and authenticate the current Hugging Face CLI:
+
+```bash
+curl -LsSf https://hf.co/cli/install.sh | bash -s
+hf auth login
+hf auth whoami
+```
+
+Create a model repository for the native artifacts:
+
+```bash
+HF_REPO="your-user-or-org/dli-tinyllama-native-gguf-4stage"
+
+hf repos create "${HF_REPO}" \
+  --type model \
+  --private \
+  --exist-ok
+```
+
+Upload the generated stage shards at the repository root:
+
+```bash
+hf upload "${HF_REPO}" \
+  build/dli-native-shards/shards \
+  . \
+  --type model \
+  --include "partition-*.dli.gguf" \
+  --commit-message "Upload DLI native stage shards"
+```
+
+Upload the full GGUF file expected by the native gateway:
+
+```bash
+hf upload "${HF_REPO}" \
+  models/gguf/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
+  tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
+  --type model \
+  --commit-message "Upload native gateway GGUF"
+```
+
+For very large or unreliable uploads, use the resumable command instead:
+
+```bash
+hf upload-large-folder "${HF_REPO}" \
+  build/dli-native-shards/shards \
+  --type model \
+  --include "partition-*.dli.gguf"
+```
+
+After upload, the Hugging Face repository should contain:
+
+```text
+partition-1.dli.gguf
+partition-2.dli.gguf
+partition-3.dli.gguf
+partition-4.dli.gguf
+tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
+```
+
+Configure `k8s/native/configmap.yaml` to point at that repository:
+
+```yaml
+data:
+  HF_NATIVE_STAGE_REPO: "your-user-or-org/dli-tinyllama-native-gguf-4stage"
+  HF_NATIVE_STAGE_REVISION: "main"
+
+  HF_NATIVE_FULL_GGUF_REPO: "your-user-or-org/dli-tinyllama-native-gguf-4stage"
+  HF_NATIVE_FULL_GGUF_REVISION: "main"
+  HF_NATIVE_FULL_GGUF_FILE: "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
+```
+
+Use an immutable tag or commit SHA instead of `main` for reproducible cluster
+runs. If the repository is private, create the Kubernetes secret before applying
+the native deployments:
+
+```bash
+kubectl -n inference create secret generic hf-hub \
+  --from-literal=HF_TOKEN="<hugging-face-read-token>" \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+### 6. Build container images
 
 ```bash
 scripts/build_images.sh
 ```
 
-The image builder supports these services:
+`scripts/build_images.sh` is the main image build and publish helper. It is an
+interactive wrapper around Docker Buildx that selects the right Dockerfile,
+build target, tag layout, cache settings, and multi-architecture manifest for
+each DLI service.
+
+The image builder supports these service choices:
 
 - `gateway-python`
 - `stage-python`
@@ -209,9 +302,94 @@ The image builder supports these services:
 - `native-stage`
 - `native-tools`
 
-The script is interactive and can build multi-arch images through Docker Buildx.
-Override defaults such as `DOCKERHUB_NAMESPACE`, `BUILDER`, and native CMake
-settings from the shell when needed.
+The script asks for:
+
+- service to build;
+- target image repository;
+- optional existing image tag to use as a base image or build cache;
+- new release tag;
+- target platform: `amd64`, `arm64`, or both;
+- confirmation before local builds;
+- confirmation before pushing architecture images and the multi-arch manifest;
+- optional local cleanup after push.
+
+Default Docker Hub repositories are derived from `DOCKERHUB_NAMESPACE`:
+
+| Service | Default repository | Dockerfile / target |
+| --- | --- | --- |
+| `gateway-python` | `<namespace>/distributed-layer-inference-gateway-python` | `docker/Dockerfile.gateway-python` |
+| `stage-python` | `<namespace>/distributed-layer-inference-stage-python` | `docker/Dockerfile.stage-python` |
+| `native-gateway` | `<namespace>/distributed-layer-inference-native-gateway` | `docker/Dockerfile.native`, target `gateway-runtime` |
+| `native-stage` | `<namespace>/distributed-layer-inference-native-stage` | `docker/Dockerfile.native`, target `stage-runtime` |
+| `native-tools` | `<namespace>/distributed-layer-inference-native-tools` | `docker/Dockerfile.native`, target `tools-runtime` |
+
+Example: build and push the native stage image for the ARM64 K3s nodes:
+
+```bash
+DOCKERHUB_NAMESPACE=yourdockerhub \
+BUILDER=multiarch-insecure \
+NATIVE_CMAKE_BUILD_TYPE=Release \
+NATIVE_GGML_NATIVE=OFF \
+NATIVE_GGML_CPU_ARM_ARCH=armv8-a \
+scripts/build_images.sh
+```
+
+When prompted, use:
+
+```text
+Service to build: native-stage
+Image repo: <press Enter for default or enter your repo>
+Base image tag number or tag: <press Enter for Dockerfile default>
+New tag: v2026-05-25-native-stage
+Choice (1/2/3): 3
+Ready to build local image(s) for linux/arm64? y
+Push arch image(s) to ...? y
+Cleanup local images and dangling layers? y
+```
+
+Example: build both native runtime images needed by `k8s/native`:
+
+```bash
+DOCKERHUB_NAMESPACE=yourdockerhub scripts/build_images.sh
+# choose: native-stage
+
+DOCKERHUB_NAMESPACE=yourdockerhub scripts/build_images.sh
+# choose: native-gateway
+```
+
+Example: build the Python baseline images used by `k8s/python`:
+
+```bash
+DOCKERHUB_NAMESPACE=yourdockerhub scripts/build_images.sh
+# choose: gateway-python
+
+DOCKERHUB_NAMESPACE=yourdockerhub scripts/build_images.sh
+# choose: stage-python
+```
+
+Example: build only local images without pushing:
+
+```bash
+DOCKERHUB_NAMESPACE=yourdockerhub scripts/build_images.sh
+```
+
+Answer `n` at the push prompt. The script leaves local tags such as
+`<repo>:arm64-local` or `<repo>:amd64-local` unless cleanup is selected.
+
+Common environment overrides:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DOCKERHUB_NAMESPACE` | `mipeda150` | Namespace used for default image repositories |
+| `BUILDER` | `multiarch-insecure` | Docker Buildx builder name |
+| `PIP_INDEX_URL` | `https://pypi.org/simple` | Python package index for Python images |
+| `NATIVE_CMAKE_BUILD_TYPE` | `Release` | CMake build type for native images |
+| `NATIVE_GGML_NATIVE` | `OFF` | Avoid host-specific CPU flags in portable native images |
+| `NATIVE_GGML_CPU_ARM_ARCH` | `armv8-a` | ARM CPU target used for native ARM64 builds |
+| `ENABLE_REGISTRY_CACHE` | `1` | Publish and reuse registry build caches |
+
+After publishing new tags, update the image references in `k8s/python/*.yaml`
+or `k8s/native/deployments.yaml` before applying the manifests.
 
 ## Deploying to K3s
 
@@ -299,17 +477,100 @@ Useful environment variables:
 
 ## Development Workflow
 
-1. Update `configs/stage_map.yaml` or the native stage map to describe the
-   desired partition layout.
-2. Generate model artifacts:
-   - Python track: `stage_N.pt` files from `dli.model_splitter`.
-   - Native track: `partition-N.dli.gguf` files from the native shard tools.
-3. Build and publish the gateway and stage images with `scripts/build_images.sh`.
-4. Update the Kubernetes config map, image tags, and artifact repository values.
-5. Apply the relevant manifests from `k8s/python` or `k8s/native`.
-6. Watch pods, logs, and endpoint behavior through `kubectl` or `ops-ui`.
-7. Run benchmarks or collect experiment logs from `src/python/dli/benchmark` and
-   `scripts/collect_experiment_logs.sh`.
+The repository has two development tracks. Keep them separate when changing a
+runtime, because they use different model artifact formats, image repositories,
+and Kubernetes manifests.
+
+### Python/PyTorch Track
+
+Use this track for baseline behavior, feature-module experimentation, and
+correctness comparisons.
+
+1. Edit `configs/stage_map.yaml` when changing layer ownership, physical node
+   placement, service names, or route candidates.
+2. Generate or refresh `stage_N.pt` files with `dli.model_splitter`.
+3. Upload the generated Python partitions to the Hugging Face repository used by
+   the Python init containers, or make them available through the mounted model
+   volume used in your deployment.
+4. Build and publish:
+   - `gateway-python`
+   - `stage-python`
+5. Update Python image tags and artifact repository values in `k8s/python/`.
+6. Apply the Python manifests and verify:
+
+```bash
+kubectl apply -f k8s/python/namespace.yaml
+kubectl apply -f k8s/python/configmap.yaml
+kubectl apply -f k8s/python/inference-gateway-service.yaml
+kubectl apply -f k8s/python/inference-stage-1-service.yaml
+kubectl apply -f k8s/python/inference-stage-2-service.yaml
+kubectl apply -f k8s/python/inference-stage-3-service.yaml
+kubectl apply -f k8s/python/inference-stage-4-service.yaml
+kubectl apply -f k8s/python/inference-gateway-deployment.yaml
+kubectl apply -f k8s/python/inference-stage-1-deployment.yaml
+kubectl apply -f k8s/python/inference-stage-2-deployment.yaml
+kubectl apply -f k8s/python/inference-stage-3-deployment.yaml
+kubectl apply -f k8s/python/inference-stage-4-deployment.yaml
+kubectl -n inference get pods -o wide
+```
+
+The Python gateway is exposed through `inference-gateway` on NodePort `30080`.
+
+### Native C++/GGUF Track
+
+Use this track for the llama.cpp runtime, DLI2 binary tensor transport, and
+quantized `.dli.gguf` partition shards.
+
+1. Edit `configs/stage_map.native.latency_balanced_v1.yaml` when changing native
+   layer ownership, service names, node placement, or binary stage routes.
+2. Build the native tools:
+
+```bash
+cmake -S src/native -B build/native -DCMAKE_BUILD_TYPE=Release
+cmake --build build/native -j"$(nproc)"
+```
+
+3. Generate and validate native artifacts:
+
+```bash
+BUILD_DIR=build/native \
+scripts/generate_native_shards.sh \
+  configs/stage_map.native.latency_balanced_v1.yaml \
+  models/gguf/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
+  build/dli-native-shards
+```
+
+4. Upload `partition-N.dli.gguf` shards and the full gateway GGUF to Hugging
+   Face Hub.
+5. Update `k8s/native/configmap.yaml`:
+   - `HF_NATIVE_STAGE_REPO`
+   - `HF_NATIVE_STAGE_REVISION`
+   - `HF_NATIVE_FULL_GGUF_REPO`
+   - `HF_NATIVE_FULL_GGUF_REVISION`
+   - `HF_NATIVE_FULL_GGUF_FILE`
+   - embedded `stage_map.yaml` if the partition layout changed
+6. Build and publish:
+   - `native-stage`
+   - `native-gateway`
+   - `native-tools` when shard generation/validation should run in a container
+7. Update image tags in `k8s/native/deployments.yaml`.
+8. Apply the native manifests and verify:
+
+```bash
+kubectl apply -f k8s/native/namespace.yaml
+kubectl apply -f k8s/native/persistent-volumes.yaml
+kubectl apply -f k8s/native/configmap.yaml
+kubectl apply -f k8s/native/services.yaml
+kubectl apply -f k8s/native/deployments.yaml
+kubectl -n inference get pods -o wide
+```
+
+The native gateway is exposed through `inference-native-gateway` on NodePort
+`30081`.
+
+For either track, watch pods, inspect logs, and test endpoints through `kubectl`
+or `ops-ui`. Benchmark and experiment utilities live under
+`src/python/dli/benchmark` and `scripts/collect_experiment_logs.sh`.
 
 ## Configuration Notes
 
