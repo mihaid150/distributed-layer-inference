@@ -37,4 +37,40 @@ struct StageMetrics {
     std::uint64_t session_kv_cache_bytes = 0;
 };
 
+struct ChainMetrics {
+    double compute_ms = 0.0;
+    double rpc_wall_ms = 0.0;
+    double true_comm_ms = 0.0;
+    std::uint64_t transport_payload_bytes = 0;
+    std::uint64_t stage_count = 0;
+};
+
+ChainMetrics local_chain_metrics_from_stage(const StageMetrics& metrics);
+
+bool metadata_has_chain_metrics(const std::string& metadata_json);
+
+
+ChainMetrics extract_chain_metrics_from_metadata(const std::string& metadata_json);
+
+std::string put_chain_metrics_in_metadata(
+    std::string metadata_json,
+    const ChainMetrics& metrics
+);
+
+ChainMetrics merge_chain_metrics_values(
+    const StageMetrics& local_metrics,
+    const ChainMetrics& downstream_metrics,
+    double downstream_rpc_wall_ms,
+    std::uint64_t request_bytes,
+    std::uint64_t response_bytes
+);
+
+std::string merge_chain_metrics(
+    std::string downstream_metadata,
+    const StageMetrics& local_metrics,
+    double downstream_rpc_wall_ms,
+    std::uint64_t request_bytes,
+    std::uint64_t response_bytes
+);
+
 } // namespace dli::common

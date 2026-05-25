@@ -86,6 +86,14 @@ target_link_libraries(test-gguf-inspector-optional PRIVATE
     dli-common-cpp
 )
 
+add_executable(test-chain-metrics
+    tests/test_chain_metrics.cpp
+)
+
+target_link_libraries(test-chain-metrics PRIVATE
+    dli-common-cpp
+)
+
 foreach(target_name
     test-protocol
     test-metadata
@@ -112,3 +120,4 @@ add_test(NAME test-llama-backend-smoke COMMAND test-llama-backend-smoke)
 add_test(NAME test-partition-plan COMMAND test-partition-plan)
 add_test(NAME test-partition-tensor-assignment COMMAND test-partition-tensor-assignment)
 add_test(NAME test-gguf-inspector-optional COMMAND test-gguf-inspector-optional)
+add_test(NAME test-chain-metrics COMMAND test-chain-metrics)

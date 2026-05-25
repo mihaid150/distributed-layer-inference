@@ -3,6 +3,7 @@
 #include "dli/common/json_escape.hpp"
 #include "dli/common/metadata.hpp"
 #include "dli/common/protocol.hpp"
+#include "dli/common/metrics.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -148,47 +149,12 @@ bool extract_u64_field(
     return true;
 }
 
-void aggregate_stage_metrics(
+void aggregate_resource_metrics(
     GenerationLoopResult& result,
     const std::string& metadata_json
 ) {
     double d = 0.0;
     std::uint64_t u = 0;
-
-    bool has_chain_compute = false;
-    bool has_chain_rpc = false;
-    bool has_chain_true_comm = false;
-
-    if (extract_number_field(metadata_json, "chain_compute_time_ms", d)) {
-        result.aggregate_metrics.compute_ms += d;
-        has_chain_compute = true;
-    }
-
-    if (extract_number_field(metadata_json, "chain_rpc_wall_time_ms", d)) {
-        result.aggregate_metrics.rpc_wall_ms += d;
-        has_chain_rpc = true;
-    }
-
-    if (extract_number_field(metadata_json, "chain_true_comm_ms", d)) {
-        result.aggregate_metrics.true_comm_ms += d;
-        has_chain_true_comm = true;
-    }
-
-    if (extract_u64_field(metadata_json, "chain_transport_payload_bytes", u)) {
-        result.aggregate_metrics.transport_payload_bytes += u;
-    }
-
-    if (!has_chain_compute && extract_number_field(metadata_json, "compute_time_ms", d)) {
-        result.aggregate_metrics.compute_ms += d;
-    }
-
-    if (!has_chain_rpc && extract_number_field(metadata_json, "rpc_wall_time_ms", d)) {
-        result.aggregate_metrics.rpc_wall_ms += d;
-    }
-
-    if (!has_chain_true_comm && extract_number_field(metadata_json, "true_comm_ms", d)) {
-        result.aggregate_metrics.true_comm_ms += d;
-    }
 
     if (extract_u64_field(metadata_json, "input_tensor_bytes", u)) {
         result.aggregate_metrics.tensor_bytes_in += u;
@@ -241,6 +207,52 @@ void aggregate_stage_metrics(
         result.aggregate_metrics.session_kv_cache_bytes =
             std::max(result.aggregate_metrics.session_kv_cache_bytes, u);
     }
+}
+
+void aggregate_gateway_orchestrated_stage_result(
+    GenerationLoopResult& result,
+    const StageClientResult& stage_result,
+    const std::string& metadata_json
+) {
+    double stage_compute_ms = 0.0;
+
+    if (extract_number_field(metadata_json, "compute_time_ms", stage_compute_ms)) {
+        result.aggregate_metrics.compute_ms += stage_compute_ms;
+    }
+
+    result.aggregate_metrics.rpc_wall_ms += stage_result.elapsed_ms;
+    result.aggregate_metrics.transport_payload_bytes +=
+        stage_result.transport_payload_bytes;
+
+    result.aggregate_metrics.true_comm_ms +=
+        std::max(0.0, stage_result.elapsed_ms - stage_compute_ms);
+
+    aggregate_resource_metrics(result, metadata_json);
+}
+
+void aggregate_chained_stage_result(
+    GenerationLoopResult& result,
+    const StageClientResult& stage_result
+) {
+    const std::string& metadata_json =
+        stage_result.response_frame.metadata_json;
+
+    const dli::common::ChainMetrics chain =
+        dli::common::extract_chain_metrics_from_metadata(metadata_json);
+
+    result.aggregate_metrics.compute_ms += chain.compute_ms;
+
+    // Authoritative wall-clock for gateway -> stage1 -> ... -> stage4 -> gateway.
+    result.aggregate_metrics.rpc_wall_ms += stage_result.elapsed_ms;
+
+    result.aggregate_metrics.true_comm_ms +=
+        std::max(0.0, stage_result.elapsed_ms - chain.compute_ms);
+
+    result.aggregate_metrics.transport_payload_bytes +=
+        stage_result.transport_payload_bytes +
+        chain.transport_payload_bytes;
+
+    aggregate_resource_metrics(result, metadata_json);
 }
     
 std::string make_request_id() {
@@ -514,7 +526,7 @@ StageClientResult forward_through_partition_graph(
             );
         }
 
-        aggregate_stage_metrics(result, stage_result.response_frame.metadata_json);
+        aggregate_chained_stage_result(result, stage_result);
         return stage_result;
     }
 
@@ -550,15 +562,11 @@ StageClientResult forward_through_partition_graph(
 
         current_frame = last_result.response_frame;
 
-        aggregate_stage_metrics(result, current_frame.metadata_json);
-        result.aggregate_metrics.rpc_wall_ms += last_result.elapsed_ms;
-        result.aggregate_metrics.transport_payload_bytes += last_result.transport_payload_bytes;
-
-        double stage_compute_ms = 0.0;
-        if (extract_number_field(current_frame.metadata_json, "compute_time_ms", stage_compute_ms)) {
-            result.aggregate_metrics.true_comm_ms +=
-                std::max(0.0, last_result.elapsed_ms - stage_compute_ms);
-        }
+        aggregate_gateway_orchestrated_stage_result(
+            result,
+            last_result,
+            current_frame.metadata_json
+        );
 
         if (is_terminal_partition(partition)) {
             return last_result;

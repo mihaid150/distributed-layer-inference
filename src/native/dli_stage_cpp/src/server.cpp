@@ -5,6 +5,7 @@
 #include "dli/common/json_escape.hpp"
 #include "dli/common/metadata.hpp"
 #include "dli/common/protocol.hpp"
+#include "dli/common/metrics.hpp"
 #include "dli/common/tensor.hpp"
 #include "dli_stage/runtime.hpp"
 
@@ -70,49 +71,6 @@ double elapsed_ms(
     return std::chrono::duration<double, std::milli>(end - start).count();
 }
 
-bool extract_number_field(
-    const std::string& json,
-    const std::string& key,
-    double& out
-) {
-    const std::regex pattern(
-        "\\\"" + key + R"(\\"\s*:\s*(-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?))"
-    );
-    std::smatch match;
-    if (!std::regex_search(json, match, pattern)) {
-        return false;
-    }
-    try {
-        out = std::stod(match[1].str());
-        return true;
-    } catch (...) {
-        return false;
-    }
-}
-
-std::string upsert_number_field(
-    std::string json,
-    const std::string& key,
-    double value
-) {
-    const std::regex pattern(
-        "\\\"" + key + R"(\\"\s*:\s*-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)"
-    );
-    const std::string replacement = "\"" + key + "\":" + std::to_string(value);
-    if (std::regex_search(json, pattern)) {
-        return std::regex_replace(json, pattern, replacement, std::regex_constants::format_first_only);
-    }
-
-    const std::size_t pos = json.rfind('}');
-    if (pos == std::string::npos) {
-        return json;
-    }
-
-    const bool needs_comma = pos > 0 && json[pos - 1] != '{';
-    json.insert(pos, std::string(needs_comma ? "," : "") + replacement);
-    return json;
-}
-
 dli::common::PersistentHttpClient& persistent_client_for_url(const std::string& url) {
     static std::mutex mutex;
     static std::unordered_map<std::string, std::unique_ptr<dli::common::PersistentHttpClient>> clients;
@@ -130,62 +88,6 @@ dli::common::PersistentHttpClient& persistent_client_for_url(const std::string& 
     }
     return *it->second;
 }
-
-std::string append_chain_metrics(
-    std::string downstream_metadata,
-    const dli::common::StageMetrics& local_metrics,
-    double next_rpc_wall_ms,
-    std::size_t request_bytes,
-    std::size_t response_bytes
-) {
-    double downstream_compute = 0.0;
-    double downstream_rpc = 0.0;
-    double downstream_true_comm = 0.0;
-    double downstream_payload = 0.0;
-    double downstream_hops = 0.0;
-
-    if (!extract_number_field(downstream_metadata, "chain_compute_time_ms", downstream_compute)) {
-        (void)extract_number_field(downstream_metadata, "compute_time_ms", downstream_compute);
-    }
-    if (!extract_number_field(downstream_metadata, "chain_rpc_wall_time_ms", downstream_rpc)) {
-        (void)extract_number_field(downstream_metadata, "rpc_wall_time_ms", downstream_rpc);
-    }
-    if (!extract_number_field(downstream_metadata, "chain_true_comm_ms", downstream_true_comm)) {
-        (void)extract_number_field(downstream_metadata, "true_comm_ms", downstream_true_comm);
-    }
-    (void)extract_number_field(downstream_metadata, "chain_transport_payload_bytes", downstream_payload);
-    (void)extract_number_field(downstream_metadata, "chain_hops", downstream_hops);
-
-    const double local_true_comm = std::max(0.0, next_rpc_wall_ms - local_metrics.compute_time_ms);
-
-    downstream_metadata = upsert_number_field(
-        downstream_metadata,
-        "chain_compute_time_ms",
-        downstream_compute + local_metrics.compute_time_ms
-    );
-    downstream_metadata = upsert_number_field(
-        downstream_metadata,
-        "chain_rpc_wall_time_ms",
-        downstream_rpc + next_rpc_wall_ms
-    );
-    downstream_metadata = upsert_number_field(
-        downstream_metadata,
-        "chain_true_comm_ms",
-        downstream_true_comm + local_true_comm
-    );
-    downstream_metadata = upsert_number_field(
-        downstream_metadata,
-        "chain_transport_payload_bytes",
-        downstream_payload + static_cast<double>(request_bytes + response_bytes)
-    );
-    downstream_metadata = upsert_number_field(
-        downstream_metadata,
-        "chain_hops",
-        downstream_hops + 1.0
-    );
-    return downstream_metadata;
-}
-
 
 dli::common::HttpResponse handle_forward_binary(
     const dli::common::HttpRequest& request,
@@ -581,12 +483,12 @@ dli::common::HttpResponse handle_forward_binary(
             dli::common::DliFrame downstream =
                 dli::common::decode_frame(next_response.body);
 
-            downstream.metadata_json = append_chain_metrics(
+            downstream.metadata_json = dli::common::merge_chain_metrics(
                 downstream.metadata_json,
                 runtime_response.metrics,
                 next_rpc_wall_ms,
-                next_body.size(),
-                next_response.body.size()
+                static_cast<std::uint64_t>(next_body.size()),
+                static_cast<std::uint64_t>(next_response.body.size())
             );
 
             return dli::common::make_binary_response(
