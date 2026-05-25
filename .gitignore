@@ -4,6 +4,5 @@
 !.env.example
 .codex
 .vscode/
-documentation/
 models/
 build/
