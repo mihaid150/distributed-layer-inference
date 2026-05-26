@@ -86,7 +86,7 @@ const RUNTIME_VARIANTS = {
     label: "Native C++",
     description: "C++ gateway/stage pods using llama.cpp and DLI2 binary frames",
     supportsChat: false,
-    supportsFeatureFlags: true,
+    supportsFeatureFlags: false,
     targets: {
       gateway: {
         deployment: "inference-native-gateway-deployment",
@@ -766,6 +766,9 @@ function normalizeHistoryEntry(input) {
   const output = input.output && typeof input.output === "object" && !Array.isArray(input.output)
     ? input.output
     : {};
+  const dashboard = input.dashboard && typeof input.dashboard === "object" && !Array.isArray(input.dashboard)
+    ? input.dashboard
+    : {};
   const normalizedFeatureFlags = normalizeHistoryFeatureFlags(profile.featureFlags);
   const moduleVariants = deriveHistoryModuleVariants(
     normalizedFeatureFlags,
@@ -840,7 +843,8 @@ function normalizeHistoryEntry(input) {
       assistantMessage,
       terminationReason,
       preview: outputPreview
-    }
+    },
+    dashboard
   };
 
   return record;
@@ -1793,6 +1797,27 @@ function handleEndpointCatalog(req, res, query) {
   const namespace = resolveNamespace(query);
   const variant = resolveRuntimeVariant(query);
   const runtimeVariant = getRuntimeVariantInfo(variant);
+  const generateBody = {
+    prompt: "Write one short sentence about distributed inference.",
+    max_new_tokens: 24,
+    min_new_tokens: 8,
+    temperature: 0.2
+  };
+
+  if (runtimeVariant.supportsFeatureFlags) {
+    generateBody.feature_flags = {
+      transport_mode: "binary_octet_stream",
+      activation_precision: "fp32",
+      kv_cache_enabled: true,
+      forward_dedupe_enabled: false,
+      rebalance_profile: "baseline",
+      topology_aware_routing: false,
+      persistent_sessions_enabled: false,
+      backpressure_enabled: false,
+      backpressure_queue_size: 0
+    };
+  }
+
   const presets = [
     {
       id: "gateway-health",
@@ -1818,23 +1843,7 @@ function handleEndpointCatalog(req, res, query) {
       path: "/generate",
       timeoutMs: INVOKE_TIMEOUT_LONG_DEFAULT_MS,
       source: "gateway",
-      body: {
-        prompt: "Write one short sentence about distributed inference.",
-        max_new_tokens: 24,
-        min_new_tokens: 8,
-        temperature: 0.2,
-        feature_flags: {
-          transport_mode: "binary_octet_stream",
-          activation_precision: "fp32",
-          kv_cache_enabled: true,
-          forward_dedupe_enabled: false,
-          rebalance_profile: "baseline",
-          topology_aware_routing: false,
-          persistent_sessions_enabled: false,
-          backpressure_enabled: false,
-          backpressure_queue_size: 0
-        }
-      }
+      body: generateBody
     }
   ];
 

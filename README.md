@@ -451,8 +451,8 @@ Use port `30081` when calling the native gateway profile.
 
 ## Operations UI
 
-The `ops-ui` package provides a small local dashboard for topology, pod health,
-logs, endpoint calls, chat, and metric timelines.
+The `ops-ui` package provides a small local dashboard for pod health, workload
+state, logs, endpoint calls, chat, and metric timelines.
 
 ```bash
 cd ops-ui
@@ -496,9 +496,9 @@ The top bar controls the scope for the whole dashboard:
 - `Runtime` switches between:
   - `PyTorch`, using `inference-*` deployments and services.
   - `Native C++`, using `inference-native-*` deployments and services.
-- `Refresh` sets the topology refresh interval.
+- `Refresh` sets the cluster/workload refresh interval.
 - `Auto` enables or disables automatic refresh.
-- `Refresh Now` manually reloads topology and runtime state.
+- `Refresh Now` manually reloads cluster, workload, and runtime state.
 - `History` opens the stored metrics history page.
 
 The page also accepts URL parameters, for example:
@@ -519,20 +519,6 @@ The overview cards summarize cluster state from `kubectl`:
 
 Use this area first to confirm that the UI is reading the expected cluster and
 runtime profile.
-
-#### Pipeline Topology
-
-The topology view shows the gateway and ordered stage chain for the selected
-runtime. Each node in the pipeline is built from the expected deployment,
-service, and pod labels configured in `ops-ui/server.js`.
-
-It is useful for quickly checking:
-
-- whether the gateway pod is present;
-- whether all four stage pods are present;
-- which worker node each stage pod is scheduled on;
-- whether a stage is missing, pending, restarting, or not ready;
-- whether the selected runtime profile matches the manifests currently deployed.
 
 #### Architecture + Module Guide
 
@@ -652,7 +638,10 @@ editable.
 #### Feature Modules
 
 The feature module controls update the `feature_flags` object for endpoint and
-chat requests when the selected runtime supports feature flags.
+chat requests. They are shown and enabled only for the Python/PyTorch runtime.
+The Native C++ runtime uses its compiled native behavior and DLI2/GGUF path, so
+the Ops UI hides these controls and strips `feature_flags` from native endpoint
+requests.
 
 Available controls:
 
@@ -667,11 +656,6 @@ Available controls:
 - backpressure queue size.
 
 `Baseline Profile` resets the controls to the default baseline feature flags.
-
-For the Native C++ runtime, feature support depends on the native gateway/stage
-implementation. The UI still exposes runtime-specific endpoint calls and native
-metrics, but Python-only feature controls may be disabled or ignored by the
-native endpoint.
 
 #### Metrics Dashboard
 
@@ -694,6 +678,12 @@ derived metrics, including:
 
 The raw response JSON remains available in the collapsible `Raw Response JSON`
 section.
+
+Each successful endpoint experiment is also persisted to the History store with
+the dashboard data used to render the result, including metric cards, alerts,
+efficiency KPIs, critical-path rows, per-stage rows, per-node rows, per-token
+rows, metric catalog rows, request config, call metadata, and the normalized
+response JSON.
 
 #### Chat + Metric Evolution
 
@@ -736,8 +726,16 @@ The history page supports:
 - a wide run table with prompt size, token counts, latency, throughput,
   communication ratios, memory, network volume, profile, module variants, and
   generated text;
+- full dashboard snapshots for newly recorded endpoint and chat experiments;
+- exporting selected experiments as JSON;
+- exporting selected experiments as CSV;
 - selecting and deleting individual runs;
 - clearing all stored runs.
+
+Use the row checkboxes to select experiments, then choose `Export selected JSON`
+for complete records or `Export selected CSV` for a flattened table. JSON export
+includes the stored dashboard snapshot; CSV export includes a `dashboard_json`
+column alongside the main scalar fields.
 
 History storage is local to the machine running `ops-ui/server.js`; it is not a
 cluster resource.
@@ -749,7 +747,7 @@ The browser uses these local server endpoints:
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/runtime` | Current Ops UI server counters and in-flight request state |
-| `GET /api/topology` | Nodes, deployments, pods, services, and pipeline mapping |
+| `GET /api/topology` | Nodes, deployments, pods, services, and workload mapping used by the dashboard |
 | `GET /api/endpoint-catalog` | Runtime targets and endpoint presets |
 | `GET /api/logs` | App or init container logs for a selected target |
 | `POST /api/invoke` | Proxy a request to a selected gateway/stage pod |
@@ -768,7 +766,7 @@ Check a fresh deployment:
 1. Set `Namespace` to `inference`.
 2. Select `PyTorch` or `Native C++`.
 3. Click `Refresh Now`.
-4. Confirm the pipeline shows one gateway and four stages.
+4. Confirm the workloads table shows one gateway and four stages.
 5. Run `Gateway Health`.
 6. Run `Stage Health` for each stage target.
 7. Load init logs for stages if model downloads are failing.

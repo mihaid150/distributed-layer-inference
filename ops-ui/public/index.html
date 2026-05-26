@@ -48,11 +48,6 @@
         <div id="overviewCards" class="cards"></div>
       </section>
 
-      <section class="panel">
-        <h2>Pipeline Topology</h2>
-        <div id="pipeline" class="pipeline"></div>
-      </section>
-
       <section class="panel panel-wide">
         <h2>Architecture + Module Guide</h2>
         <div id="architectureGuide" class="architecture-guide"></div>
@@ -204,6 +199,10 @@
           <textarea id="endpointBody" class="endpoint-body" spellcheck="false">{}</textarea>
         </label>
         <div id="invokeMeta" class="log-summary"></div>
+        <div class="received-text-panel">
+          <h3>Received Text</h3>
+          <div id="endpointReceivedText" class="received-text muted">Run a text generation endpoint to see the returned text.</div>
+        </div>
         <div id="invokeMetricsDashboard" class="invoke-metrics-dashboard"></div>
         <details class="raw-response">
           <summary>Raw Response JSON</summary>

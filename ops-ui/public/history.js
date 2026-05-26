@@ -12,6 +12,8 @@ const els = {
   compareA: document.getElementById("compareA"),
   compareB: document.getElementById("compareB"),
   compareSummary: document.getElementById("compareSummary"),
+  historyExportJsonBtn: document.getElementById("historyExportJsonBtn"),
+  historyExportCsvBtn: document.getElementById("historyExportCsvBtn"),
   historyDeleteSelectedBtn: document.getElementById("historyDeleteSelectedBtn"),
   historyClearAllBtn: document.getElementById("historyClearAllBtn"),
   historySelectAll: document.getElementById("historySelectAll"),
@@ -109,11 +111,25 @@ function formatOutputPreview(text, maxLen = 180) {
 }
 
 function updateDeleteControls() {
+  const selectedCount = selectedHistoryIds.size;
+
+  if (els.historyExportJsonBtn) {
+    els.historyExportJsonBtn.disabled = selectedCount === 0;
+    els.historyExportJsonBtn.textContent =
+      selectedCount > 0 ? `Export selected JSON (${selectedCount})` : "Export selected JSON";
+  }
+
+  if (els.historyExportCsvBtn) {
+    els.historyExportCsvBtn.disabled = selectedCount === 0;
+    els.historyExportCsvBtn.textContent =
+      selectedCount > 0 ? `Export selected CSV (${selectedCount})` : "Export selected CSV";
+  }
+
   if (els.historyDeleteSelectedBtn) {
-    els.historyDeleteSelectedBtn.disabled = selectedHistoryIds.size === 0;
+    els.historyDeleteSelectedBtn.disabled = selectedCount === 0;
     els.historyDeleteSelectedBtn.textContent =
-      selectedHistoryIds.size > 0
-        ? `Delete selected (${selectedHistoryIds.size})`
+      selectedCount > 0
+        ? `Delete selected (${selectedCount})`
         : "Delete selected";
   }
 
@@ -126,6 +142,114 @@ function updateDeleteControls() {
     els.historySelectAll.indeterminate =
       !allSelected && visibleIds.some((id) => selectedHistoryIds.has(id));
   }
+}
+
+function selectedHistoryRows() {
+  return historyRows.filter((row) => selectedHistoryIds.has(Number(row.id)));
+}
+
+function downloadTextFile(fileName, text, mimeType) {
+  const blob = new Blob([text], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+function csvCell(value) {
+  if (value == null) {
+    return "";
+  }
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  return `"${String(text).replaceAll('"', '""')}"`;
+}
+
+function historyRowToCsvRecord(row) {
+  const config = asObject(row.config);
+  const metrics = asObject(row.metrics);
+  const profile = asObject(row.profile);
+  const output = asObject(row.output);
+  const dashboard = asObject(row.dashboard);
+  return {
+    id: row.id,
+    created_at: row.createdAt,
+    type: row.type,
+    namespace: row.namespace,
+    target: row.target,
+    method: row.method,
+    path: row.path,
+    prompt_chars: config.promptChars,
+    prompt_tokens: config.promptTokens,
+    generated_tokens: metrics.generatedTokens,
+    max_new_tokens: config.maxNewTokens,
+    min_new_tokens: config.minNewTokens,
+    temperature: config.temperature,
+    timeout_ms: config.timeoutMs,
+    model_name: config.modelName,
+    topology_hash: config.topologyHash,
+    baseline: profile.baseline,
+    enabled_modules: asArray(profile.enabledModules).join(";"),
+    module_variants: asArray(profile.moduleVariants).join(";"),
+    feature_flags_json: asObject(profile.featureFlags),
+    latency_ms: metrics.latencyMs,
+    tokens_per_second: metrics.tokensPerSecond,
+    compute_ms: metrics.computeMs,
+    transfer_ms: metrics.transferMs,
+    true_comm_ms: metrics.trueCommMs,
+    rpc_compute_ratio: metrics.rpcComputeRatio,
+    true_comm_compute_ratio: metrics.trueCommComputeRatio,
+    payload_mib: metrics.payloadMib,
+    network_mib: metrics.networkMib,
+    max_memory_mb: metrics.maxMemoryMb,
+    token_p50_ms: metrics.tokenP50Ms,
+    token_p95_ms: metrics.tokenP95Ms,
+    token_p99_ms: metrics.tokenP99Ms,
+    transfer_p50_ms: metrics.transferP50Ms,
+    transfer_p95_ms: metrics.transferP95Ms,
+    transfer_p99_ms: metrics.transferP99Ms,
+    termination_reason: output.terminationReason,
+    generated_text: getOutputText(row),
+    dashboard_json: dashboard
+  };
+}
+
+function exportSelectedHistoryJson() {
+  const rows = selectedHistoryRows();
+  if (!rows.length) {
+    return;
+  }
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    count: rows.length,
+    entries: rows
+  };
+  downloadTextFile(
+    `dli-history-selected-${Date.now()}.json`,
+    JSON.stringify(payload, null, 2),
+    "application/json"
+  );
+}
+
+function exportSelectedHistoryCsv() {
+  const rows = selectedHistoryRows();
+  if (!rows.length) {
+    return;
+  }
+  const records = rows.map(historyRowToCsvRecord);
+  const headers = Object.keys(records[0]);
+  const csv = [
+    headers.map(csvCell).join(","),
+    ...records.map((record) => headers.map((header) => csvCell(record[header])).join(","))
+  ].join("\n");
+  downloadTextFile(
+    `dli-history-selected-${Date.now()}.csv`,
+    `${csv}\n`,
+    "text/csv"
+  );
 }
 
 async function deleteHistory(ids, { all = false } = {}) {
@@ -647,6 +771,8 @@ els.historyNamespace.addEventListener("change", refreshHistory);
 els.historyLimit.addEventListener("change", refreshHistory);
 els.compareA.addEventListener("change", renderCompareSummary);
 els.compareB.addEventListener("change", renderCompareSummary);
+els.historyExportJsonBtn.addEventListener("click", exportSelectedHistoryJson);
+els.historyExportCsvBtn.addEventListener("click", exportSelectedHistoryCsv);
 els.historyDeleteSelectedBtn.addEventListener("click", deleteSelectedHistoryRuns);
 els.historyClearAllBtn.addEventListener("click", clearAllHistoryRuns);
 

@@ -47,6 +47,7 @@ const els = {
   invokeEndpointBtn: document.getElementById("invokeEndpointBtn"),
   invokeClearRunsBtn: document.getElementById("invokeClearRunsBtn"),
   invokeMeta: document.getElementById("invokeMeta"),
+  endpointReceivedText: document.getElementById("endpointReceivedText"),
   invokeMetricsDashboard: document.getElementById("invokeMetricsDashboard"),
   invokeOutput: document.getElementById("invokeOutput"),
   chatTimeout: document.getElementById("chatTimeout"),
@@ -394,6 +395,42 @@ function buildHistoryOutputPayload(responseJson) {
   };
 }
 
+function extractReceivedText(responseJson) {
+  const response = asObject(responseJson);
+  const assistant = String(response.assistant_message || "").trim();
+  const generated = String(response.generated_text || "").trim();
+  const text = assistant || generated;
+  if (text) {
+    return text;
+  }
+  if (response.next_token_text != null) {
+    return String(response.next_token_text);
+  }
+  return "";
+}
+
+function renderEndpointReceivedText(responseJson) {
+  if (!els.endpointReceivedText) {
+    return;
+  }
+  const text = extractReceivedText(responseJson);
+  if (!text) {
+    els.endpointReceivedText.classList.add("muted");
+    els.endpointReceivedText.textContent = "No generated text field was returned by this endpoint.";
+    return;
+  }
+  els.endpointReceivedText.classList.remove("muted");
+  els.endpointReceivedText.textContent = text;
+}
+
+function clearEndpointReceivedText(message = "Run a text generation endpoint to see the returned text.") {
+  if (!els.endpointReceivedText) {
+    return;
+  }
+  els.endpointReceivedText.classList.add("muted");
+  els.endpointReceivedText.textContent = message;
+}
+
 function buildTopologyHash() {
   const parts = [...podToNodeMap.entries()]
     .map(([pod, node]) => `${pod}:${node}`)
@@ -641,72 +678,8 @@ function syncFeatureFlagControlState() {
   els.featureBackpressureQueue.disabled = !enabled;
 }
 
-function syncNativeFeatureControls() {
-  const isNative = getRuntimeVariant() === "native";
-
-  if (!isNative) {
-    return;
-  }
-
-  // Native always uses binary DLI2 frames.
-  if (els.featureTransportBinary) {
-    els.featureTransportBinary.checked = true;
-  }
-  if (els.featureTransportJson) {
-    els.featureTransportJson.disabled = true;
-  }
-  if (els.featureTransportBinary) {
-    els.featureTransportBinary.disabled = true;
-  }
-
-  // Native currently supports fp32, and fp16 only if the C++ fp16 patch is deployed.
-  // Keep fp32 enabled. Enable fp16 only when you have deployed that implementation.
-  if (els.featurePrecisionFp32) {
-    els.featurePrecisionFp32.disabled = false;
-  }
-  if (els.featurePrecisionFp16) {
-    els.featurePrecisionFp16.disabled = false;
-  }
-  if (els.featurePrecisionBf16) {
-    els.featurePrecisionBf16.disabled = true;
-  }
-  if (els.featurePrecisionInt8) {
-    els.featurePrecisionInt8.disabled = true;
-  }
-
-  // Native can use baseline vs latency-balanced as a deployment profile label.
-  if (els.featureRebalanceBaseline) {
-    els.featureRebalanceBaseline.disabled = false;
-  }
-  if (els.featureRebalanceLatency) {
-    els.featureRebalanceLatency.disabled = false;
-  }
-
-  // KV cache is part of native runtime. Keep visible.
-  if (els.featureKvCache) {
-    els.featureKvCache.disabled = false;
-    els.featureKvCache.checked = true;
-  }
-
-  // These are not implemented in native yet.
-  if (els.featureForwardDedupe) {
-    els.featureForwardDedupe.disabled = true;
-  }
-  if (els.featureTopologyAware) {
-    els.featureTopologyAware.disabled = true;
-  }
-  if (els.featurePersistentSessions) {
-    els.featurePersistentSessions.disabled = true;
-  }
-  if (els.featureBackpressure) {
-    els.featureBackpressure.disabled = true;
-  }
-  if (els.featureBackpressureQueue) {
-    els.featureBackpressureQueue.disabled = true;
-  }
-}
-
 function syncRuntimeUiState() {
+  const featurePanel = document.querySelector(".feature-flags-panel");
   const featureControls = [
     els.featureTransportJson,
     els.featureTransportBinary,
@@ -728,13 +701,13 @@ function syncRuntimeUiState() {
   for (const control of featureControls) {
     control.disabled = !featureFlagsEnabled;
   }
-  document
-    .querySelector(".feature-flags-panel")
-    ?.classList.toggle("is-disabled", !featureFlagsEnabled);
+  if (featurePanel) {
+    featurePanel.hidden = !featureFlagsEnabled;
+    featurePanel.classList.toggle("is-disabled", !featureFlagsEnabled);
+  }
   if (featureFlagsEnabled) {
     syncFeatureFlagControlState();
   }
-  syncNativeFeatureControls();
 }
 
 function syncFeatureFlagControlsFromBody() {
@@ -841,7 +814,19 @@ function applyEndpointPreset(preset) {
     els.endpointTimeout.value = String(parseEndpointTimeoutMs(preset.timeoutMs));
   }
   const bodyValue = preset.body == null ? {} : preset.body;
-  els.endpointBody.value = prettyJson(bodyValue);
+  const normalizedBody =
+    bodyValue && typeof bodyValue === "object" && !Array.isArray(bodyValue)
+      ? { ...bodyValue }
+      : bodyValue;
+  if (
+    normalizedBody &&
+    typeof normalizedBody === "object" &&
+    !Array.isArray(normalizedBody) &&
+    !supportsFeatureFlags()
+  ) {
+    delete normalizedBody.feature_flags;
+  }
+  els.endpointBody.value = prettyJson(normalizedBody);
   syncGenerationControlsEnabledState();
   syncGenerationFieldsFromBody();
 }
@@ -1060,6 +1045,10 @@ function renderOverview(data) {
 }
 
 function renderPipeline(data) {
+  if (!els.pipeline) {
+    return;
+  }
+
   const gateway = data.orchestration.gateway;
   const stages = data.orchestration.stages;
   const parts = [];
@@ -2799,7 +2788,7 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
     )
     .join("");
 
-  const criticalPathRows = [
+  const criticalPathItems = [
     {
       key: "Gateway Serialization",
       ms: criticalPath.gatewaySerializationMs,
@@ -2835,7 +2824,8 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
       ms: criticalPath.overheadMs,
       note: "Total latency minus gateway-visible pipeline."
     }
-  ]
+  ];
+  const criticalPathRows = criticalPathItems
     .map(
       (row) => `
       <tr>
@@ -2849,7 +2839,7 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
     )
     .join("");
 
-  const efficiencyKpiRows = [
+  const efficiencyKpis = [
     {
       key: "Network bytes / generated token",
       value: `${formatNumber(bytesPerGeneratedToken, 1)} B/token`,
@@ -2881,7 +2871,8 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
       value: formatNumber(rpcComputeRatio, 3),
       note: "Blocking RPC wall time divided by compute time."
     }
-  ]
+  ];
+  const efficiencyKpiRows = efficiencyKpis
     .map(
       (row) => `
       <tr>
@@ -2966,7 +2957,24 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
         perStage: runSummary.perStage,
         perNode: runSummary.perNode
       },
-      output: buildHistoryOutputPayload(responseJson)
+      output: buildHistoryOutputPayload(responseJson),
+      dashboard: {
+        kind: "endpoint",
+        cards,
+        alerts,
+        efficiencyKpis,
+        criticalPath,
+        criticalPathItems,
+        stageRows,
+        nodeRows,
+        tokenRows,
+        metricCatalogRows: catalogRows,
+        runSummary,
+        sessionRunEvolution: invokeRuns.slice(-40),
+        requestConfig,
+        callMeta,
+        responseJson
+      }
     }
   ]);
 
@@ -3134,7 +3142,6 @@ async function loadTopology() {
       data.generatedAt
     ).toLocaleString()}`;
     renderOverview(data);
-    renderPipeline(data);
     renderWorkloads(data);
     const podNodeEntries = [];
     for (const pod of data.pods || []) {
@@ -3267,6 +3274,7 @@ async function invokeEndpoint() {
     `;
 
     const responseJson = normalizeResponseMetrics(payload.responseJson, payload.call || {});
+    renderEndpointReceivedText(responseJson);
     renderInvokeMetrics(responseJson, payload.call || {}, {
       ...parseGenerateConfigFromBody(parsedBody),
       timeoutMs,
@@ -3286,6 +3294,7 @@ async function invokeEndpoint() {
     els.invokeMeta.innerHTML = `<div class="log-pill line-err">Invoke error: ${escapeHtml(
       error.message
     )}</div>`;
+    clearEndpointReceivedText("No received text because the endpoint call failed.");
     els.invokeMetricsDashboard.innerHTML = "";
     els.invokeOutput.textContent = "";
   } finally {
@@ -4065,7 +4074,16 @@ async function sendChatTurn() {
           })),
           perNode: Object.values(asObject(turnSummary.per_node)).map((node) => asObject(node))
         },
-        output: buildHistoryOutputPayload(response)
+        output: buildHistoryOutputPayload(response),
+        dashboard: {
+          kind: "chat",
+          turnSummary,
+          chatTurns,
+          conversation: chatMessages,
+          requestConfig,
+          callMeta: payload.call || {},
+          responseJson: response
+        }
       }
     ]);
 
@@ -4108,6 +4126,7 @@ function clearEndpointRunSession() {
   els.invokeMeta.innerHTML = `<div class="log-pill">Endpoint session results cleared.</div>`;
   els.invokeMetricsDashboard.innerHTML =
     `<div class="muted">No endpoint run history in this browser session yet.</div>`;
+  clearEndpointReceivedText();
   els.invokeOutput.textContent = "";
 }
 
