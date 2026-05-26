@@ -5,26 +5,26 @@ This document describes how to add the client/worker nodes to the existing K3s c
 The K3s master node is:
 
 ```text
-k3s-master
-192.168.201.225
+dli-control-plane
+<CONTROL_PLANE_IP>
 ```
 
 The K3s API endpoint is:
 
 ```text
-https://192.168.201.225:6443
+https://<CONTROL_PLANE_IP>:6443
 ```
 
 ## Worker Nodes
 
 | Physical Node | Recommended K3s Node Name | Interface | Node IP |
 |---|---|---|---|
-| `pinode7` | `pinode7` | `wlan0` | `192.168.201.226` |
-| `pinode8` | `pinode8` | `wlan0` | `192.168.201.227` |
-| `pinode9` | `pinode9` | `wlan0` | `192.168.201.228` |
-| `pinode10` | `pinode10` | `wlan0` | `192.168.201.229` |
+| `dli-worker-1` | `dli-worker-1` | `wlan0` | `<WORKER_1_IP>` |
+| `dli-worker-2` | `dli-worker-2` | `wlan0` | `<WORKER_2_IP>` |
+| `dli-worker-3` | `dli-worker-3` | `wlan0` | `<WORKER_3_IP>` |
+| `dli-worker-4` | `dli-worker-4` | `wlan0` | `<WORKER_4_IP>` |
 
-Use unique node names. Even if each machine shows the shell prompt `k3s-client`, the Kubernetes node name should be different for every worker.
+Use unique node names. Even if each machine shows the shell prompt `dli-worker`, the Kubernetes node name should be different for every worker.
 
 ## 1. Verify Network On Each Client
 
@@ -39,16 +39,16 @@ hostname -I
 Expected client IPs:
 
 ```text
-pinode7   192.168.201.226
-pinode8   192.168.201.227
-pinode9   192.168.201.228
-pinode10  192.168.201.229
+dli-worker-1   <WORKER_1_IP>
+dli-worker-2   <WORKER_2_IP>
+dli-worker-3   <WORKER_3_IP>
+dli-worker-4  <WORKER_4_IP>
 ```
 
 Verify each worker can reach the master:
 
 ```bash
-ping -c 3 192.168.201.225
+ping -c 3 <CONTROL_PLANE_IP>
 ```
 
 ## 2. Verify Time Sync
@@ -112,47 +112,47 @@ ls -lh /tmp/install-k3s.sh
 
 If the download fails with an SSL certificate error, fix time sync first.
 
-## 5. Join `pinode7`
+## 5. Join `dli-worker-1`
 
-Run on `pinode7`:
+Run on `dli-worker-1`:
 
 ```bash
-sudo env K3S_URL="https://192.168.201.225:6443" \
+sudo env K3S_URL="https://<CONTROL_PLANE_IP>:6443" \
 K3S_TOKEN="<K3S_NODE_TOKEN>" \
-INSTALL_K3S_EXEC="agent --node-name pinode7 --node-ip 192.168.201.226" \
+INSTALL_K3S_EXEC="agent --node-name dli-worker-1 --node-ip <WORKER_1_IP>" \
 sh /tmp/install-k3s.sh
 ```
 
-## 6. Join `pinode8`
+## 6. Join `dli-worker-2`
 
-Run on `pinode8`:
+Run on `dli-worker-2`:
 
 ```bash
-sudo env K3S_URL="https://192.168.201.225:6443" \
+sudo env K3S_URL="https://<CONTROL_PLANE_IP>:6443" \
 K3S_TOKEN="<K3S_NODE_TOKEN>" \
-INSTALL_K3S_EXEC="agent --node-name pinode8 --node-ip 192.168.201.227" \
+INSTALL_K3S_EXEC="agent --node-name dli-worker-2 --node-ip <WORKER_2_IP>" \
 sh /tmp/install-k3s.sh
 ```
 
-## 7. Join `pinode9`
+## 7. Join `dli-worker-3`
 
-Run on `pinode9`:
+Run on `dli-worker-3`:
 
 ```bash
-sudo env K3S_URL="https://192.168.201.225:6443" \
+sudo env K3S_URL="https://<CONTROL_PLANE_IP>:6443" \
 K3S_TOKEN="<K3S_NODE_TOKEN>" \
-INSTALL_K3S_EXEC="agent --node-name pinode9 --node-ip 192.168.201.228" \
+INSTALL_K3S_EXEC="agent --node-name dli-worker-3 --node-ip <WORKER_3_IP>" \
 sh /tmp/install-k3s.sh
 ```
 
-## 8. Join `pinode10`
+## 8. Join `dli-worker-4`
 
-Run on `pinode10`:
+Run on `dli-worker-4`:
 
 ```bash
-sudo env K3S_URL="https://192.168.201.225:6443" \
+sudo env K3S_URL="https://<CONTROL_PLANE_IP>:6443" \
 K3S_TOKEN="<K3S_NODE_TOKEN>" \
-INSTALL_K3S_EXEC="agent --node-name pinode10 --node-ip 192.168.201.229" \
+INSTALL_K3S_EXEC="agent --node-name dli-worker-4 --node-ip <WORKER_4_IP>" \
 sh /tmp/install-k3s.sh
 ```
 
@@ -188,11 +188,11 @@ Expected cluster view:
 
 ```text
 NAME         STATUS   ROLES                INTERNAL-IP
-k3s-master   Ready    control-plane,etcd   192.168.201.225
-pinode7      Ready    <none>               192.168.201.226
-pinode8      Ready    <none>               192.168.201.227
-pinode9      Ready    <none>               192.168.201.228
-pinode10     Ready    <none>               192.168.201.229
+dli-control-plane   Ready    control-plane,etcd   <CONTROL_PLANE_IP>
+dli-worker-1      Ready    <none>               <WORKER_1_IP>
+dli-worker-2      Ready    <none>               <WORKER_2_IP>
+dli-worker-3      Ready    <none>               <WORKER_3_IP>
+dli-worker-4     Ready    <none>               <WORKER_4_IP>
 ```
 
 Also verify system pods:
@@ -237,7 +237,7 @@ Use this template for any new worker:
 ```bash
 curl -fL https://get.k3s.io -o /tmp/install-k3s.sh
 
-sudo env K3S_URL="https://192.168.201.225:6443" \
+sudo env K3S_URL="https://<CONTROL_PLANE_IP>:6443" \
 K3S_TOKEN="<K3S_NODE_TOKEN>" \
 INSTALL_K3S_EXEC="agent --node-name NODE_NAME --node-ip NODE_IP" \
 sh /tmp/install-k3s.sh

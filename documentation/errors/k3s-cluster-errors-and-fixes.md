@@ -6,11 +6,11 @@ Cluster final:
 
 | Nod | Rol | IP |
 |---|---|---|
-| `k3s-master` / `pinode6` | control-plane + etcd | `192.168.201.225` |
-| `pinode7` | worker | `192.168.201.226` |
-| `pinode8` | worker | `192.168.201.227` |
-| `pinode9` | worker | `192.168.201.228` |
-| `pinode10` | worker | `192.168.201.229` |
+| `dli-control-plane` / `dli-control-plane-host` | control-plane + etcd | `<CONTROL_PLANE_IP>` |
+| `dli-worker-1` | worker | `<WORKER_1_IP>` |
+| `dli-worker-2` | worker | `<WORKER_2_IP>` |
+| `dli-worker-3` | worker | `<WORKER_3_IP>` |
+| `dli-worker-4` | worker | `<WORKER_4_IP>` |
 
 ## 1. `k3s.service` Nu Exista Dupa Instalare
 
@@ -95,7 +95,7 @@ NTP service: active
 Simptom:
 
 ```text
-listen tcp 192.168.1.10:2380: bind: cannot assign requested address
+listen tcp <WRONG_NODE_IP>:2380: bind: cannot assign requested address
 ```
 
 Problema:
@@ -103,14 +103,14 @@ Problema:
 - Masterul a fost instalat initial cu:
 
 ```text
---node-ip 192.168.1.10
---advertise-address 192.168.1.10
+--node-ip <WRONG_NODE_IP>
+--advertise-address <WRONG_NODE_IP>
 ```
 
 - Dar IP-ul real al interfetei `wlan0` era:
 
 ```text
-192.168.201.225/24
+<CONTROL_PLANE_IP>/24
 ```
 
 Diagnostic:
@@ -124,7 +124,7 @@ Rezolvare:
 Instalarea a fost refacuta cu IP-ul corect:
 
 ```bash
-sudo env INSTALL_K3S_EXEC="server --node-name k3s-master --write-kubeconfig-mode 644 --cluster-init --disable traefik --disable servicelb --flannel-backend vxlan --node-ip 192.168.201.225 --advertise-address 192.168.201.225" sh /tmp/install-k3s.sh
+sudo env INSTALL_K3S_EXEC="server --node-name dli-control-plane --write-kubeconfig-mode 644 --cluster-init --disable traefik --disable servicelb --flannel-backend vxlan --node-ip <CONTROL_PLANE_IP> --advertise-address <CONTROL_PLANE_IP>" sh /tmp/install-k3s.sh
 ```
 
 Verificare:
@@ -146,7 +146,7 @@ Problema:
 - Variabilele de mediu au fost rulate separat:
 
 ```bash
-sudo env K3S_URL="https://192.168.201.225:6443"
+sudo env K3S_URL="https://<CONTROL_PLANE_IP>:6443"
 K3S_TOKEN="..."
 INSTALL_K3S_EXEC="agent ..." sh /tmp/install-k3s.sh
 ```
@@ -159,9 +159,9 @@ Rezolvare:
 Toate variabilele trebuie transmise in aceeasi comanda:
 
 ```bash
-sudo env K3S_URL="https://192.168.201.225:6443" \
+sudo env K3S_URL="https://<CONTROL_PLANE_IP>:6443" \
 K3S_TOKEN="<K3S_NODE_TOKEN>" \
-INSTALL_K3S_EXEC="agent --node-name pinode7 --node-ip 192.168.201.226" \
+INSTALL_K3S_EXEC="agent --node-name dli-worker-1 --node-ip <WORKER_1_IP>" \
 sh /tmp/install-k3s.sh
 ```
 
@@ -329,8 +329,8 @@ Rezultat corect pe master:
 Simptome:
 
 ```text
-pinode10 NotReady
-pinode8  NotReady
+dli-worker-4 NotReady
+dli-worker-2  NotReady
 ```
 
 Loguri intalnite pe agenti:
@@ -370,13 +370,13 @@ sudo k3s kubectl delete node NODE_NAME --ignore-not-found
 Reinstalare worker:
 
 ```bash
-sudo env K3S_URL="https://192.168.201.225:6443" \
+sudo env K3S_URL="https://<CONTROL_PLANE_IP>:6443" \
 K3S_TOKEN="<K3S_NODE_TOKEN>" \
 INSTALL_K3S_EXEC="agent --node-name NODE_NAME --node-ip NODE_IP" \
 sh /tmp/install-k3s.sh
 ```
 
-## 9. `pinode8` A Iesit Cu `Result: protocol`
+## 9. `dli-worker-2` A Iesit Cu `Result: protocol`
 
 Simptom:
 
@@ -408,15 +408,15 @@ sudo systemctl daemon-reload
 Pe master:
 
 ```bash
-sudo k3s kubectl delete node pinode8 --ignore-not-found
+sudo k3s kubectl delete node dli-worker-2 --ignore-not-found
 ```
 
-Reinstalare `pinode8`:
+Reinstalare `dli-worker-2`:
 
 ```bash
-sudo env K3S_URL="https://192.168.201.225:6443" \
+sudo env K3S_URL="https://<CONTROL_PLANE_IP>:6443" \
 K3S_TOKEN="<K3S_NODE_TOKEN>" \
-INSTALL_K3S_EXEC="agent --node-name pinode8 --node-ip 192.168.201.227" \
+INSTALL_K3S_EXEC="agent --node-name dli-worker-2 --node-ip <WORKER_2_IP>" \
 sh /tmp/install-k3s.sh
 ```
 
@@ -432,11 +432,11 @@ Rezultat final:
 
 ```text
 NAME         STATUS   ROLES                INTERNAL-IP
-k3s-master   Ready    control-plane,etcd   192.168.201.225
-pinode7      Ready    <none>               192.168.201.226
-pinode8      Ready    <none>               192.168.201.227
-pinode9      Ready    <none>               192.168.201.228
-pinode10     Ready    <none>               192.168.201.229
+dli-control-plane   Ready    control-plane,etcd   <CONTROL_PLANE_IP>
+dli-worker-1      Ready    <none>               <WORKER_1_IP>
+dli-worker-2      Ready    <none>               <WORKER_2_IP>
+dli-worker-3      Ready    <none>               <WORKER_3_IP>
+dli-worker-4     Ready    <none>               <WORKER_4_IP>
 ```
 
 ## Lectii Importante

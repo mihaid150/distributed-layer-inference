@@ -14,7 +14,7 @@ spec:
         app: inference-stage-4
     spec:
       nodeSelector:
-        kubernetes.io/hostname: pinode10
+        kubernetes.io/hostname: dli-worker-4
       initContainers:
         - name: fetch-stage-partition
           image: python:3.11-slim

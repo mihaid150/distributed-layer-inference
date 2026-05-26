@@ -37,7 +37,7 @@ python -m dli.model_splitter.cli \
   --num-stages 4 \
   --output-dir models/partitions/tinyllama-1.1b-chat/4-stage \
   --stage-map-file configs/stage_map.yaml \
-  --physical-nodes pinode7 pinode8 pinode9 pinode10 \
+  --physical-nodes dli-worker-1 dli-worker-2 dli-worker-3 dli-worker-4 \
   --dtype float32 \
   --device cpu \
   --force

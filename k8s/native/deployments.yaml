@@ -14,7 +14,7 @@ spec:
         app: inference-native-stage-1
     spec:
       nodeSelector:
-        kubernetes.io/hostname: pinode7
+        kubernetes.io/hostname: dli-worker-1
       initContainers:
         - name: fetch-native-stage-shard
           image: python:3.11-slim
@@ -173,7 +173,7 @@ spec:
         app: inference-native-stage-2
     spec:
       nodeSelector:
-        kubernetes.io/hostname: pinode8
+        kubernetes.io/hostname: dli-worker-2
       initContainers:
         - name: fetch-native-stage-shard
           image: python:3.11-slim
@@ -332,7 +332,7 @@ spec:
         app: inference-native-stage-3
     spec:
       nodeSelector:
-        kubernetes.io/hostname: pinode9
+        kubernetes.io/hostname: dli-worker-3
       initContainers:
         - name: fetch-native-stage-shard
           image: python:3.11-slim
@@ -491,7 +491,7 @@ spec:
         app: inference-native-stage-4
     spec:
       nodeSelector:
-        kubernetes.io/hostname: pinode10
+        kubernetes.io/hostname: dli-worker-4
       initContainers:
         - name: fetch-native-stage-shard
           image: python:3.11-slim

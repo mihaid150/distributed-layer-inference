@@ -1,11 +1,11 @@
 # K3s Master Setup Notes
 
-This document records the K3s master installation flow used on `k3s-master`, including the failed attempts, the diagnostics, the fixes, and the final working commands.
+This document records the K3s master installation flow used on `dli-control-plane`, including the failed attempts, the diagnostics, the fixes, and the final working commands.
 
 The target machine was an Ubuntu 24.04 ARM64 node with wireless IP:
 
 ```text
-192.168.201.225
+<CONTROL_PLANE_IP>
 ```
 
 ## 1. Initial Install Attempt
@@ -15,14 +15,14 @@ The first command attempted to install K3s as a server node:
 ```bash
 curl -sfL https://get.k3s.io | \
 INSTALL_K3S_EXEC="server \
---node-name k3s-master \
+--node-name dli-control-plane \
 --write-kubeconfig-mode 644 \
 --cluster-init \
 --disable traefik \
 --disable servicelb \
 --flannel-backend vxlan \
---node-ip 192.168.1.10 \
---advertise-address 192.168.1.10" \
+--node-ip <WRONG_NODE_IP> \
+--advertise-address <WRONG_NODE_IP>" \
 sh -
 ```
 
@@ -43,7 +43,7 @@ Explanation:
 
 - The install script did not complete.
 - `curl -s` hid the real error.
-- The requested node IP, `192.168.1.10`, was also not the actual IP of the machine.
+- The requested node IP, `<WRONG_NODE_IP>`, was also not the actual IP of the machine.
 
 ## 2. Retry Installer With Sudo
 
@@ -51,14 +51,14 @@ The install was retried with root privileges:
 
 ```bash
 curl -sfL https://get.k3s.io | sudo env INSTALL_K3S_EXEC="server \
---node-name k3s-master \
+--node-name dli-control-plane \
 --write-kubeconfig-mode 644 \
 --cluster-init \
 --disable traefik \
 --disable servicelb \
 --flannel-backend vxlan \
---node-ip 192.168.1.10 \
---advertise-address 192.168.1.10" sh -
+--node-ip <WRONG_NODE_IP> \
+--advertise-address <WRONG_NODE_IP>" sh -
 ```
 
 The service still did not exist:
@@ -85,7 +85,7 @@ The next step was to download the script into a file and run it with shell traci
 
 ```bash
 curl -sfL https://get.k3s.io -o install-k3s.sh
-sudo env INSTALL_K3S_EXEC="server --node-name k3s-master --write-kubeconfig-mode 644 --cluster-init --disable traefik --disable servicelb --flannel-backend vxlan --node-ip 192.168.1.10 --advertise-address 192.168.1.10" sh -x install-k3s.sh
+sudo env INSTALL_K3S_EXEC="server --node-name dli-control-plane --write-kubeconfig-mode 644 --cluster-init --disable traefik --disable servicelb --flannel-backend vxlan --node-ip <WRONG_NODE_IP> --advertise-address <WRONG_NODE_IP>" sh -x install-k3s.sh
 ```
 
 Result:
@@ -127,7 +127,7 @@ getent hosts get.k3s.io
 The system clock was wrong:
 
 ```text
-Wed Mar 18 20:13:39 EET 2026
+Wed Mar 18 20:13:39 <LOCAL_TZ> 2026
 ```
 
 Explanation:
@@ -159,10 +159,10 @@ timedatectl
 Expected result:
 
 ```text
-Local time: Tue 2026-05-05 ... EEST
+Local time: Tue 2026-05-05 ... <LOCAL_TZ>
 System clock synchronized: yes
 NTP service: active
-Time zone: Europe/Bucharest
+Time zone: <LOCAL_TIME_ZONE>
 ```
 
 Explanation:
@@ -195,7 +195,7 @@ Explanation:
 The installer was then run with the original IP:
 
 ```bash
-sudo env INSTALL_K3S_EXEC="server --node-name k3s-master --write-kubeconfig-mode 644 --cluster-init --disable traefik --disable servicelb --flannel-backend vxlan --node-ip 192.168.1.10 --advertise-address 192.168.1.10" sh /tmp/install-k3s.sh
+sudo env INSTALL_K3S_EXEC="server --node-name dli-control-plane --write-kubeconfig-mode 644 --cluster-init --disable traefik --disable servicelb --flannel-backend vxlan --node-ip <WRONG_NODE_IP> --advertise-address <WRONG_NODE_IP>" sh /tmp/install-k3s.sh
 ```
 
 K3s installed and created the service, but startup failed:
@@ -214,12 +214,12 @@ sudo journalctl -u k3s.service -b -n 200 --no-pager
 Important error:
 
 ```text
-listen tcp 192.168.1.10:2380: bind: cannot assign requested address
+listen tcp <WRONG_NODE_IP>:2380: bind: cannot assign requested address
 ```
 
 Explanation:
 
-- K3s embedded etcd tried to bind to `192.168.1.10`.
+- K3s embedded etcd tried to bind to `<WRONG_NODE_IP>`.
 - That IP was not assigned to the host.
 - Linux cannot bind a service to an address that does not exist on any local interface.
 
@@ -234,13 +234,13 @@ ip addr show wlan0
 The actual IP was:
 
 ```text
-inet 192.168.201.225/24
+inet <CONTROL_PLANE_IP>/24
 ```
 
 Explanation:
 
 - The correct K3s `--node-ip` and `--advertise-address` must match the reachable IP of the node.
-- In this setup, the master node is reached at `192.168.201.225`.
+- In this setup, the master node is reached at `<CONTROL_PLANE_IP>`.
 
 ## 9. Reinstall K3s With Correct IP
 
@@ -259,7 +259,7 @@ sudo /usr/local/bin/k3s-uninstall.sh
 Then reinstall with the real IP:
 
 ```bash
-sudo env INSTALL_K3S_EXEC="server --node-name k3s-master --write-kubeconfig-mode 644 --cluster-init --disable traefik --disable servicelb --flannel-backend vxlan --node-ip 192.168.201.225 --advertise-address 192.168.201.225" sh /tmp/install-k3s.sh
+sudo env INSTALL_K3S_EXEC="server --node-name dli-control-plane --write-kubeconfig-mode 644 --cluster-init --disable traefik --disable servicelb --flannel-backend vxlan --node-ip <CONTROL_PLANE_IP> --advertise-address <CONTROL_PLANE_IP>" sh /tmp/install-k3s.sh
 ```
 
 Explanation:
@@ -268,8 +268,8 @@ Explanation:
 - `--disable traefik` disables the bundled Traefik ingress controller.
 - `--disable servicelb` disables the bundled K3s service load balancer.
 - `--flannel-backend vxlan` uses VXLAN for pod networking.
-- `--node-ip 192.168.201.225` sets the node's internal IP.
-- `--advertise-address 192.168.201.225` sets the address advertised to other nodes and clients.
+- `--node-ip <CONTROL_PLANE_IP>` sets the node's internal IP.
+- `--advertise-address <CONTROL_PLANE_IP>` sets the address advertised to other nodes and clients.
 
 ## 10. Verify Master Node
 
@@ -289,7 +289,7 @@ Expected result:
 
 ```text
 NAME         STATUS   ROLES                VERSION        INTERNAL-IP
-k3s-master   Ready    control-plane,etcd   v1.35.4+k3s1   192.168.201.225
+dli-control-plane   Ready    control-plane,etcd   v1.35.4+k3s1   <CONTROL_PLANE_IP>
 ```
 
 Explanation:
@@ -332,7 +332,7 @@ curl -fL https://get.k3s.io -o /tmp/install-k3s.sh
 Then join the worker:
 
 ```bash
-sudo env K3S_URL="https://192.168.201.225:6443" \
+sudo env K3S_URL="https://<CONTROL_PLANE_IP>:6443" \
 K3S_TOKEN="<K3S_NODE_TOKEN>" \
 INSTALL_K3S_EXEC="agent --node-name WORKER_NAME --node-ip WORKER_IP" \
 sh /tmp/install-k3s.sh
@@ -365,7 +365,7 @@ sudo k3s kubectl get nodes -o wide
 Expected result:
 
 ```text
-k3s-master   Ready   control-plane,etcd   ...
+dli-control-plane   Ready   control-plane,etcd   ...
 worker-1     Ready   <none>               ...
 worker-2     Ready   <none>               ...
 ```
@@ -386,7 +386,7 @@ Use the new token for future worker joins.
 This is the final command that worked for the master node:
 
 ```bash
-sudo env INSTALL_K3S_EXEC="server --node-name k3s-master --write-kubeconfig-mode 644 --cluster-init --disable traefik --disable servicelb --flannel-backend vxlan --node-ip 192.168.201.225 --advertise-address 192.168.201.225" sh /tmp/install-k3s.sh
+sudo env INSTALL_K3S_EXEC="server --node-name dli-control-plane --write-kubeconfig-mode 644 --cluster-init --disable traefik --disable servicelb --flannel-backend vxlan --node-ip <CONTROL_PLANE_IP> --advertise-address <CONTROL_PLANE_IP>" sh /tmp/install-k3s.sh
 ```
 
 ## Quick Validation Commands

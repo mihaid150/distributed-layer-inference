@@ -60,7 +60,7 @@ spec:
             - key: kubernetes.io/hostname
               operator: In
               values:
-                - pinode7
+                - dli-worker-1
 
 ---
 apiVersion: v1
@@ -100,7 +100,7 @@ spec:
             - key: kubernetes.io/hostname
               operator: In
               values:
-                - pinode8
+                - dli-worker-2
 
 ---
 apiVersion: v1
@@ -140,7 +140,7 @@ spec:
             - key: kubernetes.io/hostname
               operator: In
               values:
-                - pinode9
+                - dli-worker-3
 
 ---
 apiVersion: v1
@@ -180,7 +180,7 @@ spec:
             - key: kubernetes.io/hostname
               operator: In
               values:
-                - pinode10
+                - dli-worker-4
 
 ---
 apiVersion: v1

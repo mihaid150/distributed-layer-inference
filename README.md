@@ -69,17 +69,20 @@ subnet:
 
 | Kubernetes node | Physical node | Role | IP | Workload role |
 | --- | --- | --- | --- | --- |
-| `k3s-master` | `pinode6` | control plane + etcd | `192.168.201.225` | gateway / orchestration |
-| `pinode7` | `pinode7` | worker | `192.168.201.226` | stage 1 |
-| `pinode8` | `pinode8` | worker | `192.168.201.227` | stage 2 |
-| `pinode9` | `pinode9` | worker | `192.168.201.228` | stage 3 |
-| `pinode10` | `pinode10` | worker | `192.168.201.229` | stage 4 |
+| `dli-control-plane` | `dli-control-plane-host` | control plane + etcd | `<CONTROL_PLANE_IP>` | gateway / orchestration |
+| `dli-worker-1` | `dli-worker-1` | worker | `<WORKER_1_IP>` | stage 1 |
+| `dli-worker-2` | `dli-worker-2` | worker | `<WORKER_2_IP>` | stage 2 |
+| `dli-worker-3` | `dli-worker-3` | worker | `<WORKER_3_IP>` | stage 3 |
+| `dli-worker-4` | `dli-worker-4` | worker | `<WORKER_4_IP>` | stage 4 |
 
 The K3s API endpoint for this setup is:
 
 ```text
-https://192.168.201.225:6443
+https://<CONTROL_PLANE_IP>:6443
 ```
+
+Replace the placeholder node names and addresses with your own cluster values
+before applying manifests or running the setup commands.
 
 Important operational assumptions from the cluster documentation:
 
@@ -144,7 +147,7 @@ python -m dli.model_splitter.cli \
   --num-stages 4 \
   --output-dir models/partitions/tinyllama-1.1b-chat/4-stage \
   --stage-map-file configs/stage_map.yaml \
-  --physical-nodes pinode7 pinode8 pinode9 pinode10 \
+  --physical-nodes dli-worker-1 dli-worker-2 dli-worker-3 dli-worker-4 \
   --dtype float32 \
   --device cpu \
   --force
@@ -440,9 +443,9 @@ The default NodePort gateway services are:
 Example gateway request:
 
 ```bash
-curl -s http://192.168.201.225:30080/health
+curl -s http://<CONTROL_PLANE_IP>:30080/health
 
-curl -s http://192.168.201.225:30080/generate \
+curl -s http://<CONTROL_PLANE_IP>:30080/generate \
   -H "Content-Type: application/json" \
   -d '{"prompt":"Explain distributed edge inference in one sentence.","max_new_tokens":32,"min_new_tokens":1}'
 ```

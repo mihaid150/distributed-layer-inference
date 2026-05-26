@@ -22,7 +22,7 @@ void test_stage_1_config(const std::string& config_path) {
 
     assert(config.stage_id == 1);
     assert(config.service_name == "inference-stage-1");
-    assert(config.physical_node == "pinode7");
+    assert(config.physical_node == "dli-worker-1");
     assert(config.partition_file == "/app/models/stage_1.pt");
     assert(config.next_stage_url == "http://inference-stage-2:8000/forward");
 
@@ -40,7 +40,7 @@ void test_stage_4_config(const std::string& config_path) {
 
     assert(config.stage_id == 4);
     assert(config.service_name == "inference-stage-4");
-    assert(config.physical_node == "pinode10");
+    assert(config.physical_node == "dli-worker-4");
     assert(config.partition_file == "/app/models/stage_4.pt");
     assert(config.next_stage_url.empty());
 

@@ -34,7 +34,7 @@ void test_gateway_config_loads_expected_fields(const std::string& config_path) {
     assert(p0.stage_id == 1);
     assert(p0.partition_id == "partition-1");
     assert(p0.service_name == "inference-stage-1");
-    assert(p0.physical_node == "pinode7");
+    assert(p0.physical_node == "dli-worker-1");
     assert(p0.partition_file == "/app/models/stage_1.pt");
     assert(p0.next_stage_url == "http://inference-stage-2:8000/forward");
     assert(p0.components.embedding);
@@ -46,7 +46,7 @@ void test_gateway_config_loads_expected_fields(const std::string& config_path) {
     assert(p3.stage_id == 4);
     assert(p3.partition_id == "partition-4");
     assert(p3.service_name == "inference-stage-4");
-    assert(p3.physical_node == "pinode10");
+    assert(p3.physical_node == "dli-worker-4");
     assert(p3.partition_file == "/app/models/stage_4.pt");
     assert(p3.next_stage_url.empty());
     assert(!p3.components.embedding);

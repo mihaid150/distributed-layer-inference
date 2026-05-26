@@ -6,5 +6,5 @@ metadata:
 data:
   STAGE_MAP_PATH: "/app/configs/stage_map.yaml"
   MODEL_NAME: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-  HF_STAGE_REPO: "mipedadsrl150/dli-tinyllama-1.1b-4stage"
+  HF_STAGE_REPO: "your-user-or-org/dli-tinyllama-1.1b-4stage"
   HF_STAGE_REVISION: "main"

@@ -10,7 +10,7 @@ inference_stages:
 - stage_id: 1
   partition_id: partition-1
   service_name: inference-native-stage-1
-  physical_node: pinode7
+  physical_node: dli-worker-1
   partition_file: /app/models/stage_1.pt
   native_partition_file: /app/models/partition-1.dli.gguf
   backend: llama
@@ -29,7 +29,7 @@ inference_stages:
 - stage_id: 2
   partition_id: partition-2
   service_name: inference-native-stage-2
-  physical_node: pinode8
+  physical_node: dli-worker-2
   partition_file: /app/models/stage_2.pt
   native_partition_file: /app/models/partition-2.dli.gguf
   backend: llama
@@ -48,7 +48,7 @@ inference_stages:
 - stage_id: 3
   partition_id: partition-3
   service_name: inference-native-stage-3
-  physical_node: pinode9
+  physical_node: dli-worker-3
   partition_file: /app/models/stage_3.pt
   native_partition_file: /app/models/partition-3.dli.gguf
   backend: llama
@@ -68,7 +68,7 @@ inference_stages:
 - stage_id: 4
   partition_id: partition-4
   service_name: inference-native-stage-4
-  physical_node: pinode10
+  physical_node: dli-worker-4
   partition_file: /app/models/stage_4.pt
   native_partition_file: /app/models/partition-4.dli.gguf
   backend: llama

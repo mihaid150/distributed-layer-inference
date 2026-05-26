@@ -7,7 +7,7 @@ Use it in order. Stop when the node is healthy.
 ## 0) Fast Diagnose (always run first)
 
 ```bash
-kubectl describe node k3s-master | egrep -i "Taints|DiskPressure"
+kubectl describe node dli-control-plane | egrep -i "Taints|DiskPressure"
 df -h
 sudo du -h --max-depth=1 /var/lib/rancher/k3s | sort -h
 ```
@@ -33,7 +33,7 @@ df -h
 Re-check node condition:
 
 ```bash
-kubectl describe node k3s-master | egrep -i "Taints|DiskPressure"
+kubectl describe node dli-control-plane | egrep -i "Taints|DiskPressure"
 ```
 
 If still under pressure, continue.
@@ -97,7 +97,7 @@ Verify:
 ```bash
 sudo ls -lah /var/lib/rancher/k3s/agent | grep containerd
 df -h
-kubectl describe node k3s-master | egrep -i "Taints|DiskPressure"
+kubectl describe node dli-control-plane | egrep -i "Taints|DiskPressure"
 ```
 
 ---
@@ -152,7 +152,7 @@ kubectl -n inference logs <stage-pod-name> -c fetch-stage-partition --previous -
 ## 7) Sanity Checklist
 
 - Node has no taint:
-  - `kubectl describe node k3s-master | grep -i Taints`
+  - `kubectl describe node dli-control-plane | grep -i Taints`
 - `DiskPressure=False`
 - Free disk is comfortably above kubelet eviction threshold
 - Deployments use current image tags (not stale old tags)

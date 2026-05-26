@@ -6,11 +6,11 @@ The cluster nodes are:
 
 | Kubernetes Node Name | Physical Node | Role Label | IP |
 |---|---|---|---|
-| `k3s-master` | `pinode6` | `role=master` | `192.168.201.225` |
-| `pinode7` | `pinode7` | `role=client` | `192.168.201.226` |
-| `pinode8` | `pinode8` | `role=client` | `192.168.201.227` |
-| `pinode9` | `pinode9` | `role=client` | `192.168.201.228` |
-| `pinode10` | `pinode10` | `role=client` | `192.168.201.229` |
+| `dli-control-plane` | `dli-control-plane-host` | `role=master` | `<CONTROL_PLANE_IP>` |
+| `dli-worker-1` | `dli-worker-1` | `role=client` | `<WORKER_1_IP>` |
+| `dli-worker-2` | `dli-worker-2` | `role=client` | `<WORKER_2_IP>` |
+| `dli-worker-3` | `dli-worker-3` | `role=client` | `<WORKER_3_IP>` |
+| `dli-worker-4` | `dli-worker-4` | `role=client` | `<WORKER_4_IP>` |
 
 ## 1. Verify Cluster Nodes
 
@@ -24,11 +24,11 @@ Expected result:
 
 ```text
 NAME         STATUS   ROLES                INTERNAL-IP
-k3s-master   Ready    control-plane,etcd   192.168.201.225
-pinode7      Ready    <none>               192.168.201.226
-pinode8      Ready    <none>               192.168.201.227
-pinode9      Ready    <none>               192.168.201.228
-pinode10     Ready    <none>               192.168.201.229
+dli-control-plane   Ready    control-plane,etcd   <CONTROL_PLANE_IP>
+dli-worker-1      Ready    <none>               <WORKER_1_IP>
+dli-worker-2      Ready    <none>               <WORKER_2_IP>
+dli-worker-3      Ready    <none>               <WORKER_3_IP>
+dli-worker-4     Ready    <none>               <WORKER_4_IP>
 ```
 
 ## 2. Label Worker Nodes
@@ -36,10 +36,10 @@ pinode10     Ready    <none>               192.168.201.229
 Label all worker nodes as inference clients:
 
 ```bash
-kubectl label node pinode7 role=client
-kubectl label node pinode8 role=client
-kubectl label node pinode9 role=client
-kubectl label node pinode10 role=client
+kubectl label node dli-worker-1 role=client
+kubectl label node dli-worker-2 role=client
+kubectl label node dli-worker-3 role=client
+kubectl label node dli-worker-4 role=client
 ```
 
 Explanation:
@@ -57,30 +57,30 @@ nodeSelector:
 
 ## 3. Label Master Node
 
-The Kubernetes node name for the master is `k3s-master`, not `pinode6`.
+The Kubernetes node name for the master is `dli-control-plane`, not `dli-control-plane-host`.
 
 This command is wrong:
 
 ```bash
-kubectl label node pinode6 role=master
+kubectl label node dli-control-plane-host role=master
 ```
 
-It fails because no Kubernetes node named `pinode6` exists:
+It fails because no Kubernetes node named `dli-control-plane-host` exists:
 
 ```text
-Error from server (NotFound): nodes "pinode6" not found
+Error from server (NotFound): nodes "dli-control-plane-host" not found
 ```
 
 Use this instead:
 
 ```bash
-kubectl label node k3s-master role=master
+kubectl label node dli-control-plane role=master
 ```
 
 Explanation:
 
-- `pinode6` is the physical device name used in the documentation.
-- `k3s-master` is the Kubernetes node name configured during K3s installation.
+- `dli-control-plane-host` is the physical device name used in the documentation.
+- `dli-control-plane` is the Kubernetes node name configured during K3s installation.
 - Kubernetes commands must use Kubernetes node names.
 
 ## 4. Verify Labels
@@ -94,22 +94,22 @@ kubectl get nodes --show-labels
 Expected labels:
 
 ```text
-k3s-master   ... role=master
-pinode7      ... role=client
-pinode8      ... role=client
-pinode9      ... role=client
-pinode10     ... role=client
+dli-control-plane   ... role=master
+dli-worker-1      ... role=client
+dli-worker-2      ... role=client
+dli-worker-3      ... role=client
+dli-worker-4     ... role=client
 ```
 
 Example observed output:
 
 ```text
 NAME         STATUS   ROLES                AGE     VERSION        LABELS
-k3s-master   Ready    control-plane,etcd   88m     v1.35.4+k3s1   beta.kubernetes.io/arch=arm64,beta.kubernetes.io/instance-type=k3s,beta.kubernetes.io/os=linux,kubernetes.io/arch=arm64,kubernetes.io/hostname=k3s-master,kubernetes.io/os=linux,node-role.kubernetes.io/control-plane=true,node-role.kubernetes.io/etcd=true,node.kubernetes.io/instance-type=k3s,role=master
-pinode10     Ready    <none>               29m     v1.35.4+k3s1   beta.kubernetes.io/arch=arm64,beta.kubernetes.io/instance-type=k3s,beta.kubernetes.io/os=linux,kubernetes.io/arch=arm64,kubernetes.io/hostname=pinode10,kubernetes.io/os=linux,node.kubernetes.io/instance-type=k3s,role=client
-pinode7      Ready    <none>               43m     v1.35.4+k3s1   beta.kubernetes.io/arch=arm64,beta.kubernetes.io/instance-type=k3s,beta.kubernetes.io/os=linux,kubernetes.io/arch=arm64,kubernetes.io/hostname=pinode7,kubernetes.io/os=linux,node.kubernetes.io/instance-type=k3s,role=client
-pinode8      Ready    <none>               9m41s   v1.35.4+k3s1   beta.kubernetes.io/arch=arm64,beta.kubernetes.io/instance-type=k3s,beta.kubernetes.io/os=linux,kubernetes.io/arch=arm64,kubernetes.io/hostname=pinode8,kubernetes.io/os=linux,node.kubernetes.io/instance-type=k3s,role=client
-pinode9      Ready    <none>               15m     v1.35.4+k3s1   beta.kubernetes.io/arch=arm64,beta.kubernetes.io/instance-type=k3s,beta.kubernetes.io/os=linux,kubernetes.io/hostname=pinode9,kubernetes.io/os=linux,node.kubernetes.io/instance-type=k3s,role=client
+dli-control-plane   Ready    control-plane,etcd   88m     v1.35.4+k3s1   beta.kubernetes.io/arch=arm64,beta.kubernetes.io/instance-type=k3s,beta.kubernetes.io/os=linux,kubernetes.io/arch=arm64,kubernetes.io/hostname=dli-control-plane,kubernetes.io/os=linux,node-role.kubernetes.io/control-plane=true,node-role.kubernetes.io/etcd=true,node.kubernetes.io/instance-type=k3s,role=master
+dli-worker-4     Ready    <none>               29m     v1.35.4+k3s1   beta.kubernetes.io/arch=arm64,beta.kubernetes.io/instance-type=k3s,beta.kubernetes.io/os=linux,kubernetes.io/arch=arm64,kubernetes.io/hostname=dli-worker-4,kubernetes.io/os=linux,node.kubernetes.io/instance-type=k3s,role=client
+dli-worker-1      Ready    <none>               43m     v1.35.4+k3s1   beta.kubernetes.io/arch=arm64,beta.kubernetes.io/instance-type=k3s,beta.kubernetes.io/os=linux,kubernetes.io/arch=arm64,kubernetes.io/hostname=dli-worker-1,kubernetes.io/os=linux,node.kubernetes.io/instance-type=k3s,role=client
+dli-worker-2      Ready    <none>               9m41s   v1.35.4+k3s1   beta.kubernetes.io/arch=arm64,beta.kubernetes.io/instance-type=k3s,beta.kubernetes.io/os=linux,kubernetes.io/arch=arm64,kubernetes.io/hostname=dli-worker-2,kubernetes.io/os=linux,node.kubernetes.io/instance-type=k3s,role=client
+dli-worker-3      Ready    <none>               15m     v1.35.4+k3s1   beta.kubernetes.io/arch=arm64,beta.kubernetes.io/instance-type=k3s,beta.kubernetes.io/os=linux,kubernetes.io/hostname=dli-worker-3,kubernetes.io/os=linux,node.kubernetes.io/instance-type=k3s,role=client
 ```
 
 ## 5. Create Inference Namespace
@@ -303,11 +303,11 @@ kubectl get storageclass
 The cluster configuration after labeling, namespace creation, Metrics Server configuration, and Local Path Provisioner configuration is:
 
 ```text
-k3s-master   role=master
-pinode7      role=client
-pinode8      role=client
-pinode9      role=client
-pinode10     role=client
+dli-control-plane   role=master
+dli-worker-1      role=client
+dli-worker-2      role=client
+dli-worker-3      role=client
+dli-worker-4     role=client
 namespace    inference
 metrics      metrics-server
 storage      local-path
