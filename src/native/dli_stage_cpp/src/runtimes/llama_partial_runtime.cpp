@@ -23,6 +23,9 @@
 #include <vector>
 #include <cstdlib>
 #include <limits>
+#include <array>
+
+#include <unistd.h>
 
 namespace dli_stage {
 
@@ -114,6 +117,125 @@ std::uint64_t env_u64_or_default(const char* name, std::uint64_t fallback) {
     } catch (const std::exception&) {
         return fallback;
     }
+}
+
+// utime + stime (fields 14 & 15) from /proc/self/stat, in clock ticks. The comm
+// field (2) can contain spaces and parentheses, so we anchor parsing at the last
+// ')' and count whitespace-separated tokens after it (state is the 1st).
+std::uint64_t read_self_cpu_jiffies() {
+    std::ifstream input("/proc/self/stat");
+    if (!input.is_open()) {
+        return 0;
+    }
+    std::string content(
+        (std::istreambuf_iterator<char>(input)),
+        std::istreambuf_iterator<char>()
+    );
+    const std::size_t close_paren = content.rfind(')');
+    if (close_paren == std::string::npos) {
+        return 0;
+    }
+    std::istringstream rest(content.substr(close_paren + 1));
+    std::string token;
+    int index = 0; // index of token after ')': state=1 ... utime=12, stime=13
+    std::uint64_t utime = 0;
+    std::uint64_t stime = 0;
+    while (rest >> token) {
+        ++index;
+        if (index == 12) {
+            try { utime = std::stoull(token); } catch (const std::exception&) {}
+        } else if (index == 13) {
+            try { stime = std::stoull(token); } catch (const std::exception&) {}
+            break;
+        }
+    }
+    return utime + stime;
+}
+
+// Aggregate busy/idle jiffies from the "cpu " summary line of /proc/stat.
+void read_proc_stat_totals(std::uint64_t& total, std::uint64_t& idle) {
+    total = 0;
+    idle = 0;
+    std::ifstream input("/proc/stat");
+    if (!input.is_open()) {
+        return;
+    }
+    std::string label;
+    input >> label;
+    if (label != "cpu") {
+        return;
+    }
+    std::array<std::uint64_t, 10> fields{};
+    std::size_t count = 0;
+    std::uint64_t value = 0;
+    while (count < fields.size() && (input >> value)) {
+        fields[count++] = value;
+    }
+    for (std::size_t i = 0; i < count; ++i) {
+        total += fields[i];
+    }
+    // idle = idle (field 4) + iowait (field 5)
+    if (count >= 4) {
+        idle = fields[3] + (count >= 5 ? fields[4] : 0);
+    }
+}
+
+void read_self_status_counters(
+    std::uint64_t& threads,
+    std::uint64_t& voluntary,
+    std::uint64_t& involuntary
+) {
+    threads = 0;
+    voluntary = 0;
+    involuntary = 0;
+    std::ifstream input("/proc/self/status");
+    if (!input.is_open()) {
+        return;
+    }
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.rfind("Threads:", 0) == 0) {
+            try { threads = std::stoull(line.substr(8)); } catch (const std::exception&) {}
+        } else if (line.rfind("voluntary_ctxt_switches:", 0) == 0) {
+            try { voluntary = std::stoull(line.substr(24)); } catch (const std::exception&) {}
+        } else if (line.rfind("nonvoluntary_ctxt_switches:", 0) == 0) {
+            try { involuntary = std::stoull(line.substr(27)); } catch (const std::exception&) {}
+        }
+    }
+}
+
+void read_self_io_counters(
+    std::uint64_t& read_bytes,
+    std::uint64_t& write_bytes,
+    std::uint64_t& read_count,
+    std::uint64_t& write_count
+) {
+    read_bytes = 0;
+    write_bytes = 0;
+    read_count = 0;
+    write_count = 0;
+    std::ifstream input("/proc/self/io");
+    if (!input.is_open()) {
+        return;
+    }
+    std::string key;
+    std::uint64_t value = 0;
+    while (input >> key >> value) {
+        if (key == "read_bytes:") {
+            read_bytes = value;
+        } else if (key == "write_bytes:") {
+            write_bytes = value;
+        } else if (key == "syscr:") {
+            read_count = value;
+        } else if (key == "syscw:") {
+            write_count = value;
+        }
+    }
+}
+
+std::uint64_t clock_ticks_per_second() {
+    const long ticks = sysconf(_SC_CLK_TCK);
+    return ticks > 0 ? static_cast<std::uint64_t>(ticks) : 100u;
 }
 
 std::int64_t read_i64_le(
@@ -448,6 +570,22 @@ void validate_runtime_request_matches_partition(
 }
 
 } // namespace
+
+ResourceUsageSnapshot capture_resource_snapshot() {
+    ResourceUsageSnapshot snapshot;
+    snapshot.proc_cpu_jiffies = read_self_cpu_jiffies();
+    read_proc_stat_totals(snapshot.sys_cpu_total_jiffies, snapshot.sys_cpu_idle_jiffies);
+    std::uint64_t threads = 0;
+    read_self_status_counters(threads, snapshot.ctx_voluntary, snapshot.ctx_involuntary);
+    read_self_io_counters(
+        snapshot.io_read_bytes,
+        snapshot.io_write_bytes,
+        snapshot.io_read_count,
+        snapshot.io_write_count
+    );
+    snapshot.valid = true;
+    return snapshot;
+}
 
 LlamaPartialRuntime::LlamaPartialRuntime(LlamaPartialRuntimeConfig config)
     : config_(std::move(config)) {
@@ -785,7 +923,9 @@ std::uint64_t LlamaPartialRuntime::total_session_kv_cache_bytes() const {
 }
 
 void LlamaPartialRuntime::populate_resource_metrics(
-    dli::common::StageMetrics& metrics
+    dli::common::StageMetrics& metrics,
+    const ResourceUsageSnapshot& start_snapshot,
+    double wall_ms
 ) const {
     metrics.memory_rss_mb = current_rss_mb();
 
@@ -802,6 +942,54 @@ void LlamaPartialRuntime::populate_resource_metrics(
     metrics.model_file_size_mb = model_file_size_mb_;
     metrics.session_count = static_cast<std::uint64_t>(sessions_.size());
     metrics.session_kv_cache_bytes = total_session_kv_cache_bytes();
+
+    const ResourceUsageSnapshot end_snapshot = capture_resource_snapshot();
+    if (!start_snapshot.valid || !end_snapshot.valid) {
+        return;
+    }
+
+    // Thread count is instantaneous (read live rather than as a delta).
+    {
+        std::uint64_t threads = 0;
+        std::uint64_t vctx = 0;
+        std::uint64_t nvctx = 0;
+        read_self_status_counters(threads, vctx, nvctx);
+        metrics.process_threads = threads;
+    }
+
+    const double wall_seconds = wall_ms > 0.0 ? wall_ms / 1000.0 : 0.0;
+    const std::uint64_t hz = clock_ticks_per_second();
+
+    if (wall_seconds > 0.0 && end_snapshot.proc_cpu_jiffies >= start_snapshot.proc_cpu_jiffies) {
+        const double proc_seconds =
+            static_cast<double>(end_snapshot.proc_cpu_jiffies - start_snapshot.proc_cpu_jiffies) /
+            static_cast<double>(hz);
+        metrics.process_cpu_percent = 100.0 * proc_seconds / wall_seconds;
+    }
+
+    const std::uint64_t total_delta =
+        end_snapshot.sys_cpu_total_jiffies >= start_snapshot.sys_cpu_total_jiffies
+            ? end_snapshot.sys_cpu_total_jiffies - start_snapshot.sys_cpu_total_jiffies
+            : 0;
+    const std::uint64_t idle_delta =
+        end_snapshot.sys_cpu_idle_jiffies >= start_snapshot.sys_cpu_idle_jiffies
+            ? end_snapshot.sys_cpu_idle_jiffies - start_snapshot.sys_cpu_idle_jiffies
+            : 0;
+    if (total_delta > 0 && total_delta >= idle_delta) {
+        metrics.system_cpu_percent =
+            100.0 * static_cast<double>(total_delta - idle_delta) /
+            static_cast<double>(total_delta);
+    }
+
+    auto delta = [](std::uint64_t end_v, std::uint64_t start_v) -> std::uint64_t {
+        return end_v >= start_v ? end_v - start_v : 0;
+    };
+    metrics.ctx_switches_voluntary = delta(end_snapshot.ctx_voluntary, start_snapshot.ctx_voluntary);
+    metrics.ctx_switches_involuntary = delta(end_snapshot.ctx_involuntary, start_snapshot.ctx_involuntary);
+    metrics.io_read_bytes_delta = delta(end_snapshot.io_read_bytes, start_snapshot.io_read_bytes);
+    metrics.io_write_bytes_delta = delta(end_snapshot.io_write_bytes, start_snapshot.io_write_bytes);
+    metrics.io_read_count_delta = delta(end_snapshot.io_read_count, start_snapshot.io_read_count);
+    metrics.io_write_count_delta = delta(end_snapshot.io_write_count, start_snapshot.io_write_count);
 }
 
 RuntimeResponse LlamaPartialRuntime::forward(const RuntimeRequest& request) {
@@ -895,6 +1083,7 @@ RuntimeResponse LlamaPartialRuntime::forward_source_partition(
     LlamaRequestSession& session = session_for_request(request);
 
     const auto start = std::chrono::steady_clock::now();
+    const ResourceUsageSnapshot res_start = capture_resource_snapshot();
 
     const PartitionKvCacheStep kv_step =
         update_kv_cache_for_request(request, session);
@@ -934,10 +1123,17 @@ RuntimeResponse LlamaPartialRuntime::forward_source_partition(
     response.metrics.kv_cache_seq_before = kv_step.seq_before;
     response.metrics.kv_cache_seq_after = kv_step.seq_after;
     response.metrics.kv_cache_bytes = session.executor->kv_cache_bytes();
+    response.metrics.matmul_ms = session.executor->profile_matmul_ms();
+    response.metrics.attention_ms = session.executor->profile_attention_ms();
+    response.metrics.ggml_threads = LlamaCpuExecutor::configured_threads();
     response.metrics.kv_cache_valid = kv_step.valid;
 
     response.metrics.model_load_ms = model_load_ms_;
-    populate_resource_metrics(response.metrics);
+    populate_resource_metrics(
+        response.metrics,
+        res_start,
+        elapsed_ms(start, std::chrono::steady_clock::now())
+    );
 
     return response;
 }
@@ -950,6 +1146,7 @@ RuntimeResponse LlamaPartialRuntime::forward_intermediate_partition(
     LlamaRequestSession& session = session_for_request(request);
 
     const auto start = std::chrono::steady_clock::now();
+    const ResourceUsageSnapshot res_start = capture_resource_snapshot();
 
     const PartitionKvCacheStep kv_step =
         update_kv_cache_for_request(request, session);
@@ -989,10 +1186,17 @@ RuntimeResponse LlamaPartialRuntime::forward_intermediate_partition(
     response.metrics.kv_cache_seq_before = kv_step.seq_before;
     response.metrics.kv_cache_seq_after = kv_step.seq_after;
     response.metrics.kv_cache_bytes = session.executor->kv_cache_bytes();
+    response.metrics.matmul_ms = session.executor->profile_matmul_ms();
+    response.metrics.attention_ms = session.executor->profile_attention_ms();
+    response.metrics.ggml_threads = LlamaCpuExecutor::configured_threads();
     response.metrics.kv_cache_valid = kv_step.valid;
 
     response.metrics.model_load_ms = model_load_ms_;
-    populate_resource_metrics(response.metrics);
+    populate_resource_metrics(
+        response.metrics,
+        res_start,
+        elapsed_ms(start, std::chrono::steady_clock::now())
+    );
 
     return response;
 }
@@ -1005,9 +1209,26 @@ RuntimeResponse LlamaPartialRuntime::forward_terminal_partition(
     LlamaRequestSession& session = session_for_request(request);
 
     const auto start = std::chrono::steady_clock::now();
+    const ResourceUsageSnapshot res_start = capture_resource_snapshot();
 
     const PartitionKvCacheStep kv_step =
         update_kv_cache_for_request(request, session);
+
+    LlamaSamplingParams sampling;
+    // Sampling is only engaged when the caller supplied a positive temperature;
+    // otherwise we keep deterministic greedy decoding.
+    sampling.enabled = request.has_temperature && request.temperature > 0.0;
+    if (request.has_temperature) {
+        sampling.temperature = static_cast<float>(request.temperature);
+    }
+    if (request.has_top_k) {
+        sampling.top_k = request.top_k;
+    }
+    if (request.has_top_p) {
+        sampling.top_p = static_cast<float>(request.top_p);
+    }
+    sampling.has_seed = request.has_seed;
+    sampling.seed = request.seed;
 
     RuntimeResponse response;
     response.is_final_stage = true;
@@ -1017,7 +1238,8 @@ RuntimeResponse LlamaPartialRuntime::forward_terminal_partition(
         request.generation_mode,
         kv_step.seq_before,
         shard_metadata_.owns_norm,
-        shard_metadata_.owns_lm_head
+        shard_metadata_.owns_lm_head,
+        sampling
     );
 
     response.output_tensor = {};
@@ -1043,10 +1265,17 @@ RuntimeResponse LlamaPartialRuntime::forward_terminal_partition(
     response.metrics.kv_cache_seq_before = kv_step.seq_before;
     response.metrics.kv_cache_seq_after = kv_step.seq_after;
     response.metrics.kv_cache_bytes = session.executor->kv_cache_bytes();
+    response.metrics.matmul_ms = session.executor->profile_matmul_ms();
+    response.metrics.attention_ms = session.executor->profile_attention_ms();
+    response.metrics.ggml_threads = LlamaCpuExecutor::configured_threads();
     response.metrics.kv_cache_valid = kv_step.valid;
 
     response.metrics.model_load_ms = model_load_ms_;
-    populate_resource_metrics(response.metrics);
+    populate_resource_metrics(
+        response.metrics,
+        res_start,
+        elapsed_ms(start, std::chrono::steady_clock::now())
+    );
 
     return response;
 }

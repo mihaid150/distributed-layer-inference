@@ -62,3 +62,29 @@ add_test(NAME test-stage-config COMMAND test-stage-config)
 set_tests_properties(test-stage-config PROPERTIES
     ENVIRONMENT "DLI_TEST_STAGE_MAP_PATH=${CMAKE_SOURCE_DIR}/../../configs/stage_map.yaml"
 )
+
+add_executable(test-attention-parity
+    tests/test_attention_parity.cpp
+    src/runtimes/llama_cpu_executor.cpp
+)
+
+target_include_directories(test-attention-parity PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(test-attention-parity PRIVATE
+    dli-common-cpp
+    llama
+)
+
+target_compile_features(test-attention-parity PRIVATE cxx_std_17)
+
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_options(test-attention-parity PRIVATE -O3)
+endif()
+
+set_target_properties(test-attention-parity PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
+add_test(NAME test-attention-parity COMMAND test-attention-parity)

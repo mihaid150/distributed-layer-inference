@@ -32,6 +32,9 @@ struct ParsedRequestMetadata {
     bool has_top_p = false;
     double top_p = 0.0;
 
+    bool has_seed = false;
+    long long seed = 0;
+
     bool has_next_token_id = false;
     int next_token_id = -1;
 

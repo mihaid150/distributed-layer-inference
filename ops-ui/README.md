@@ -34,6 +34,41 @@ Environment variables:
 - `OPS_UI_NAMESPACE` (default `inference`)
 - `OPS_UI_RUNTIME_VARIANT` (default `python`; set `native` for C++/llama.cpp pods)
 - `OPS_UI_KUBECTL_TIMEOUT_MS` (default `15000`)
+- `OPS_UI_NATIVE_MODELS_FILE` (default `native-models.json`; repo-root paths like `ops-ui/native-models.json` also work)
+- `OPS_UI_NATIVE_TOOLS_IMAGE` (default `mipeda150/distributed-layer-inference-native-tools:latest`)
+- `OPS_UI_NATIVE_CONFIGMAP` (default `dli-native-config`)
+- `HF_NATIVE_MODEL_ARTIFACT_REPO` optional template used when catalog entries omit `artifactRepo`; supports `{slug}`
+
+## Native Model Selection
+
+The native runtime uses restart-based model activation. In the Native C++ runtime,
+the **Native Model Controller** panel can:
+
+1. list configured GGUF models from `ops-ui/native-models.json`;
+2. start a Kubernetes Job that downloads a full GGUF, generates a matching
+   `stage_map.yaml`, creates `partition-N.dli.gguf` shards, validates them, and
+   uploads the artifacts to Hugging Face;
+3. activate a prepared catalog model, or activate the output of a completed prep
+   Job by patching `dli-native-config` and restarting the native gateway/stage
+   deployments.
+
+Setup:
+
+```bash
+cp ops-ui/native-models.example.json ops-ui/native-models.json
+```
+
+Edit the catalog entries with real Hugging Face repos/files. The prep Job reads
+`HF_TOKEN` and `HF_UPLOAD_TOKEN` from the `hf-hub` secret when available.
+The prep container runs the compiled C++ `dli-native-model-controller` binary
+from the native tools image; it does not run a Python controller.
+Artifact paths are model-scoped, for example:
+
+```text
+<model-slug>/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
+<model-slug>/partition-1.dli.gguf
+<model-slug>/partition-2.dli.gguf
+```
 
 ## Notes
 

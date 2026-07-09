@@ -14,7 +14,7 @@ spec:
         app: inference-native-stage-1
     spec:
       nodeSelector:
-        kubernetes.io/hostname: dli-worker-1
+        kubernetes.io/hostname: pinode7
       initContainers:
         - name: fetch-native-stage-shard
           image: python:3.11-slim
@@ -100,8 +100,19 @@ spec:
               mountPath: /models
       containers:
         - name: inference-native-stage-1
-          image: mipeda150/distributed-layer-inference-native-stage:v2026-13-05-0800
+          image: mipeda150/distributed-layer-inference-native-stage:v2026-17-06-2100
           imagePullPolicy: Always
+          env:
+            - name: DLI_GGML_THREADS
+              valueFrom:
+                configMapKeyRef:
+                  name: dli-native-config
+                  key: DLI_GGML_THREADS
+            - name: DLI_GGML_ATTENTION
+              valueFrom:
+                configMapKeyRef:
+                  name: dli-native-config
+                  key: DLI_GGML_ATTENTION
           command: ["/usr/local/bin/dli-stage-cpp"]
           args:
             - "--config"
@@ -126,18 +137,14 @@ spec:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 10
-            timeoutSeconds: 5
-            periodSeconds: 10
-            failureThreshold: 12
+            initialDelaySeconds: 5
+            periodSeconds: 5
           livenessProbe:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 30
-            timeoutSeconds: 5
-            periodSeconds: 20
-            failureThreshold: 18
+            initialDelaySeconds: 20
+            periodSeconds: 10
           resources:
             requests:
               memory: "512Mi"
@@ -173,7 +180,7 @@ spec:
         app: inference-native-stage-2
     spec:
       nodeSelector:
-        kubernetes.io/hostname: dli-worker-2
+        kubernetes.io/hostname: pinode8
       initContainers:
         - name: fetch-native-stage-shard
           image: python:3.11-slim
@@ -259,8 +266,19 @@ spec:
               mountPath: /models
       containers:
         - name: inference-native-stage-2
-          image: mipeda150/distributed-layer-inference-native-stage:v2026-13-05-0800
+          image: mipeda150/distributed-layer-inference-native-stage:v2026-17-06-2100
           imagePullPolicy: Always
+          env:
+            - name: DLI_GGML_THREADS
+              valueFrom:
+                configMapKeyRef:
+                  name: dli-native-config
+                  key: DLI_GGML_THREADS
+            - name: DLI_GGML_ATTENTION
+              valueFrom:
+                configMapKeyRef:
+                  name: dli-native-config
+                  key: DLI_GGML_ATTENTION
           command: ["/usr/local/bin/dli-stage-cpp"]
           args:
             - "--config"
@@ -285,18 +303,14 @@ spec:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 10
-            timeoutSeconds: 5
-            periodSeconds: 10
-            failureThreshold: 12
+            initialDelaySeconds: 5
+            periodSeconds: 5
           livenessProbe:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 30
-            timeoutSeconds: 5
-            periodSeconds: 20
-            failureThreshold: 18
+            initialDelaySeconds: 20
+            periodSeconds: 10
           resources:
             requests:
               memory: "512Mi"
@@ -332,7 +346,7 @@ spec:
         app: inference-native-stage-3
     spec:
       nodeSelector:
-        kubernetes.io/hostname: dli-worker-3
+        kubernetes.io/hostname: pinode9
       initContainers:
         - name: fetch-native-stage-shard
           image: python:3.11-slim
@@ -418,8 +432,19 @@ spec:
               mountPath: /models
       containers:
         - name: inference-native-stage-3
-          image: mipeda150/distributed-layer-inference-native-stage:v2026-13-05-0800
+          image: mipeda150/distributed-layer-inference-native-stage:v2026-17-06-2100
           imagePullPolicy: Always
+          env:
+            - name: DLI_GGML_THREADS
+              valueFrom:
+                configMapKeyRef:
+                  name: dli-native-config
+                  key: DLI_GGML_THREADS
+            - name: DLI_GGML_ATTENTION
+              valueFrom:
+                configMapKeyRef:
+                  name: dli-native-config
+                  key: DLI_GGML_ATTENTION
           command: ["/usr/local/bin/dli-stage-cpp"]
           args:
             - "--config"
@@ -444,18 +469,14 @@ spec:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 10
-            timeoutSeconds: 5
-            periodSeconds: 10
-            failureThreshold: 12
+            initialDelaySeconds: 5
+            periodSeconds: 5
           livenessProbe:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 30
-            timeoutSeconds: 5
-            periodSeconds: 20
-            failureThreshold: 18
+            initialDelaySeconds: 20
+            periodSeconds: 10
           resources:
             requests:
               memory: "512Mi"
@@ -491,7 +512,7 @@ spec:
         app: inference-native-stage-4
     spec:
       nodeSelector:
-        kubernetes.io/hostname: dli-worker-4
+        kubernetes.io/hostname: pinode10
       initContainers:
         - name: fetch-native-stage-shard
           image: python:3.11-slim
@@ -577,8 +598,19 @@ spec:
               mountPath: /models
       containers:
         - name: inference-native-stage-4
-          image: mipeda150/distributed-layer-inference-native-stage:v2026-13-05-0800
+          image: mipeda150/distributed-layer-inference-native-stage:v2026-17-06-2100
           imagePullPolicy: Always
+          env:
+            - name: DLI_GGML_THREADS
+              valueFrom:
+                configMapKeyRef:
+                  name: dli-native-config
+                  key: DLI_GGML_THREADS
+            - name: DLI_GGML_ATTENTION
+              valueFrom:
+                configMapKeyRef:
+                  name: dli-native-config
+                  key: DLI_GGML_ATTENTION
           command: ["/usr/local/bin/dli-stage-cpp"]
           args:
             - "--config"
@@ -603,18 +635,14 @@ spec:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 10
-            timeoutSeconds: 5
-            periodSeconds: 10
-            failureThreshold: 12
+            initialDelaySeconds: 5
+            periodSeconds: 5
           livenessProbe:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 30
-            timeoutSeconds: 5
-            periodSeconds: 20
-            failureThreshold: 18
+            initialDelaySeconds: 20
+            periodSeconds: 10
           resources:
             requests:
               memory: "512Mi"
@@ -750,7 +778,7 @@ spec:
               mountPath: /models
       containers:
         - name: inference-native-gateway
-          image: mipeda150/distributed-layer-inference-native-gateway:v2026-13-05-1200
+          image: mipeda150/distributed-layer-inference-native-gateway:v2026-17-06-2100
           imagePullPolicy: Always
           command: ["/usr/local/bin/dli-gateway-cpp"]
           args:

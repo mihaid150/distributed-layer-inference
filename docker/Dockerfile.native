@@ -28,9 +28,18 @@ ARG TARGETARCH
 ARG CMAKE_BUILD_TYPE=Release
 
 # Important for Docker buildx/QEMU arm64 builds:
-# disable auto-detected host CPU flags and use a portable ARM target.
+# disable auto-detected host CPU flags and pin an explicit ARM target.
+#
+# Stage pods run on Raspberry Pi 5 (Cortex-A76 = ARMv8.2-A with FP16 + the
+# dotprod SIMD extension). The previous baseline `armv8-a` target disabled
+# ggml's dotprod-accelerated quantized matmul kernels, which are the hot path
+# of the forward pass — leaving 2-4x of matmul throughput on the table. Target
+# the A76 feature set so ggml emits the fast NEON dotprod/fp16 kernels.
+# NOTE: i8mm is ARMv8.6 and NOT present on the A76, so it is intentionally
+# omitted. Override GGML_CPU_ARM_ARCH for older ARM hosts (e.g. Pi 4 / A72
+# need plain `armv8-a`) to avoid SIGILL.
 ARG GGML_NATIVE=OFF
-ARG GGML_CPU_ARM_ARCH=armv8-a
+ARG GGML_CPU_ARM_ARCH=armv8.2-a+fp16+dotprod
 ARG GGML_CPU_ALL_VARIANTS=OFF
 
 RUN if [ "${TARGETARCH}" = "arm64" ]; then \
@@ -103,8 +112,20 @@ CMD ["/usr/local/bin/dli-stage-cpp","--config", "/app/configs/stage_map.yaml","-
 # ------------------------------------------------------------
 FROM runtime-base AS tools-runtime
 
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+      git \
+      git-lfs \
+    && rm -rf /var/lib/apt/lists/* \
+    && git lfs install --system
+
 COPY --from=build /tmp/dli-native-build/bin/dli-partition-manifest /usr/local/bin/dli-partition-manifest
 COPY --from=build /tmp/dli-native-build/bin/dli-gguf-shard-writer /usr/local/bin/dli-gguf-shard-writer
 COPY --from=build /tmp/dli-native-build/bin/dli-gguf-shard-validate /usr/local/bin/dli-gguf-shard-validate
+COPY --from=build /tmp/dli-native-build/bin/dli-gguf-info /usr/local/bin/dli-gguf-info
+COPY --from=build /tmp/dli-native-build/bin/dli-native-model-controller /usr/local/bin/dli-native-model-controller
 
 CMD ["/bin/sh"]

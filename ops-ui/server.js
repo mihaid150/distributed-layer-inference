@@ -7,8 +7,20 @@ const http = require("node:http");
 const path = require("node:path");
 const { promisify } = require("node:util");
 const { execFile, spawn } = require("node:child_process");
+const { Agent } = require("undici");
 
 const execFileAsync = promisify(execFile);
+
+// Node's global fetch (undici) enforces a default headersTimeout/bodyTimeout of
+// 300s. A long generation produces no response headers until it completes, so
+// for runs past ~300s undici aborts the socket and surfaces it as "fetch failed"
+// even when the caller-side AbortController timeout is disabled (timeoutMs=0).
+// This dispatcher disables both timeouts so long /generate and /chat calls can
+// run to completion; the AbortController still enforces any finite timeoutMs.
+const longInferenceDispatcher = new Agent({
+  headersTimeout: 0,
+  bodyTimeout: 0,
+});
 
 const PORT = Number.parseInt(process.env.OPS_UI_PORT || "4070", 10);
 const NAMESPACE = process.env.OPS_UI_NAMESPACE || "inference";
@@ -21,6 +33,12 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const DATA_DIR = path.join(__dirname, "data");
 const HISTORY_FILE = path.join(DATA_DIR, "metrics-history.ndjson");
 const HISTORY_MAX_ENTRIES = clampNumber(process.env.OPS_UI_HISTORY_MAX_ENTRIES || "4000", 200, 20000, 4000);
+const NATIVE_MODEL_CATALOG_FILE = process.env.OPS_UI_NATIVE_MODELS_FILE || "native-models.json";
+const NATIVE_CONFIGMAP_NAME = process.env.OPS_UI_NATIVE_CONFIGMAP || "dli-native-config";
+const NATIVE_TOOLS_IMAGE = process.env.OPS_UI_NATIVE_TOOLS_IMAGE || "mipeda150/distributed-layer-inference-native-tools:latest";
+const NATIVE_TOOLS_IMAGE_PULL_POLICY = process.env.OPS_UI_NATIVE_TOOLS_IMAGE_PULL_POLICY || "IfNotPresent";
+const NATIVE_MODEL_JOB_TTL_SECONDS = clampNumber(process.env.OPS_UI_NATIVE_MODEL_JOB_TTL_SECONDS || "86400", 60, 604800, 86400);
+const NATIVE_ARTIFACT_REPO_TEMPLATE = process.env.HF_NATIVE_MODEL_ARTIFACT_REPO || "";
 const IN_FLIGHT_INVOKES = new Map();
 const historyEntries = [];
 let historyLoaded = false;
@@ -344,8 +362,15 @@ async function buildHttpCandidates(namespace, targetConfig, pod) {
 }
 
 async function runKubectl(args, { parseJson = false } = {}) {
+  return await runKubectlWithTimeout(args, {
+    parseJson,
+    timeoutMs: KUBECTL_TIMEOUT_MS
+  });
+}
+
+async function runKubectlWithTimeout(args, { parseJson = false, timeoutMs = KUBECTL_TIMEOUT_MS } = {}) {
   const { stdout } = await execFileAsync("kubectl", args, {
-    timeout: KUBECTL_TIMEOUT_MS,
+    timeout: timeoutMs,
     maxBuffer: 8 * 1024 * 1024
   });
 
@@ -750,6 +775,7 @@ function normalizeHistoryEntry(input) {
   }
 
   const createdAt = toSafeIsoDate(input.createdAt, nowIso);
+  const label = sanitizeHistoryText(input.label, 200);
   const namespace = String(input.namespace || NAMESPACE);
   const target = String(input.target || "gateway");
   const method = String(input.method || "POST").toUpperCase();
@@ -785,6 +811,7 @@ function normalizeHistoryEntry(input) {
   const record = {
     id: Number(nextHistorySeq++),
     type,
+    label,
     createdAt,
     namespace,
     target,
@@ -796,6 +823,12 @@ function normalizeHistoryEntry(input) {
       maxNewTokens: Math.max(0, Math.round(toFiniteNumber(config.maxNewTokens, 0))),
       minNewTokens: Math.max(0, Math.round(toFiniteNumber(config.minNewTokens, 0))),
       temperature: roundNumber(config.temperature, 4),
+      topK: Math.max(0, Math.round(toFiniteNumber(config.topK, 0))),
+      topP: roundNumber(config.topP != null ? config.topP : 1, 4),
+      seed:
+        config.seed === null || config.seed === undefined
+          ? null
+          : Math.round(toFiniteNumber(config.seed, 0)),
       timeoutMs: Math.max(0, Math.round(toFiniteNumber(config.timeoutMs, 0))),
       modelName: config.modelName ? String(config.modelName) : "",
       topologyHash: config.topologyHash ? String(config.topologyHash) : ""
@@ -814,6 +847,9 @@ function normalizeHistoryEntry(input) {
       tokensPerSecond: roundNumber(metrics.tokensPerSecond, 6),
       computeMs: roundNumber(metrics.computeMs, 3),
       transferMs: roundNumber(metrics.transferMs, 3),
+      matmulMs: roundNumber(metrics.matmulMs, 3),
+      attentionMs: roundNumber(metrics.attentionMs, 3),
+      ggmlThreads: Math.max(0, Math.round(toFiniteNumber(metrics.ggmlThreads, 0))),
       transferComputeRatio: roundNumber(metrics.transferComputeRatio, 6),
       rpcComputeRatio: roundNumber(
         metrics.rpcComputeRatio ?? metrics.transferComputeRatio,
@@ -996,6 +1032,536 @@ async function getAvailableNamespacesSafe() {
   } catch {
     return [];
   }
+}
+
+function slugifyModelId(value) {
+  const text = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[-._]+|[-._]+$/g, "");
+  return text || "model";
+}
+
+function basename(pathValue) {
+  const parts = String(pathValue || "").split("/").filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : "";
+}
+
+function interpolateTemplate(template, values) {
+  return String(template || "").replace(/\{([a-zA-Z0-9_]+)\}/g, (_, key) => {
+    return values[key] == null ? "" : String(values[key]);
+  });
+}
+
+function balancedLayerRanges(numLayers, numStages) {
+  const layers = Number.parseInt(String(numLayers || 0), 10);
+  const stages = Number.parseInt(String(numStages || 4), 10);
+  if (!Number.isFinite(layers) || layers <= 0) {
+    throw new Error("numLayers must be a positive integer.");
+  }
+  if (!Number.isFinite(stages) || stages <= 0 || stages > layers) {
+    throw new Error("numStages must be a positive integer no larger than numLayers.");
+  }
+  const base = Math.floor(layers / stages);
+  const remainder = layers % stages;
+  const ranges = [];
+  let cursor = 0;
+  for (let idx = 0; idx < stages; idx += 1) {
+    const size = base + (idx < remainder ? 1 : 0);
+    ranges.push(Array.from({ length: size }, (_, offset) => cursor + offset));
+    cursor += size;
+  }
+  return ranges;
+}
+
+function yamlIntList(values, indent) {
+  const prefix = " ".repeat(indent);
+  return values.map((value) => `${prefix}- ${value}`).join("\n");
+}
+
+function normalizePhysicalNodes(rawValue, numStages) {
+  const nodes = Array.isArray(rawValue)
+    ? rawValue.map((item) => String(item || "").trim()).filter(Boolean)
+    : String(rawValue || "")
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+  while (nodes.length < numStages) {
+    nodes.push(`dli-worker-${nodes.length + 1}`);
+  }
+  return nodes.slice(0, numStages);
+}
+
+function generateNativeStageMapYaml(model) {
+  const modelName = model.modelName || model.id;
+  const slug = model.slug || slugifyModelId(modelName);
+  const fullGgufFile = basename(model.fullGgufFile || model.sourceFile);
+  if (!fullGgufFile) {
+    throw new Error("fullGgufFile or sourceFile is required to generate native stage_map.yaml.");
+  }
+  const numStages = Number.parseInt(String(model.numStages || 4), 10);
+  const ranges = balancedLayerRanges(model.numLayers, numStages);
+  const physicalNodes = normalizePhysicalNodes(model.physicalNodes, numStages);
+  const gatewayServiceName = model.gatewayServiceName || "inference-native-gateway";
+  const stageServicePrefix = model.stageServicePrefix || "inference-native-stage";
+  const modelRoot = String(model.containerModelRoot || "/app/models").replace(/\/+$/, "");
+
+  const lines = [
+    `model_name: ${modelName}`,
+    `model_slug: ${slug}`,
+    `model_path: ${modelRoot}/${slug}/${fullGgufFile}`,
+    `num_layers: ${Number.parseInt(String(model.numLayers), 10)}`,
+    "",
+    "inference_gateway:",
+    `  service_name: ${gatewayServiceName}`,
+    "  port: 8000",
+    `  first_stage_url: http://${stageServicePrefix}-1:8000/forward-binary`,
+    "",
+    "inference_stages:"
+  ];
+
+  ranges.forEach((layers, idx) => {
+    const stageId = idx + 1;
+    const nextStageUrl =
+      stageId < numStages
+        ? `http://${stageServicePrefix}-${stageId + 1}:8000/forward-binary`
+        : "null";
+    lines.push(
+      `- stage_id: ${stageId}`,
+      `  partition_id: partition-${stageId}`,
+      `  service_name: ${stageServicePrefix}-${stageId}`,
+      `  physical_node: ${physicalNodes[idx]}`,
+      `  partition_file: ${modelRoot}/${slug}/stage_${stageId}.pt`,
+      `  native_partition_file: ${modelRoot}/${slug}/partition-${stageId}.dli.gguf`,
+      "  backend: llama",
+      "  components:",
+      `    embedding: ${stageId === 1 ? "true" : "false"}`,
+      "    layers:",
+      yamlIntList(layers, 4),
+      `    norm: ${stageId === numStages ? "true" : "false"}`,
+      `    lm_head: ${stageId === numStages ? "true" : "false"}`,
+      `  next_stage_url: ${nextStageUrl}`,
+      ""
+    );
+  });
+
+  lines.push("topology:", "  probe_timeout_seconds: 0.25", "  route_candidates:");
+  for (let stageId = 1; stageId < numStages; stageId += 1) {
+    lines.push(
+      `    "${stageId}":`,
+      `    - http://${stageServicePrefix}-${stageId + 1}:8000/forward-binary`
+    );
+  }
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
+function normalizeNativeModel(raw) {
+  const input = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  const id = String(input.id || input.modelId || input.modelName || input.model_name || "").trim();
+  if (!id) {
+    return null;
+  }
+  const modelName = String(input.modelName || input.model_name || id).trim();
+  const slug = String(input.slug || input.modelSlug || slugifyModelId(modelName)).trim();
+  const sourceFile = String(input.sourceFile || input.source_file || input.fullGgufFile || "").trim();
+  const artifactRepo = String(
+    input.artifactRepo ||
+      input.artifact_repo ||
+      input.stageRepo ||
+      input.stage_repo ||
+      interpolateTemplate(NATIVE_ARTIFACT_REPO_TEMPLATE, { id, modelName, slug })
+  ).trim();
+  return {
+    id,
+    label: String(input.label || modelName).trim(),
+    modelName,
+    slug,
+    description: String(input.description || "").trim(),
+    sourceRepo: String(input.sourceRepo || input.source_repo || "").trim(),
+    sourceRevision: String(input.sourceRevision || input.source_revision || "main").trim(),
+    sourceFile,
+    artifactRepo,
+    artifactRevision: String(input.artifactRevision || input.artifact_revision || "main").trim(),
+    artifactPrivate: Boolean(input.artifactPrivate || input.artifact_private),
+    fullGgufFile: String(input.fullGgufFile || input.full_gguf_file || (sourceFile ? `${slug}/${basename(sourceFile)}` : "")).trim(),
+    numLayers: input.numLayers ?? input.num_layers ?? null,
+    numStages: input.numStages ?? input.num_stages ?? 4,
+    physicalNodes: input.physicalNodes || input.physical_nodes || [],
+    prepared: Boolean(input.prepared || input.artifactRepo || input.artifact_repo),
+    stageMapYaml: String(input.stageMapYaml || input.stage_map_yaml || ""),
+    gatewayServiceName: String(input.gatewayServiceName || input.gateway_service_name || "inference-native-gateway"),
+    stageServicePrefix: String(input.stageServicePrefix || input.stage_service_prefix || "inference-native-stage"),
+    containerModelRoot: String(input.containerModelRoot || input.container_model_root || "/app/models")
+  };
+}
+
+async function readNativeModelCatalog() {
+  let rawModels = [];
+  const rawEnv = String(process.env.OPS_UI_NATIVE_MODEL_CATALOG_JSON || "").trim();
+  if (rawEnv) {
+    const parsed = JSON.parse(rawEnv);
+    rawModels = Array.isArray(parsed) ? parsed : parsed.models || [];
+  } else {
+    const candidateFiles = path.isAbsolute(NATIVE_MODEL_CATALOG_FILE)
+      ? [NATIVE_MODEL_CATALOG_FILE]
+      : [
+          path.resolve(process.cwd(), NATIVE_MODEL_CATALOG_FILE),
+          path.resolve(__dirname, NATIVE_MODEL_CATALOG_FILE),
+          path.resolve(__dirname, "..", NATIVE_MODEL_CATALOG_FILE)
+        ];
+    let raw = "";
+    let loaded = false;
+    let lastError = null;
+    for (const candidateFile of [...new Set(candidateFiles)]) {
+      try {
+        raw = await fsp.readFile(candidateFile, "utf-8");
+        loaded = true;
+        break;
+      } catch (error) {
+        lastError = error;
+        if (error.code !== "ENOENT") {
+          throw error;
+        }
+      }
+    }
+    if (!loaded) {
+      if (lastError && lastError.code !== "ENOENT") {
+        throw lastError;
+      }
+      rawModels = [];
+    } else {
+      const parsed = JSON.parse(raw);
+      rawModels = Array.isArray(parsed) ? parsed : parsed.models || [];
+    }
+  }
+  return rawModels.map(normalizeNativeModel).filter(Boolean);
+}
+
+async function readNativeConfigMap(namespace) {
+  try {
+    return await runKubectl(
+      ["-n", namespace, "get", "configmap", NATIVE_CONFIGMAP_NAME, "-o", "json"],
+      { parseJson: true }
+    );
+  } catch (error) {
+    return null;
+  }
+}
+
+function activeModelFromConfigMap(configMap) {
+  const data = configMap?.data || {};
+  const stageMap = String(data["stage_map.yaml"] || "");
+  const modelName =
+    String(data.DLI_ACTIVE_MODEL_ID || "").trim() ||
+    (stageMap.match(/^model_name:\s*(.+)$/m)?.[1] || "").trim();
+  const modelSlug =
+    String(data.DLI_ACTIVE_MODEL_SLUG || "").trim() ||
+    (stageMap.match(/^model_slug:\s*(.+)$/m)?.[1] || "").trim();
+  return {
+    id: modelName,
+    modelName,
+    slug: modelSlug,
+    hfStageRepo: data.HF_NATIVE_STAGE_REPO || "",
+    hfStageRevision: data.HF_NATIVE_STAGE_REVISION || "",
+    hfFullGgufRepo: data.HF_NATIVE_FULL_GGUF_REPO || "",
+    hfFullGgufRevision: data.HF_NATIVE_FULL_GGUF_REVISION || "",
+    hfFullGgufFile: data.HF_NATIVE_FULL_GGUF_FILE || "",
+    stageMapYaml: stageMap
+  };
+}
+
+function buildActivationFromModel(model) {
+  const slug = model.slug || slugifyModelId(model.modelName || model.id);
+  if (!model.artifactRepo) {
+    throw new Error("Model has no artifactRepo. Prepare it first or configure artifactRepo.");
+  }
+  const fullFile = model.fullGgufFile || `${slug}/${basename(model.sourceFile)}`;
+  if (!fullFile || !fullFile.includes("/")) {
+    throw new Error("Model fullGgufFile must include the model slug path, for example <slug>/<file>.gguf.");
+  }
+  const stageMapYaml = model.stageMapYaml || generateNativeStageMapYaml(model);
+  return {
+    modelId: model.id,
+    modelName: model.modelName,
+    modelSlug: slug,
+    data: {
+      DLI_ACTIVE_MODEL_ID: model.modelName || model.id,
+      DLI_ACTIVE_MODEL_SLUG: slug,
+      HF_NATIVE_STAGE_REPO: model.artifactRepo,
+      HF_NATIVE_STAGE_REVISION: model.artifactRevision || "main",
+      HF_NATIVE_FULL_GGUF_REPO: model.artifactRepo,
+      HF_NATIVE_FULL_GGUF_REVISION: model.artifactRevision || "main",
+      HF_NATIVE_FULL_GGUF_FILE: fullFile,
+      "stage_map.yaml": stageMapYaml
+    }
+  };
+}
+
+function parseActivationFromLogs(logText) {
+  const match = String(logText || "").match(
+    /DLI_ACTIVATION_JSON_BEGIN\s*([\s\S]*?)\s*DLI_ACTIVATION_JSON_END/
+  );
+  if (!match) {
+    throw new Error("No DLI activation payload was found in the model-prep job logs.");
+  }
+  const parsed = JSON.parse(match[1]);
+  if (!parsed || typeof parsed !== "object" || !parsed.data) {
+    throw new Error("Invalid DLI activation payload in model-prep job logs.");
+  }
+  return parsed;
+}
+
+async function patchNativeConfigMap(namespace, activation) {
+  const data = activation.data || {};
+  const patch = {
+    data: {
+      DLI_ACTIVE_MODEL_ID: String(data.DLI_ACTIVE_MODEL_ID || activation.modelName || activation.modelId || ""),
+      DLI_ACTIVE_MODEL_SLUG: String(data.DLI_ACTIVE_MODEL_SLUG || activation.modelSlug || ""),
+      HF_NATIVE_STAGE_REPO: String(data.HF_NATIVE_STAGE_REPO || ""),
+      HF_NATIVE_STAGE_REVISION: String(data.HF_NATIVE_STAGE_REVISION || "main"),
+      HF_NATIVE_FULL_GGUF_REPO: String(data.HF_NATIVE_FULL_GGUF_REPO || data.HF_NATIVE_STAGE_REPO || ""),
+      HF_NATIVE_FULL_GGUF_REVISION: String(data.HF_NATIVE_FULL_GGUF_REVISION || data.HF_NATIVE_STAGE_REVISION || "main"),
+      HF_NATIVE_FULL_GGUF_FILE: String(data.HF_NATIVE_FULL_GGUF_FILE || ""),
+      "stage_map.yaml": String(data["stage_map.yaml"] || "")
+    }
+  };
+
+  if (!patch.data.DLI_ACTIVE_MODEL_SLUG || !patch.data["stage_map.yaml"]) {
+    throw new Error("Activation payload is missing DLI_ACTIVE_MODEL_SLUG or stage_map.yaml.");
+  }
+
+  await runKubectlWithTimeout(
+    [
+      "-n",
+      namespace,
+      "patch",
+      "configmap",
+      NATIVE_CONFIGMAP_NAME,
+      "--type",
+      "merge",
+      "-p",
+      JSON.stringify(patch)
+    ],
+    { timeoutMs: 60000 }
+  );
+}
+
+async function restartNativeDeployments(namespace) {
+  const deploymentNames = [
+    ...new Set(
+      Object.values(RUNTIME_VARIANTS.native.targets)
+        .map((target) => target.deployment)
+        .filter(Boolean)
+    )
+  ];
+  const restarted = [];
+  for (const deployment of deploymentNames) {
+    await runKubectlWithTimeout(
+      ["-n", namespace, "rollout", "restart", `deployment/${deployment}`],
+      { timeoutMs: 60000 }
+    );
+    restarted.push(deployment);
+  }
+  return restarted;
+}
+
+function modelPrepJobName(model) {
+  const suffix = Date.now().toString(36);
+  const base = `dli-model-${slugifyModelId(model.slug || model.id)}`;
+  return `${base.slice(0, Math.max(1, 63 - suffix.length - 1))}-${suffix}`;
+}
+
+function buildModelPrepJobManifest(namespace, model) {
+  if (!model.sourceRepo || !model.sourceFile) {
+    throw new Error("sourceRepo and sourceFile are required to prepare a native model.");
+  }
+  if (!model.artifactRepo) {
+    throw new Error("artifactRepo is required to upload prepared native artifacts.");
+  }
+  const jobName = modelPrepJobName(model);
+  const args = [
+    "prepare",
+    "--model-id",
+    model.id,
+    "--model-name",
+    model.modelName || model.id,
+    "--model-slug",
+    model.slug,
+    "--source-repo",
+    model.sourceRepo,
+    "--source-revision",
+    model.sourceRevision || "main",
+    "--source-file",
+    model.sourceFile,
+    "--artifact-repo",
+    model.artifactRepo,
+    "--artifact-revision",
+    model.artifactRevision || "main",
+    "--num-stages",
+    String(model.numStages || 4),
+    "--gateway-service-name",
+    model.gatewayServiceName || "inference-native-gateway",
+    "--stage-service-prefix",
+    model.stageServicePrefix || "inference-native-stage",
+    "--container-model-root",
+    model.containerModelRoot || "/app/models",
+    "--physical-nodes",
+    normalizePhysicalNodes(model.physicalNodes, Number.parseInt(String(model.numStages || 4), 10)).join(","),
+    "--work-dir",
+    "/work"
+  ];
+  if (model.numLayers) {
+    args.push("--num-layers", String(model.numLayers));
+  }
+  if (model.artifactPrivate) {
+    args.push("--artifact-private");
+  }
+  if (model.fullGgufFile) {
+    args.push("--full-gguf-file", basename(model.fullGgufFile));
+  }
+
+  return {
+    jobName,
+    manifest: {
+      apiVersion: "batch/v1",
+      kind: "Job",
+      metadata: {
+        name: jobName,
+        namespace,
+        labels: {
+          app: "dli-native-model-controller",
+          "dli/model-id": slugifyModelId(model.id).slice(0, 63)
+        }
+      },
+      spec: {
+        ttlSecondsAfterFinished: NATIVE_MODEL_JOB_TTL_SECONDS,
+        backoffLimit: 0,
+        template: {
+          metadata: {
+            labels: {
+              app: "dli-native-model-controller",
+              "dli/model-id": slugifyModelId(model.id).slice(0, 63)
+            }
+          },
+          spec: {
+            restartPolicy: "Never",
+            containers: [
+              {
+                name: "native-model-controller",
+                image: NATIVE_TOOLS_IMAGE,
+                imagePullPolicy: NATIVE_TOOLS_IMAGE_PULL_POLICY,
+                command: ["/usr/local/bin/dli-native-model-controller"],
+                args,
+                env: [
+                  {
+                    name: "HF_TOKEN",
+                    valueFrom: {
+                      secretKeyRef: {
+                        name: "hf-hub",
+                        key: "HF_TOKEN",
+                        optional: true
+                      }
+                    }
+                  },
+                  {
+                    name: "HF_UPLOAD_TOKEN",
+                    valueFrom: {
+                      secretKeyRef: {
+                        name: "hf-hub",
+                        key: "HF_UPLOAD_TOKEN",
+                        optional: true
+                      }
+                    }
+                  }
+                ],
+                volumeMounts: [
+                  {
+                    name: "work",
+                    mountPath: "/work"
+                  }
+                ]
+              }
+            ],
+            volumes: [
+              {
+                name: "work",
+                emptyDir: {}
+              }
+            ]
+          }
+        }
+      }
+    }
+  };
+}
+
+async function applyPrepJob(namespace, model) {
+  const { jobName, manifest } = buildModelPrepJobManifest(namespace, model);
+  const jobsDir = path.join(DATA_DIR, "native-model-jobs");
+  await fsp.mkdir(jobsDir, { recursive: true });
+  const manifestPath = path.join(jobsDir, `${jobName}.json`);
+  await fsp.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
+  await runKubectlWithTimeout(["-n", namespace, "apply", "-f", manifestPath], {
+    timeoutMs: 60000
+  });
+  return { jobName, manifestPath };
+}
+
+function normalizeNativeModelJob(job) {
+  const conditions = job.status?.conditions || [];
+  const complete = conditions.some((item) => item.type === "Complete" && item.status === "True");
+  const failed = conditions.some((item) => item.type === "Failed" && item.status === "True");
+  return {
+    name: job.metadata?.name || "",
+    active: job.status?.active || 0,
+    succeeded: job.status?.succeeded || 0,
+    failed: job.status?.failed || 0,
+    complete,
+    failedCondition: failed,
+    startTime: job.status?.startTime || null,
+    completionTime: job.status?.completionTime || null,
+    labels: job.metadata?.labels || {}
+  };
+}
+
+async function listNativeModelJobs(namespace) {
+  try {
+    const jobs = await runKubectl(
+      [
+        "-n",
+        namespace,
+        "get",
+        "jobs",
+        "-l",
+        "app=dli-native-model-controller",
+        "-o",
+        "json"
+      ],
+      { parseJson: true }
+    );
+    return (jobs.items || []).map(normalizeNativeModelJob).sort((a, b) => {
+      const aTs = new Date(a.startTime || 0).getTime();
+      const bTs = new Date(b.startTime || 0).getTime();
+      return bTs - aTs;
+    });
+  } catch {
+    return [];
+  }
+}
+
+async function activateNativeModel(namespace, activation) {
+  await patchNativeConfigMap(namespace, activation);
+  const restartedDeployments = await restartNativeDeployments(namespace);
+  return {
+    activated: {
+      modelId: activation.modelId || activation.modelName || "",
+      modelName: activation.modelName || "",
+      modelSlug: activation.modelSlug || activation.data?.DLI_ACTIVE_MODEL_SLUG || ""
+    },
+    restartedDeployments
+  };
 }
 
 async function handleTopology(req, res, query) {
@@ -1231,7 +1797,7 @@ function buildInvokeLockKey(namespace, target, method, pathValue) {
   return `${namespace}::${target}::${method}::${pathValue}`;
 }
 
-async function tryHttpCall({ url, method, headers, body, timeoutMs }) {
+async function tryHttpCall({ url, method, headers, body, timeoutMs, dispatcher }) {
   const controller = new AbortController();
   const timeoutId = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
   const startedAt = Date.now();
@@ -1241,7 +1807,8 @@ async function tryHttpCall({ url, method, headers, body, timeoutMs }) {
       method,
       headers,
       body,
-      signal: controller.signal
+      signal: controller.signal,
+      ...(dispatcher ? { dispatcher } : {})
     });
     const responseText = await response.text();
     let responseJson = null;
@@ -1325,7 +1892,8 @@ async function tryPortForwardCall({
   headers,
   body,
   pathValue,
-  timeoutMs
+  timeoutMs,
+  dispatcher
 }) {
   let processHandle = null;
   const startupTimeoutMs = timeoutMs === 0 ? 20000 : Math.max(2500, Math.min(20000, timeoutMs));
@@ -1411,7 +1979,8 @@ async function tryPortForwardCall({
       method,
       headers,
       body,
-      timeoutMs: remainingMs
+      timeoutMs: remainingMs,
+      dispatcher
     });
 
     return {
@@ -1624,6 +2193,8 @@ async function handleInvoke(req, res, query) {
   let successful = null;
   const candidatesToTry = longInferenceCall ? candidates.slice(0, 1) : candidates;
 
+  const inferenceDispatcher = longInferenceCall ? longInferenceDispatcher : undefined;
+
   for (const candidate of candidatesToTry) {
     const fullUrl = `${candidate.baseUrl}${pathValue}`;
     const result = await tryHttpCall({
@@ -1631,7 +2202,8 @@ async function handleInvoke(req, res, query) {
       method,
       headers,
       body,
-      timeoutMs
+      timeoutMs,
+      dispatcher: inferenceDispatcher
     });
     attempts.push({
       candidate,
@@ -1661,7 +2233,8 @@ async function handleInvoke(req, res, query) {
         headers,
         body,
         pathValue,
-        timeoutMs
+        timeoutMs,
+        dispatcher: inferenceDispatcher
       });
 
       if (fallbackViaPortForward?.ok) {
@@ -1892,6 +2465,120 @@ function handleEndpointCatalog(req, res, query) {
   });
 }
 
+async function handleNativeModels(req, res, query) {
+  const namespace = resolveNamespace(query);
+  if (!isValidNamespaceName(namespace)) {
+    sendJson(res, 400, {
+      error: `Invalid namespace '${namespace}'.`,
+      namespace
+    });
+    return;
+  }
+
+  if ((req.method || "GET").toUpperCase() === "GET") {
+    try {
+      const [models, configMap, jobs] = await Promise.all([
+        readNativeModelCatalog(),
+        readNativeConfigMap(namespace),
+        listNativeModelJobs(namespace)
+      ]);
+      sendJson(res, 200, {
+        generatedAt: new Date().toISOString(),
+        namespace,
+        configMapName: NATIVE_CONFIGMAP_NAME,
+        toolsImage: NATIVE_TOOLS_IMAGE,
+        active: activeModelFromConfigMap(configMap),
+        models,
+        jobs
+      });
+    } catch (error) {
+      sendJson(res, 500, {
+        error: "Failed to load native model catalog",
+        namespace,
+        details: String(error.message || error)
+      });
+    }
+    return;
+  }
+
+  if ((req.method || "GET").toUpperCase() !== "POST") {
+    sendJson(res, 405, { error: "Use GET or POST for /api/native-models." });
+    return;
+  }
+
+  let payload = {};
+  try {
+    payload = await readJsonBody(req);
+  } catch (error) {
+    sendJson(res, 400, { error: String(error.message || error) });
+    return;
+  }
+
+  const action = String(payload.action || "").trim().toLowerCase();
+  if (!["prepare", "activate"].includes(action)) {
+    sendJson(res, 400, { error: "action must be 'prepare' or 'activate'." });
+    return;
+  }
+
+  try {
+    if (action === "prepare") {
+      const models = await readNativeModelCatalog();
+      const modelId = String(payload.modelId || "").trim();
+      const model = models.find((item) => item.id === modelId);
+      if (!model) {
+        sendJson(res, 404, { error: `Unknown native model '${modelId}'.`, modelId });
+        return;
+      }
+      const result = await applyPrepJob(namespace, model);
+      sendJson(res, 202, {
+        ok: true,
+        action,
+        namespace,
+        modelId,
+        jobName: result.jobName,
+        manifestPath: result.manifestPath,
+        hint: "Preparation runs in a Kubernetes Job. Activate the completed job after it uploads artifacts."
+      });
+      return;
+    }
+
+    let activation = null;
+    const jobName = String(payload.jobName || "").trim();
+    if (jobName) {
+      const logs = await runKubectlWithTimeout(
+        ["-n", namespace, "logs", `job/${jobName}`],
+        { timeoutMs: 60000 }
+      );
+      activation = parseActivationFromLogs(logs);
+    } else {
+      const models = await readNativeModelCatalog();
+      const modelId = String(payload.modelId || "").trim();
+      const model = models.find((item) => item.id === modelId);
+      if (!model) {
+        sendJson(res, 404, { error: `Unknown native model '${modelId}'.`, modelId });
+        return;
+      }
+      activation = buildActivationFromModel(model);
+    }
+
+    const result = await activateNativeModel(namespace, activation);
+    sendJson(res, 200, {
+      ok: true,
+      action,
+      namespace,
+      ...result
+    });
+  } catch (error) {
+    const stderr = error.stderr ? String(error.stderr) : "";
+    sendJson(res, 500, {
+      error: `Native model ${action} failed`,
+      namespace,
+      details: String(error.message || error),
+      stderr
+    });
+  }
+}
+
 function handleRuntime(req, res, query) {
   const namespace = resolveNamespace(query);
   const variant = resolveRuntimeVariant(query);
@@ -1901,6 +2588,98 @@ function handleRuntime(req, res, query) {
     generatedAt: new Date().toISOString(),
     runtime: runtimeSnapshot()
   });
+}
+
+const NATIVE_STAGE_DEPLOYMENTS = [
+  "inference-native-stage-1-deployment",
+  "inference-native-stage-2-deployment",
+  "inference-native-stage-3-deployment",
+  "inference-native-stage-4-deployment"
+];
+const CLUSTER_ROLLOUT_TIMEOUT_MS = Number(process.env.OPS_UI_ROLLOUT_TIMEOUT_MS || 300000);
+
+// Opt-in cluster env sweep: patch DLI_GGML_THREADS / DLI_GGML_ATTENTION in the configmap,
+// rollout-restart the 4 native stage deployments, wait for readiness, and verify via
+// printenv. Inputs are strictly validated and passed to kubectl as an argv array (execFile,
+// no shell) so they cannot inject. Governor is host sysfs and is intentionally NOT handled.
+async function handleClusterConfig(req, res) {
+  if ((req.method || "GET").toUpperCase() !== "POST") {
+    sendJson(res, 405, { error: "Use POST for /api/cluster-config." });
+    return;
+  }
+
+  let payload = {};
+  try {
+    payload = await readJsonBody(req, { maxBytes: 16 * 1024 });
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: String(error.message || error) });
+    return;
+  }
+
+  const namespace = String(payload.namespace || NAMESPACE).trim();
+  if (!NAMESPACE_NAME_RE.test(namespace)) {
+    sendJson(res, 400, { ok: false, error: `Invalid namespace '${namespace}'.` });
+    return;
+  }
+
+  const data = {};
+  if (payload.threads != null && String(payload.threads) !== "") {
+    const t = Number(payload.threads);
+    if (!Number.isInteger(t) || t < 1 || t > 8) {
+      sendJson(res, 400, { ok: false, error: "threads must be an integer 1..8." });
+      return;
+    }
+    data.DLI_GGML_THREADS = String(t);
+  }
+  if (payload.attention != null && String(payload.attention) !== "") {
+    const a = String(payload.attention);
+    if (a !== "0" && a !== "1") {
+      sendJson(res, 400, { ok: false, error: "attention must be '0' or '1'." });
+      return;
+    }
+    data.DLI_GGML_ATTENTION = a;
+  }
+  if (!Object.keys(data).length) {
+    sendJson(res, 400, { ok: false, error: "Provide threads and/or attention to apply." });
+    return;
+  }
+
+  try {
+    await runKubectlWithTimeout(
+      ["-n", namespace, "patch", "configmap", "dli-native-config", "--type", "merge",
+        "-p", JSON.stringify({ data })],
+      { timeoutMs: KUBECTL_TIMEOUT_MS }
+    );
+    await runKubectlWithTimeout(
+      ["-n", namespace, "rollout", "restart", "deploy", ...NATIVE_STAGE_DEPLOYMENTS],
+      { timeoutMs: KUBECTL_TIMEOUT_MS }
+    );
+    for (const dep of NATIVE_STAGE_DEPLOYMENTS) {
+      await runKubectlWithTimeout(
+        ["-n", namespace, "rollout", "status", `deploy/${dep}`,
+          `--timeout=${Math.floor(CLUSTER_ROLLOUT_TIMEOUT_MS / 1000)}s`],
+        { timeoutMs: CLUSTER_ROLLOUT_TIMEOUT_MS + 15000 }
+      );
+    }
+
+    const verified = {};
+    try {
+      const out = await runKubectlWithTimeout(
+        ["-n", namespace, "exec", `deploy/${NATIVE_STAGE_DEPLOYMENTS[0]}`, "--",
+          "printenv", "DLI_GGML_THREADS", "DLI_GGML_ATTENTION"],
+        { timeoutMs: KUBECTL_TIMEOUT_MS }
+      );
+      const lines = String(out).trim().split(/\r?\n/);
+      if (data.DLI_GGML_THREADS != null) verified.threads = lines[0];
+      if (data.DLI_GGML_ATTENTION != null) verified.attention = lines[1];
+    } catch {
+      // verification is best-effort
+    }
+
+    sendJson(res, 200, { ok: true, namespace, applied: data, verified });
+  } catch (error) {
+    sendJson(res, 500, { ok: false, error: String(error.message || error) });
+  }
 }
 
 async function handleHistory(req, res, query) {
@@ -2070,8 +2849,18 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/native-models") {
+      await handleNativeModels(req, res, url.searchParams);
+      return;
+    }
+
     if (url.pathname === "/api/history") {
       await handleHistory(req, res, url.searchParams);
+      return;
+    }
+
+    if (url.pathname === "/api/cluster-config") {
+      await handleClusterConfig(req, res);
       return;
     }
 

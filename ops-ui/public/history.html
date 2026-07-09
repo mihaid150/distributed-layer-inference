@@ -46,8 +46,46 @@
         <div id="historyCards" class="invoke-metric-cards"></div>
         <div class="history-layout">
           <div class="invoke-subpanel">
-            <h3>Latency / Ratio / Percentile Trends</h3>
+            <h3 class="with-actions">
+              <span>Latency / Ratio / Percentile Trends</span>
+              <button id="historyChartsExportPngBtn" class="ghost-button">Export PNG</button>
+            </h3>
             <div id="historyCharts" class="chart-grid"></div>
+          </div>
+          <div class="invoke-subpanel">
+            <h3 class="with-actions">
+              <span>Custom Chart Builder</span>
+              <button id="customChartExportPngBtn" class="ghost-button" disabled>Export PNG</button>
+            </h3>
+            <div class="custom-chart-controls">
+              <label>Metrics (Y)
+                <select id="customChartMetrics" multiple size="8"></select>
+              </label>
+              <div class="custom-chart-fields">
+                <label>X axis
+                  <select id="customChartXAxis">
+                    <option value="index">Run order</option>
+                    <option value="createdAt">Timestamp</option>
+                    <option value="generatedTokens">Generated tokens</option>
+                    <option value="maxNewTokens">Max new tokens</option>
+                    <option value="minNewTokens">Min new tokens</option>
+                    <option value="temperature">Temperature</option>
+                    <option value="topK">Top-k</option>
+                    <option value="topP">Top-p</option>
+                    <option value="seed">Seed</option>
+                    <option value="promptTokens">Prompt tokens</option>
+                  </select>
+                </label>
+                <label>Filter
+                  <input id="customChartFilter" type="text" placeholder="module / flag / target substring" />
+                </label>
+                <label class="checkbox-inline">
+                  <input id="customChartSortByX" type="checkbox" /> sort by X
+                </label>
+                <button id="customChartRenderBtn">Render</button>
+              </div>
+            </div>
+            <div id="customChart" class="chart-card"><div class="muted">Pick one or more metrics and click Render.</div></div>
           </div>
           <div class="invoke-subpanel">
             <h3 class="with-actions">
@@ -73,6 +111,7 @@
                       <input id="historySelectAll" type="checkbox" title="Select all visible runs" />
                   </th>
                   <th>ID</th>
+                  <th>Label</th>
                   <th>Date</th>
                   <th>Type</th>
                   <th>Namespace</th>
@@ -84,6 +123,9 @@
                   <th>Max Tok</th>
                   <th>Min Tok</th>
                   <th>Temp</th>
+                  <th>Top-k</th>
+                  <th>Top-p</th>
+                  <th>Seed</th>
                   <th>Timeout</th>
                   <th>Topology</th>
                   <th>Latency</th>

@@ -6,3 +6,8 @@
 .vscode/
 models/
 build/
+sota-papers/
+.claude/
+
+# Local optimization backlog (not committed)
+docs/future-optimizations.md

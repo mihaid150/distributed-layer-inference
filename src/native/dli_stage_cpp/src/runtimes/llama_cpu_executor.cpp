@@ -7,18 +7,83 @@
 #include "ggml-cpu.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <numeric>
+#include <random>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace dli_stage {
 
 namespace {
+
+// Resolve the ggml CPU worker-thread count. Honours DLI_GGML_THREADS so it can
+// be swept without rebuilding; otherwise defaults to min(hardware, 4) which
+// matches the 4 Cortex-A76 cores on a Raspberry Pi 5.
+int resolve_ggml_threads() {
+    if (const char* raw = std::getenv("DLI_GGML_THREADS")) {
+        try {
+            const int parsed = std::stoi(raw);
+            if (parsed > 0) {
+                return parsed;
+            }
+        } catch (const std::exception&) {
+        }
+    }
+    const unsigned hw = std::thread::hardware_concurrency();
+    return hw > 0 ? static_cast<int>(std::min(hw, 4u)) : 4;
+}
+
+// Single process-wide CPU backend + persistent worker threadpool, reused across
+// every graph compute. Previously each matmul created and destroyed its own
+// backend (and therefore spun up and joined worker threads per operation), which
+// dominated CPU time on the Pi. Generation is serialized end-to-end, so one
+// shared backend guarded by a mutex is safe and removes the per-op thread churn.
+struct SharedCpuBackend {
+    ggml_backend_t backend = nullptr;
+    ggml_threadpool_t threadpool = nullptr;
+    int threads = 0;
+    std::mutex mu;
+
+    SharedCpuBackend() {
+        threads = resolve_ggml_threads();
+        backend = ggml_backend_cpu_init();
+        if (backend == nullptr) {
+            throw std::runtime_error("failed to initialize shared GGML CPU backend");
+        }
+        ggml_threadpool_params tpp = ggml_threadpool_params_default(threads);
+        threadpool = ggml_threadpool_new(&tpp);
+        if (threadpool != nullptr) {
+            ggml_backend_cpu_set_threadpool(backend, threadpool);
+        }
+        ggml_backend_cpu_set_n_threads(backend, threads);
+    }
+};
+
+SharedCpuBackend& shared_cpu_backend() {
+    static SharedCpuBackend instance;
+    return instance;
+}
+
+// Opt-in (DLI_GGML_ATTENTION=1) ggml/NEON attention path. Default is the proven
+// scalar reference; the ggml path is validated against it by a parity test.
+bool attention_backend_is_ggml() {
+    static const bool enabled = []() {
+        const char* raw = std::getenv("DLI_GGML_ATTENTION");
+        return raw != nullptr &&
+            (raw[0] == '1' || raw[0] == 't' || raw[0] == 'T' ||
+             raw[0] == 'y' || raw[0] == 'Y');
+    }();
+    return enabled;
+}
 
 std::int64_t read_i64_le(
     const std::vector<std::uint8_t>& bytes,
@@ -92,24 +157,20 @@ void compute_single_node_graph(
 
     ggml_build_forward_expand(graph, result);
 
-    ggml_backend_t backend = ggml_backend_cpu_init();
-
-    if (backend == nullptr) {
-        throw std::runtime_error("failed to initialize GGML CPU backend");
-    }
-
     /*
      * In this executor we create temporary tensors with no_alloc=false,
      * so tensor buffers are already present in the GGML context.
      *
-     * Newer llama.cpp/ggml versions expose graph execution through
-     * ggml_backend_graph_compute instead of ggml_graph_compute_with_ctx
-     * or ggml_graph_plan.
+     * The CPU backend and its worker threadpool are shared process-wide and
+     * reused across every compute (see SharedCpuBackend) rather than created
+     * per operation. Compute is serialized through the backend mutex because a
+     * ggml CPU backend instance is not safe to drive from multiple threads.
      */
-    const enum ggml_status status =
-        ggml_backend_graph_compute(backend, graph);
+    SharedCpuBackend& shared = shared_cpu_backend();
+    std::lock_guard<std::mutex> lock(shared.mu);
 
-    ggml_backend_free(backend);
+    const enum ggml_status status =
+        ggml_backend_graph_compute(shared.backend, graph);
 
     if (status != GGML_STATUS_SUCCESS) {
         throw std::runtime_error(
@@ -151,7 +212,8 @@ LlamaCpuExecutor::LlamaCpuExecutor(
     LlamaExecutorHyperparams hyperparams
 )
     : tensor_context_(tensor_context),
-      hp_(std::move(hyperparams)) {
+      hp_(std::move(hyperparams)),
+      rng_(std::random_device{}()) {
     if (tensor_context_ == nullptr) {
         throw std::runtime_error("LlamaCpuExecutor requires non-null ggml_context");
     }
@@ -339,8 +401,21 @@ std::vector<float> LlamaCpuExecutor::matvec(
      * This lets GGML handle Q4_K, Q6_K, Q8_0, F16, F32, etc.,
      * through its backend implementation.
      */
+    // Size the temporary context to exactly what this matvec needs instead of
+    // a flat 128 MiB malloc per call. Each matvec only allocates the input
+    // vector, the mul_mat result, and the f32 output copy (the backend keeps its
+    // own work buffer for quantized vec-dot, so it is not drawn from here).
+    // A blanket 128 MiB alloc/free on every weight matrix, every layer, every
+    // token was pure per-op overhead on the Pi.
+    const std::size_t matvec_data_bytes =
+        (static_cast<std::size_t>(input_dim) +
+         static_cast<std::size_t>(output_dim) * 2u) * sizeof(float);
     ggml_init_params params{};
-    params.mem_size = 128ull * 1024ull * 1024ull;
+    params.mem_size =
+        matvec_data_bytes +
+        ggml_graph_overhead() +
+        ggml_tensor_overhead() * 16u +
+        (4ull * 1024ull * 1024ull); // cushion for alignment / internal nodes
     params.mem_buffer = nullptr;
     params.no_alloc = false;
 
@@ -406,7 +481,12 @@ std::vector<float> LlamaCpuExecutor::matvec(
         throw std::runtime_error("ggml_cpy failed for matvec output");
     }
 
+    const auto mm_start = std::chrono::steady_clock::now();
     compute_single_node_graph(ctx, copied);
+    matmul_ms_ +=
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - mm_start
+        ).count();
 
     std::vector<float> y =
         read_f32_tensor_flat(
@@ -417,6 +497,23 @@ std::vector<float> LlamaCpuExecutor::matvec(
     ggml_free(ctx);
 
     return y;
+}
+
+void LlamaCpuExecutor::reset_profile() {
+    matmul_ms_ = 0.0;
+    attention_ms_ = 0.0;
+}
+
+double LlamaCpuExecutor::profile_matmul_ms() const {
+    return matmul_ms_;
+}
+
+double LlamaCpuExecutor::profile_attention_ms() const {
+    return attention_ms_;
+}
+
+int LlamaCpuExecutor::configured_threads() {
+    return shared_cpu_backend().threads;
 }
 
 std::vector<float> LlamaCpuExecutor::rms_norm(
@@ -454,13 +551,23 @@ void LlamaCpuExecutor::apply_rope(
     const int kv_heads = hp_.n_head_kv;
     const int dim = hp_.head_dim;
 
+    // Precompute inv_freq[i] = theta^(-i/dim) once; it depends only on the head
+    // dim and rope theta, so recomputing std::pow for every element of every
+    // token was pure waste. cos/sin still vary with position.
+    if (static_cast<int>(rope_inv_freq_.size()) != dim) {
+        rope_inv_freq_.assign(static_cast<std::size_t>(dim), 0.0f);
+        for (int i = 0; i < dim; i += 2) {
+            rope_inv_freq_[static_cast<std::size_t>(i)] =
+                std::pow(hp_.rope_theta, -static_cast<float>(i) / static_cast<float>(dim));
+        }
+    }
+
     auto rotate = [&](std::vector<float>& x, int heads) {
         for (int h = 0; h < heads; ++h) {
             const int base = h * dim;
 
             for (int i = 0; i < dim; i += 2) {
-                const float inv_freq =
-                    std::pow(hp_.rope_theta, -static_cast<float>(i) / static_cast<float>(dim));
+                const float inv_freq = rope_inv_freq_[static_cast<std::size_t>(i)];
 
                 const float angle = static_cast<float>(position) * inv_freq;
                 const float c = std::cos(angle);
@@ -489,6 +596,8 @@ std::vector<float> LlamaCpuExecutor::attention(
     const std::vector<float>& v,
     int position
 ) {
+    const auto attn_start = std::chrono::steady_clock::now();
+
     LayerKvCache& cache = layer_cache_[layer_id];
 
     const int kv_dim = hp_.n_head_kv * hp_.head_dim;
@@ -522,67 +631,260 @@ std::vector<float> LlamaCpuExecutor::attention(
         cache.v.begin() + static_cast<std::ptrdiff_t>(position * kv_dim)
     );
 
+    std::vector<float> context;
+    if (attention_backend_is_ggml()) {
+        // Keep a persistent transposed V (positions contiguous in dim 0) so the
+        // attention graph reads K and V by view instead of re-gathering the whole
+        // cache every token. A capacity grow re-transposes [0, required_seq) from
+        // cache.v (rare, amortized O(1)); the steady-state path appends only the
+        // current position. K needs no buffer at all -- cache.k is viewed in place.
+        if (cache.v_t_capacity < required_seq) {
+            const int new_cap =
+                std::max(required_seq, std::max(cache.v_t_capacity * 2, 16));
+            std::vector<float> grown(
+                static_cast<std::size_t>(new_cap) * static_cast<std::size_t>(kv_dim),
+                0.0f
+            );
+            for (int kvh = 0; kvh < hp_.n_head_kv; ++kvh) {
+                for (int d = 0; d < hp_.head_dim; ++d) {
+                    for (int pos = 0; pos < required_seq; ++pos) {
+                        grown[static_cast<std::size_t>(pos) +
+                              static_cast<std::size_t>(new_cap) * d +
+                              static_cast<std::size_t>(new_cap) * hp_.head_dim * kvh] =
+                            cache.v[static_cast<std::size_t>(pos) * kv_dim +
+                                    static_cast<std::size_t>(kvh) * hp_.head_dim + d];
+                    }
+                }
+            }
+            cache.v_t.swap(grown);
+            cache.v_t_capacity = new_cap;
+        } else {
+            const int cap = cache.v_t_capacity;
+            for (int kvh = 0; kvh < hp_.n_head_kv; ++kvh) {
+                for (int d = 0; d < hp_.head_dim; ++d) {
+                    cache.v_t[static_cast<std::size_t>(position) +
+                              static_cast<std::size_t>(cap) * d +
+                              static_cast<std::size_t>(cap) * hp_.head_dim * kvh] =
+                        v[static_cast<std::size_t>(kvh) * hp_.head_dim + d];
+                }
+            }
+        }
+
+        context = compute_attention_ggml_views(
+            hp_, q, cache.k.data(), cache.v_t.data(),
+            cache.v_t_capacity, required_seq
+        );
+    } else {
+        context = compute_attention_scalar(hp_, q, cache.k, cache.v, required_seq);
+    }
+
+    attention_ms_ +=
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - attn_start
+        ).count();
+
+    return context;
+}
+
+std::vector<float> LlamaCpuExecutor::compute_attention_scalar(
+    const LlamaExecutorHyperparams& hp,
+    const std::vector<float>& q,
+    const std::vector<float>& k_cache,
+    const std::vector<float>& v_cache,
+    int required_seq
+) {
+    const int head_dim = hp.head_dim;
+    const int kv_dim = hp.n_head_kv * head_dim;
+    const int q_dim = hp.n_head * head_dim;
+    const int groups = hp.n_head / hp.n_head_kv;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+
     std::vector<float> context(static_cast<std::size_t>(q_dim), 0.0f);
 
-    const int groups = hp_.n_head / hp_.n_head_kv;
-    const float scale = 1.0f / std::sqrt(static_cast<float>(hp_.head_dim));
-
-    for (int qh = 0; qh < hp_.n_head; ++qh) {
+    for (int qh = 0; qh < hp.n_head; ++qh) {
         const int kvh = qh / groups;
 
         std::vector<float> scores(static_cast<std::size_t>(required_seq), 0.0f);
-
         float max_score = -std::numeric_limits<float>::infinity();
 
         for (int pos = 0; pos < required_seq; ++pos) {
             float dot = 0.0f;
-
-            for (int d = 0; d < hp_.head_dim; ++d) {
-                const float qv =
-                    q[static_cast<std::size_t>(qh * hp_.head_dim + d)];
-
+            for (int d = 0; d < head_dim; ++d) {
+                const float qv = q[static_cast<std::size_t>(qh * head_dim + d)];
                 const float kv =
-                    cache.k[
-                        static_cast<std::size_t>(
-                            pos * kv_dim + kvh * hp_.head_dim + d
-                        )
-                    ];
-
+                    k_cache[static_cast<std::size_t>(pos * kv_dim + kvh * head_dim + d)];
                 dot += qv * kv;
             }
-
             const float score = dot * scale;
             scores[static_cast<std::size_t>(pos)] = score;
             max_score = std::max(max_score, score);
         }
 
         float denom = 0.0f;
-
         for (float& score : scores) {
             score = std::exp(score - max_score);
             denom += score;
         }
-
         if (denom <= 0.0f) {
             throw std::runtime_error("attention softmax denominator is non-positive");
         }
 
         for (int pos = 0; pos < required_seq; ++pos) {
             const float prob = scores[static_cast<std::size_t>(pos)] / denom;
-
-            for (int d = 0; d < hp_.head_dim; ++d) {
-                context[static_cast<std::size_t>(qh * hp_.head_dim + d)] +=
+            for (int d = 0; d < head_dim; ++d) {
+                context[static_cast<std::size_t>(qh * head_dim + d)] +=
                     prob *
-                    cache.v[
-                        static_cast<std::size_t>(
-                            pos * kv_dim + kvh * hp_.head_dim + d
-                        )
-                    ];
+                    v_cache[static_cast<std::size_t>(pos * kv_dim + kvh * head_dim + d)];
             }
         }
     }
 
     return context;
+}
+
+std::vector<float> LlamaCpuExecutor::compute_attention_ggml_views(
+    const LlamaExecutorHyperparams& hp,
+    const std::vector<float>& q,
+    const float* k_src,
+    const float* v_t_src,
+    int v_capacity,
+    int required_seq
+) {
+    const int head_dim = hp.head_dim;
+    const int n_head = hp.n_head;
+    const int n_head_kv = hp.n_head_kv;
+    const int kv_dim = n_head_kv * head_dim;
+    const int q_dim = n_head * head_dim;
+    const int groups = n_head / n_head_kv;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+
+    // All heads are computed in a SINGLE ggml graph (batched over the head
+    // dimension) so the per-op graph build + thread dispatch is paid once per
+    // token instead of n_head times. GQA is handled by laying every tensor out
+    // with the kv-head as the outer (ne[2]) dimension: the n_head query heads
+    // reshape to (head_dim, groups, n_head_kv) because q is stored as
+    // [qh*head_dim + d] with qh = kvh*groups + g, so ggml_mul_mat keeps each
+    // query-head group aligned to its shared kv head with no broadcasting.
+    //
+    // K and V are referenced as strided VIEWS of the caller's persistent cache
+    // buffers, so the cache is never re-copied per token. The context therefore
+    // only allocates the tensors actually produced here (Q, scores, softmax,
+    // context), which also shrinks the per-token allocation from O(seq) to O(1).
+    const std::size_t score_elems =
+        static_cast<std::size_t>(required_seq) * static_cast<std::size_t>(n_head);
+    const std::size_t data_floats =
+        2u * static_cast<std::size_t>(q_dim) + 4u * score_elems;
+
+    ggml_init_params params{};
+    params.mem_size =
+        data_floats * sizeof(float) +
+        ggml_graph_overhead() +
+        ggml_tensor_overhead() * 16u +
+        (2ull * 1024ull * 1024ull);
+    params.mem_buffer = nullptr;
+    params.no_alloc = false;
+
+    ggml_context* ctx = ggml_init(params);
+    if (ctx == nullptr) {
+        throw std::runtime_error("failed to allocate GGML context for attention");
+    }
+
+    // Q: (head_dim, groups, n_head_kv) -- same linear layout as q, direct copy.
+    ggml_tensor* q_t = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim, groups, n_head_kv);
+    if (q_t->data == nullptr) {
+        ggml_free(ctx);
+        throw std::runtime_error("failed to allocate GGML attention Q tensor");
+    }
+    std::memcpy(q_t->data, q.data(), static_cast<std::size_t>(q_dim) * sizeof(float));
+
+    // K view: (head_dim, seq, n_head_kv) over k_src laid out
+    // [pos*kv_dim + kvh*head_dim + d]. Built as a 1-element placeholder, then
+    // repointed at the external buffer with permuted strides. The CPU backend
+    // reads tensor->data directly via nb[], so an external pointer is valid and
+    // ggml_mul_mat supports a non-contiguous src0 as long as nb[0] == type size.
+    ggml_tensor* k_t = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+    k_t->ne[0] = head_dim;
+    k_t->ne[1] = required_seq;
+    k_t->ne[2] = n_head_kv;
+    k_t->ne[3] = 1;
+    k_t->nb[0] = sizeof(float);
+    k_t->nb[1] = static_cast<std::size_t>(kv_dim) * sizeof(float);
+    k_t->nb[2] = static_cast<std::size_t>(head_dim) * sizeof(float);
+    k_t->nb[3] = k_t->nb[2] * static_cast<std::size_t>(n_head_kv);
+    k_t->data = const_cast<float*>(k_src);
+
+    // V view: (seq, head_dim, n_head_kv) over the transposed cache
+    // [pos + cap*d + cap*head_dim*kvh]; positions (ne[0]) are contiguous so the
+    // reduction dim that ggml_mul_mat needs is dim 0. cap may exceed required_seq.
+    ggml_tensor* v_t = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+    v_t->ne[0] = required_seq;
+    v_t->ne[1] = head_dim;
+    v_t->ne[2] = n_head_kv;
+    v_t->ne[3] = 1;
+    v_t->nb[0] = sizeof(float);
+    v_t->nb[1] = static_cast<std::size_t>(v_capacity) * sizeof(float);
+    v_t->nb[2] =
+        static_cast<std::size_t>(v_capacity) * static_cast<std::size_t>(head_dim) *
+        sizeof(float);
+    v_t->nb[3] = v_t->nb[2] * static_cast<std::size_t>(n_head_kv);
+    v_t->data = const_cast<float*>(v_t_src);
+
+    // scores[pos, g, kvh] = scale * sum_d K[d,pos,kvh] * Q[d,g,kvh]
+    ggml_tensor* scores = ggml_mul_mat(ctx, k_t, q_t);   // (seq, groups, n_head_kv)
+    scores = ggml_scale(ctx, scores, scale);
+    ggml_tensor* probs = ggml_soft_max(ctx, scores);     // softmax over ne[0] = seq
+    // ctx[d, g, kvh] = sum_pos V[pos,d,kvh] * probs[pos,g,kvh]
+    ggml_tensor* ctx_t = ggml_mul_mat(ctx, v_t, probs);  // (head_dim, groups, n_head_kv)
+
+    compute_single_node_graph(ctx, ctx_t);
+
+    // ctx_t is laid out [d + head_dim*g + head_dim*groups*kvh] == [qh*head_dim + d]
+    // (qh = kvh*groups + g), i.e. exactly the context output order -> direct copy.
+    std::vector<float> context(static_cast<std::size_t>(q_dim), 0.0f);
+    std::memcpy(
+        context.data(),
+        ctx_t->data,
+        static_cast<std::size_t>(q_dim) * sizeof(float)
+    );
+
+    ggml_free(ctx);
+    return context;
+}
+
+std::vector<float> LlamaCpuExecutor::compute_attention_ggml(
+    const LlamaExecutorHyperparams& hp,
+    const std::vector<float>& q,
+    const std::vector<float>& k_cache,
+    const std::vector<float>& v_cache,
+    int required_seq
+) {
+    // Reference/parity entry point: transpose V into the contiguous
+    // (capacity == required_seq) layout the views path consumes, then delegate.
+    // Production decoding keeps a persistent transposed V and calls
+    // compute_attention_ggml_views directly so no per-token transpose happens.
+    const int head_dim = hp.head_dim;
+    const int n_head_kv = hp.n_head_kv;
+    const int kv_dim = n_head_kv * head_dim;
+
+    std::vector<float> v_t(
+        static_cast<std::size_t>(required_seq) * static_cast<std::size_t>(kv_dim),
+        0.0f
+    );
+    for (int kvh = 0; kvh < n_head_kv; ++kvh) {
+        for (int d = 0; d < head_dim; ++d) {
+            for (int pos = 0; pos < required_seq; ++pos) {
+                v_t[static_cast<std::size_t>(pos) +
+                    static_cast<std::size_t>(required_seq) * d +
+                    static_cast<std::size_t>(required_seq) * head_dim * kvh] =
+                    v_cache[static_cast<std::size_t>(pos) * kv_dim +
+                            static_cast<std::size_t>(kvh) * head_dim + d];
+            }
+        }
+    }
+
+    return compute_attention_ggml_views(
+        hp, q, k_cache.data(), v_t.data(), required_seq, required_seq
+    );
 }
 
 std::vector<float> LlamaCpuExecutor::run_layer(
@@ -865,6 +1167,8 @@ dli::common::TensorBuffer LlamaCpuExecutor::execute_source(
     int kv_seq_before,
     const std::string& output_activation_precision
 ) {
+    reset_profile();
+
     const std::vector<std::int64_t> tokens =
         tensor_to_token_ids(token_ids);
 
@@ -917,6 +1221,8 @@ dli::common::TensorBuffer LlamaCpuExecutor::execute_intermediate(
     int kv_seq_before,
     const std::string& output_activation_precision
 ){
+    reset_profile();
+
     const int seq_len =
         static_cast<int>(hidden_states.metadata.shape[1]);
 
@@ -930,27 +1236,110 @@ dli::common::TensorBuffer LlamaCpuExecutor::execute_intermediate(
     return float_hidden_to_tensor(hidden, 1, seq_len, output_activation_precision);
 }
 
-int LlamaCpuExecutor::argmax_lm_head(
-    const std::vector<float>& last_hidden
-) const {
-    const std::vector<float> logits =
-        matvec("output.weight", last_hidden);
+int LlamaCpuExecutor::sample_lm_head(
+    const std::vector<float>& last_hidden,
+    const LlamaSamplingParams& sampling
+) {
+    std::vector<float> logits = matvec("output.weight", last_hidden);
 
     if (logits.empty()) {
         throw std::runtime_error("empty logits from lm_head");
     }
 
-    int best_id = 0;
-    float best_value = logits[0];
+    return sample_from_logits(std::move(logits), sampling);
+}
 
-    for (int i = 1; i < static_cast<int>(logits.size()); ++i) {
-        if (logits[static_cast<std::size_t>(i)] > best_value) {
-            best_value = logits[static_cast<std::size_t>(i)];
-            best_id = i;
+int LlamaCpuExecutor::sample_from_logits(
+    std::vector<float> logits,
+    const LlamaSamplingParams& sampling
+) {
+    const int vocab = static_cast<int>(logits.size());
+
+    // Greedy decoding when sampling is disabled or temperature is non-positive.
+    if (!sampling.enabled || sampling.temperature <= 0.0f) {
+        int best_id = 0;
+        float best_value = logits[0];
+        for (int i = 1; i < vocab; ++i) {
+            if (logits[static_cast<std::size_t>(i)] > best_value) {
+                best_value = logits[static_cast<std::size_t>(i)];
+                best_id = i;
+            }
+        }
+        return best_id;
+    }
+
+    // (id, logit) pairs sorted by descending logit, so top-k / top-p filtering
+    // operates on the most probable candidates first.
+    std::vector<std::pair<int, float>> candidates;
+    candidates.reserve(static_cast<std::size_t>(vocab));
+    const float inv_temperature = 1.0f / sampling.temperature;
+    for (int i = 0; i < vocab; ++i) {
+        candidates.emplace_back(i, logits[static_cast<std::size_t>(i)] * inv_temperature);
+    }
+
+    std::sort(
+        candidates.begin(),
+        candidates.end(),
+        [](const std::pair<int, float>& a, const std::pair<int, float>& b) {
+            return a.second > b.second;
+        }
+    );
+
+    // top-k: keep only the k highest-logit candidates.
+    if (sampling.top_k > 0 && sampling.top_k < static_cast<int>(candidates.size())) {
+        candidates.resize(static_cast<std::size_t>(sampling.top_k));
+    }
+
+    // Softmax over the (temperature-scaled) candidate logits, max-subtracted for
+    // numerical stability.
+    const float max_logit = candidates.front().second;
+    double sum_exp = 0.0;
+    std::vector<double> probs(candidates.size());
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        const double p = std::exp(static_cast<double>(candidates[i].second - max_logit));
+        probs[i] = p;
+        sum_exp += p;
+    }
+    for (double& p : probs) {
+        p /= sum_exp;
+    }
+
+    // top-p (nucleus): keep the smallest prefix whose cumulative probability
+    // reaches top_p, then renormalize over that prefix.
+    std::size_t cutoff = probs.size();
+    if (sampling.top_p < 1.0f && sampling.top_p > 0.0f) {
+        double cumulative = 0.0;
+        for (std::size_t i = 0; i < probs.size(); ++i) {
+            cumulative += probs[i];
+            if (cumulative >= static_cast<double>(sampling.top_p)) {
+                cutoff = i + 1;
+                break;
+            }
+        }
+        double renorm = 0.0;
+        for (std::size_t i = 0; i < cutoff; ++i) {
+            renorm += probs[i];
+        }
+        if (renorm > 0.0) {
+            for (std::size_t i = 0; i < cutoff; ++i) {
+                probs[i] /= renorm;
+            }
         }
     }
 
-    return best_id;
+    // Sample one candidate from the resulting categorical distribution.
+    std::uniform_real_distribution<double> dist(0.0, 1.0);
+    const double draw = dist(rng_);
+    double cumulative = 0.0;
+    for (std::size_t i = 0; i < cutoff; ++i) {
+        cumulative += probs[i];
+        if (draw <= cumulative) {
+            return candidates[i].first;
+        }
+    }
+
+    // Fallback against floating-point rounding: return the most probable token.
+    return candidates.front().first;
 }
 
 int LlamaCpuExecutor::execute_terminal(
@@ -959,8 +1348,22 @@ int LlamaCpuExecutor::execute_terminal(
     const std::string&,
     int kv_seq_before,
     bool owns_norm,
-    bool owns_lm_head
+    bool owns_lm_head,
+    const LlamaSamplingParams& sampling
 ) {
+    reset_profile();
+
+    // Reseed once per sequence (prefill / first token, kv_seq_before == 0) so a
+    // fixed seed yields reproducible output across runs, while seed < 0 forces a
+    // fresh random stream. Decode steps (kv_seq_before > 0) let the RNG advance.
+    if (sampling.has_seed && kv_seq_before == 0) {
+        if (sampling.seed >= 0) {
+            rng_.seed(static_cast<std::mt19937::result_type>(sampling.seed));
+        } else {
+            rng_.seed(std::random_device{}());
+        }
+    }
+
     const int seq_len =
         static_cast<int>(hidden_states.metadata.shape[1]);
 
@@ -995,7 +1398,7 @@ int LlamaCpuExecutor::execute_terminal(
     const std::vector<float> normed =
         rms_norm(last_hidden, output_norm_weight);
 
-    return argmax_lm_head(normed);
+    return sample_lm_head(normed, sampling);
 }
 
 std::uint64_t LlamaCpuExecutor::kv_cache_bytes() const {

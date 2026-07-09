@@ -18,6 +18,18 @@ struct GenerationLoopConfig {
     int min_new_tokens = 0;
     bool apply_chat_template = true;
 
+    // Sampling controls forwarded to the terminal stage. temperature <= 0 keeps
+    // deterministic greedy decoding; a positive temperature engages sampling.
+    // top_k <= 0 disables top-k filtering; top_p is only applied when has_top_p.
+    double temperature = 0.0;
+    int top_k = 0;
+    bool has_top_p = false;
+    double top_p = 1.0;
+    // Optional RNG seed forwarded to the terminal stage. has_seed=false keeps the
+    // rolling random stream; seed >= 0 is reproducible; seed < 0 forces random.
+    bool has_seed = false;
+    long long seed = 0;
+
     std::vector<PartitionNodeConfig> partitions;
 
     bool persistent_sessions_enabled = false;

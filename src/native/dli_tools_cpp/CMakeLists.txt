@@ -23,6 +23,34 @@ add_executable(dli-gguf-shard-validate
     src/gguf_shard_validate_tool.cpp
 )
 
+add_executable(dli-gguf-info
+    src/gguf_info_tool.cpp
+)
+
+add_executable(dli-native-model-controller
+    src/native_model_controller_tool.cpp
+)
+
+target_include_directories(dli-gguf-info PRIVATE
+    ${CMAKE_SOURCE_DIR}/dli_common_cpp/include
+    ${CMAKE_SOURCE_DIR}/third_party/llama.cpp/ggml/include
+)
+
+target_link_libraries(dli-gguf-info PRIVATE
+    dli-common-cpp
+    ggml
+)
+
+target_include_directories(dli-native-model-controller PRIVATE
+    ${CMAKE_SOURCE_DIR}/dli_common_cpp/include
+    ${CMAKE_SOURCE_DIR}/third_party/llama.cpp/ggml/include
+)
+
+target_link_libraries(dli-native-model-controller PRIVATE
+    dli-common-cpp
+    ggml
+)
+
 target_include_directories(dli-gguf-shard-validate PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/dli_common_cpp/include
@@ -39,6 +67,8 @@ target_link_libraries(dli-gguf-shard-validate PRIVATE
 foreach(target_name
     dli-gguf-shard-writer
     dli-gguf-shard-validate
+    dli-gguf-info
+    dli-native-model-controller
 )
     target_compile_features(${target_name} PRIVATE cxx_std_17)
     target_compile_options(${target_name} PRIVATE

@@ -18,7 +18,10 @@ NATIVE_BUILD_IMAGE="${NATIVE_BUILD_IMAGE:-}"
 NATIVE_RUNTIME_BASE_ARG="${NATIVE_RUNTIME_BASE_ARG:-RUNTIME_IMAGE}"
 NATIVE_CMAKE_BUILD_TYPE="${NATIVE_CMAKE_BUILD_TYPE:-Release}"
 NATIVE_GGML_NATIVE="${NATIVE_GGML_NATIVE:-OFF}"
-NATIVE_GGML_CPU_ARM_ARCH="${NATIVE_GGML_CPU_ARM_ARCH:-armv8-a}"
+# Default to the Raspberry Pi 5 (Cortex-A76 = ARMv8.2-A + fp16 + dotprod) so the
+# ggml quantized matmul kernels are emitted. Override for older ARM hosts
+# (e.g. Pi 4 / A72 need plain `armv8-a`) to avoid SIGILL.
+NATIVE_GGML_CPU_ARM_ARCH="${NATIVE_GGML_CPU_ARM_ARCH:-armv8.2-a+fp16+dotprod}"
 NATIVE_GGML_CPU_ALL_VARIANTS="${NATIVE_GGML_CPU_ALL_VARIANTS:-OFF}"
 ALLOW_SELF_BASE="${ALLOW_SELF_BASE:-}"
 ENABLE_INLINE_CACHE="${ENABLE_INLINE_CACHE:-1}"
@@ -365,6 +368,37 @@ if [[ "${IMAGE_KIND}" == "native" ]]; then
 
   if [[ -n "${NATIVE_BUILD_IMAGE}" ]]; then
     echo "Native build image override: ${NATIVE_BUILD_IMAGE}"
+  fi
+
+  # The CPU optimizations (persistent ggml backend/threadpool, right-sized
+  # per-matvec context, ggml attention path, fp16 activation support, and the
+  # gateway temperature / uncapped max-tokens fixes) are all compiled from
+  # source, so any native build includes them. The one build-time lever is the
+  # ARM target below: dotprod is what accelerates the quantized matmul kernels.
+  if printf '%s\n' "${PLATFORMS[@]}" | grep -q '^linux/arm64$'; then
+    case "${NATIVE_GGML_CPU_ARM_ARCH}" in
+      *dotprod*)
+        echo "Native dotprod         : ENABLED (quantized matmul kernels accelerated)"
+        ;;
+      *)
+        echo "Native dotprod         : DISABLED (arm64 target '${NATIVE_GGML_CPU_ARM_ARCH}' lacks +dotprod)"
+        echo "  -> Raspberry Pi 5 (Cortex-A76) should use armv8.2-a+fp16+dotprod."
+        echo "     Re-run with: NATIVE_GGML_CPU_ARM_ARCH=armv8.2-a+fp16+dotprod scripts/build_images.sh"
+        ;;
+    esac
+  fi
+
+  # Runtime-controlled fixes are NOT baked into the image; they are stage-pod
+  # env / request params and must be set separately:
+  #   - DLI_GGML_ATTENTION=1  (enable ggml/NEON attention)  -> k8s configmap
+  #   - DLI_GGML_THREADS=4    (ggml CPU worker threads)      -> k8s configmap
+  #   - "activation_precision":"fp16" in the /generate request body
+  if [[ "${SERVICE}" == "native-stage" ]]; then
+    echo "Reminder: enable runtime knobs via k8s/native/configmap.yaml"
+    echo "          (DLI_GGML_ATTENTION=1, DLI_GGML_THREADS=4) then rollout restart."
+    echo "Reminder: the gateway fixes live in the native-gateway image -- rebuild that too."
+  elif [[ "${SERVICE}" == "native-gateway" ]]; then
+    echo "Reminder: the CPU stage fixes live in the native-stage image -- rebuild that too."
   fi
 fi
 

@@ -350,12 +350,27 @@ std::string request_metadata_json(
     bool native_stage_chaining_enabled,
     int min_new_tokens,
     bool apply_chat_template,
-    const std::string& metadata_level
+    const std::string& metadata_level,
+    double temperature,
+    int top_k,
+    bool has_top_p,
+    double top_p,
+    bool has_seed,
+    long long seed
 ) {
     std::ostringstream out;
 
     const std::int64_t sequence_length =
         shape.size() >= 2 ? shape[1] : 0;
+
+    // The terminal stage parses "temperature"/"top_k"/"top_p" (full key names)
+    // from metadata, so emit those even in compact mode; otherwise sampling
+    // would silently fall back to greedy decoding regardless of the request.
+    const std::string top_p_json = has_top_p ? std::to_string(top_p) : "null";
+    // Seed is only emitted when supplied so an absent seed keeps the stage's
+    // rolling random stream; it is parsed by the terminal stage to reseed.
+    const std::string seed_json =
+        has_seed ? ("\"seed\":" + std::to_string(seed) + ",") : "";
 
     if (metadata_level_is_compact(metadata_level)) {
         out
@@ -370,6 +385,10 @@ std::string request_metadata_json(
             << "\"kv\":true,"
             << "\"ps\":" << (persistent_sessions_enabled ? "true" : "false") << ","
             << "\"nsc\":" << (native_stage_chaining_enabled ? "true" : "false") << ","
+            << "\"temperature\":" << temperature << ","
+            << "\"top_k\":" << top_k << ","
+            << "\"top_p\":" << top_p_json << ","
+            << seed_json
             << "\"m\":" << min_new_tokens
             << "}";
         return out.str();
@@ -396,9 +415,10 @@ std::string request_metadata_json(
         << "\"apply_chat_template\":" << (apply_chat_template ? "true" : "false")
         << "},"
         << "\"sampling\":{"
-        << "\"temperature\":0.0,"
-        << "\"top_k\":1,"
-        << "\"top_p\":null,"
+        << "\"temperature\":" << temperature << ","
+        << "\"top_k\":" << top_k << ","
+        << "\"top_p\":" << top_p_json << ","
+        << seed_json
         << "\"min_new_tokens\":" << min_new_tokens
         << "}"
         << "}";
@@ -643,7 +663,13 @@ GenerationLoopResult GenerationLoop::run_stub_generation(
             config_.native_stage_chaining_enabled,
             config_.min_new_tokens,
             config_.apply_chat_template,
-            config_.metadata_level
+            config_.metadata_level,
+            config_.temperature,
+            config_.top_k,
+            config_.has_top_p,
+            config_.top_p,
+            config_.has_seed,
+            config_.seed
         );
         prefill.tensor_bytes = int64_tokens_to_bytes(tokenized.token_ids);
 
@@ -704,7 +730,13 @@ GenerationLoopResult GenerationLoop::run_stub_generation(
                 config_.native_stage_chaining_enabled,
                 config_.min_new_tokens,
                 config_.apply_chat_template,
-                config_.metadata_level
+                config_.metadata_level,
+                config_.temperature,
+                config_.top_k,
+                config_.has_top_p,
+                config_.top_p,
+                config_.has_seed,
+                config_.seed
             );
 
             decode.tensor_bytes = int64_tokens_to_bytes(

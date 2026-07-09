@@ -1,0 +1,21 @@
+{
+  "models": [
+    {
+      "id": "tinyllama-1.1b-chat-q4-k-m",
+      "label": "TinyLlama 1.1B Chat Q4_K_M",
+      "modelName": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+      "slug": "tinyllama-1.1b-chat-v1.0-q4_k_m",
+      "description": "Default native GGUF model used by the sample manifests.",
+      "sourceRepo": "your-user-or-org/dli-tinyllama-native-gguf-4stage",
+      "sourceRevision": "main",
+      "sourceFile": "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
+      "artifactRepo": "your-user-or-org/dli-tinyllama-native-gguf-4stage",
+      "artifactRevision": "main",
+      "fullGgufFile": "tinyllama-1.1b-chat-v1.0-q4_k_m/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
+      "numLayers": 22,
+      "numStages": 4,
+      "physicalNodes": ["dli-worker-1", "dli-worker-2", "dli-worker-3", "dli-worker-4"],
+      "prepared": true
+    }
+  ]
+}

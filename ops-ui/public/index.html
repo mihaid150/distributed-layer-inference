@@ -130,6 +130,10 @@
           <button id="invokeClearRunsBtn" type="button" class="danger-button">Clear Endpoint Results</button>
         </div>
         <div id="generationParamControls" class="generation-controls">
+          <label title="Optional name for this run; shown in History and included in exports to identify experiments.">
+            Experiment label
+            <input id="endpointLabel" type="text" placeholder="e.g. temp-sweep-0.7" />
+          </label>
           <label>
             Prompt
             <input
@@ -140,15 +144,34 @@
           </label>
           <label>
             Max new tokens
-            <input id="endpointMaxTokens" type="number" min="1" max="512" step="1" value="24" />
+            <input id="endpointMaxTokens" type="number" min="1" step="1" value="24" />
           </label>
           <label>
             Min new tokens
-            <input id="endpointMinTokens" type="number" min="1" max="512" step="1" value="8" />
+            <input id="endpointMinTokens" type="number" min="1" step="1" value="8" />
           </label>
           <label>
             Temperature
             <input id="endpointTemperature" type="number" min="0" max="2" step="0.1" value="0.2" />
+          </label>
+          <label>
+            Top-k (0 = off)
+            <input id="endpointTopK" type="number" min="0" step="1" value="0" />
+          </label>
+          <label>
+            Top-p (1 = off)
+            <input id="endpointTopP" type="number" min="0" max="1" step="0.05" value="1" />
+          </label>
+          <label title="Empty = rolling random (diverse). A fixed value (e.g. 42) = reproducible. -1 = random each run.">
+            Seed (blank/-1 = random)
+            <input id="endpointSeed" type="number" step="1" placeholder="random" />
+          </label>
+          <label>
+            Activation precision
+            <select id="endpointPrecision">
+              <option value="fp32" selected>FP32 (baseline)</option>
+              <option value="fp16">FP16</option>
+            </select>
           </label>
         </div>
         <div class="feature-flags-panel">
@@ -208,6 +231,126 @@
           <summary>Raw Response JSON</summary>
           <pre id="invokeOutput" class="log-output"></pre>
         </details>
+      </section>
+
+      <section class="panel panel-wide">
+        <h2>Automated Test Suites</h2>
+        <p class="muted">
+          Pick a mode and a suite; the table pre-fills with the §11 test cases (editable).
+          One click runs them all against <code>/generate</code> with a small gap between
+          runs — every run lands in History. HTTP-drivable knobs only (tokens, precision,
+          sampling, hub/chain routing). Threads / attention / governor are set out-of-band
+          (see ARCHITECTURE.md §11.12).
+        </p>
+        <div class="auto-controls">
+          <label>
+            Mode
+            <select id="autoMode">
+              <option value="simple">simple (1 request / case)</option>
+              <option value="batch">batch (N back-to-back / case)</option>
+              <option value="concurrency">concurrency (N in parallel / case)</option>
+            </select>
+          </label>
+          <label>
+            Suite
+            <select id="autoSuite"><!-- populated by app.js (built-ins + custom) --></select>
+          </label>
+          <label>
+            N (batch/concurrency)
+            <input id="autoN" type="number" min="1" max="32" step="1" value="4" />
+          </label>
+          <label title="Run the whole enabled suite R times (interleaved passes). Best for medians/variance — spreads each case's repeats across time.">
+            Repeat ×R (passes)
+            <input id="autoRepeat" type="number" min="1" max="50" step="1" value="1" />
+          </label>
+          <label>
+            Gap between runs (ms)
+            <input id="autoDelay" type="number" min="0" max="60000" step="250" value="1500" />
+          </label>
+          <label>
+            Timeout ms (0 = none)
+            <input id="autoTimeout" type="number" min="0" max="1800000" step="1000" value="0" />
+          </label>
+          <label class="auto-checkbox" title="Patch DLI_GGML_THREADS / DLI_GGML_ATTENTION in the configmap and rollout-restart between rows. Mutates the cluster. Governor is host sysfs and stays manual (§11.2c).">
+            <input id="autoClusterSweep" type="checkbox" />
+            Sweep threads/attn via kubectl (mutates cluster)
+          </label>
+          <button id="autoLoadDefaultsBtn" type="button">Load defaults</button>
+          <button id="autoAddRowBtn" type="button">Add row</button>
+          <button id="autoSaveSuiteBtn" type="button" title="Save the current table as a reusable named suite (stored in this browser)">Save as suite…</button>
+          <button id="autoDeleteSuiteBtn" type="button" title="Delete the selected custom suite">Delete suite</button>
+          <button id="autoRunBtn" title="Runs the current table. While a suite is running, press again to queue the current table as the next suite.">Run suite</button>
+          <button id="autoStopBtn" type="button" class="danger-button" disabled>Stop</button>
+        </div>
+        <div class="auto-queue-head">
+          <strong>Suite queue</strong>
+          <span id="autoQueueCount" class="muted">empty</span>
+          <label class="auto-inline">Delay between suites (ms)
+            <input id="autoSuiteGap" type="number" min="0" max="600000" step="500" value="3000" />
+          </label>
+          <button id="autoClearQueueBtn" type="button" class="danger-button">Clear queue</button>
+        </div>
+        <div class="auto-table-wrap">
+          <table class="auto-table" id="autoQueueTable">
+            <thead>
+              <tr><th>#</th><th>suite</th><th>mode</th><th>cases</th><th>sweep</th><th></th></tr>
+            </thead>
+            <tbody id="autoQueueBody"></tbody>
+          </table>
+        </div>
+        <div class="auto-table-wrap">
+          <table id="autoTestTable" class="auto-table">
+            <thead>
+              <tr>
+                <th>on</th><th>label</th><th>routing</th><th title="per-row batch/concurrency override; blank = global N">N</th>
+                <th>max_new</th><th>min_new</th><th>temp</th><th>top_k</th><th>top_p</th><th>seed</th><th>prec</th>
+                <th title="DLI_GGML_THREADS — only applied when the kubectl sweep box is checked">threads</th>
+                <th title="DLI_GGML_ATTENTION (0/1) — only applied when the kubectl sweep box is checked">attn</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="autoTestBody"></tbody>
+          </table>
+        </div>
+        <div id="autoProgress" class="log-summary"></div>
+        <div class="auto-results-head">
+          <strong>Live results (individual runs)</strong>
+          <span id="autoResultsCount" class="muted"></span>
+          <button id="autoExportResultsBtn" type="button">Export runs CSV</button>
+          <button id="autoExportAggBtn" type="button">Export aggregates CSV</button>
+          <button id="autoExportAllBtn" type="button">Export runs + aggregates</button>
+          <button id="autoClearResultsBtn" type="button" class="danger-button">Clear results</button>
+        </div>
+        <div class="auto-table-wrap">
+          <table class="auto-table" id="autoResultsTable">
+            <thead>
+              <tr>
+                <th>#</th><th>label</th><th>suite</th><th title="⚙ = kubectl env sweep was active">mode</th>
+                <th>status</th><th>latency (s)</th><th>tok/s</th>
+                <th>compute (s)</th><th>rpc-wall (s)</th><th>comm (s)</th><th>payload (MiB)</th>
+                <th>gen tok</th><th>time</th>
+              </tr>
+            </thead>
+            <tbody id="autoResultsBody"></tbody>
+          </table>
+        </div>
+        <div class="auto-results-head">
+          <strong>Aggregates (per case, over successful runs)</strong>
+          <span id="autoAggCount" class="muted"></span>
+        </div>
+        <div class="auto-table-wrap">
+          <table class="auto-table" id="autoAggTable">
+            <thead>
+              <tr>
+                <th>case</th><th>suite</th><th>mode</th><th>sweep</th><th>n</th>
+                <th>lat median (s)</th><th>lat min</th><th>lat max</th><th>lat mean</th>
+                <th>tok/s median</th><th>compute mean (s)</th><th>rpc-wall mean (s)</th><th>comm mean (s)</th>
+              </tr>
+            </thead>
+            <tbody id="autoAggBody"></tbody>
+          </table>
+        </div>
+        <pre id="autoLog" class="log-output"></pre>
       </section>
 
       <section class="panel panel-wide">

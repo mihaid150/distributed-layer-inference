@@ -277,6 +277,11 @@ ParsedRequestMetadata parse_request_metadata(const std::string& metadata_json) {
         parsed.top_p = *value;
     }
 
+    if (const auto value = extract_double_field(metadata_json, "seed")) {
+        parsed.has_seed = true;
+        parsed.seed = static_cast<long long>(*value);
+    }
+
     return parsed;
 }
 

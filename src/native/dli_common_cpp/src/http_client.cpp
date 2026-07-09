@@ -9,6 +9,8 @@
 #include <string>
 
 #include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -128,6 +130,14 @@ int connect_tcp(const ParsedUrl& url, int timeout_seconds) {
 
         (void)::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         (void)::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+        // Disable Nagle's algorithm. Inter-stage traffic is a synchronous
+        // request->response ping-pong of small frames over a persistent socket;
+        // with Nagle on, the small request body waits for the peer's delayed ACK
+        // (~40ms on Linux), which dominates per-token transport time. This is the
+        // same reason llama.cpp's own RPC transport sets TCP_NODELAY.
+        const int nodelay = 1;
+        (void)::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
         if (::connect(fd, item->ai_addr, item->ai_addrlen) == 0) {
             connected_fd = fd;
@@ -381,12 +391,17 @@ HttpClientResponse http_post_binary(
 
         const std::string header_text = request_header.str();
 
-        if (!send_all(fd, header_text)) {
-            throw std::runtime_error("failed to send HTTP request header");
-        }
+        // Coalesce header + body into a single write so the request leaves as one
+        // segment instead of two. With TCP_NODELAY the two-write pattern would emit
+        // two small packets; one buffer avoids the extra packet and syscall.
+        std::vector<std::uint8_t> request_bytes;
+        request_bytes.reserve(header_text.size() + body.size());
+        request_bytes.insert(
+            request_bytes.end(), header_text.begin(), header_text.end());
+        request_bytes.insert(request_bytes.end(), body.begin(), body.end());
 
-        if (!body.empty() && !send_all(fd, body.data(), body.size())) {
-            throw std::runtime_error("failed to send HTTP request body");
+        if (!send_all(fd, request_bytes.data(), request_bytes.size())) {
+            throw std::runtime_error("failed to send HTTP request");
         }
 
         HttpClientResponse response = read_http_response(fd);
@@ -437,12 +452,16 @@ HttpClientResponse PersistentHttpClient::post_binary_once(
 
     const std::string header_text = request_header.str();
 
-    if (!send_all(fd_, header_text)) {
-        throw std::runtime_error("failed to send HTTP keep-alive request header");
-    }
+    // Coalesce header + body into a single write (one segment instead of two);
+    // see http_post_binary for the rationale. This is the per-token hot path.
+    std::vector<std::uint8_t> request_bytes;
+    request_bytes.reserve(header_text.size() + body.size());
+    request_bytes.insert(
+        request_bytes.end(), header_text.begin(), header_text.end());
+    request_bytes.insert(request_bytes.end(), body.begin(), body.end());
 
-    if (!body.empty() && !send_all(fd_, body.data(), body.size())) {
-        throw std::runtime_error("failed to send HTTP keep-alive request body");
+    if (!send_all(fd_, request_bytes.data(), request_bytes.size())) {
+        throw std::runtime_error("failed to send HTTP keep-alive request");
     }
 
     HttpClientResponse response = read_http_response(fd_);

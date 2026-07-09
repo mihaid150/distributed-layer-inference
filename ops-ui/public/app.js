@@ -24,10 +24,15 @@ const els = {
   endpointMethod: document.getElementById("endpointMethod"),
   endpointPath: document.getElementById("endpointPath"),
   endpointTimeout: document.getElementById("endpointTimeout"),
+  endpointLabel: document.getElementById("endpointLabel"),
   endpointPrompt: document.getElementById("endpointPrompt"),
   endpointMaxTokens: document.getElementById("endpointMaxTokens"),
   endpointMinTokens: document.getElementById("endpointMinTokens"),
   endpointTemperature: document.getElementById("endpointTemperature"),
+  endpointTopK: document.getElementById("endpointTopK"),
+  endpointTopP: document.getElementById("endpointTopP"),
+  endpointSeed: document.getElementById("endpointSeed"),
+  endpointPrecision: document.getElementById("endpointPrecision"),
   featureTransportJson: document.getElementById("featureTransportJson"),
   featureTransportBinary: document.getElementById("featureTransportBinary"),
   featurePrecisionFp32: document.getElementById("featurePrecisionFp32"),
@@ -326,6 +331,14 @@ function clampNumber(value, min, max, fallback) {
   return Math.max(min, Math.min(max, parsed));
 }
 
+function floorNumber(value, min, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.max(min, parsed);
+}
+
 function parseJsonOrNull(text) {
   try {
     return JSON.parse(text);
@@ -444,8 +457,53 @@ function parseGenerateConfigFromBody(bodyValue) {
     promptChars: String(parsed.prompt || "").length,
     maxNewTokens: Number(parsed.max_new_tokens || 0),
     minNewTokens: Number(parsed.min_new_tokens || 0),
-    temperature: Number(parsed.temperature || 0)
+    temperature: Number(parsed.temperature || 0),
+    topK: Number(parsed.top_k || 0),
+    topP: parsed.top_p != null ? Number(parsed.top_p) : 1,
+    seed: parsed.seed != null && parsed.seed !== "" ? Number(parsed.seed) : null
   };
+}
+
+// Raw per-token/per-step traces and the redundant session-evolution snapshot are
+// huge (~1.5 MB+ per run) and unused by the History page, which renders from
+// metrics/config/output and the dashboard summaries. Persisting them inflates
+// each entry past the server's POST body limit, causing the save to fail and the
+// run to silently go missing from History. Strip them before persisting.
+const HISTORY_HEAVY_RESPONSE_FIELDS = [
+  "token_metrics",
+  "steps",
+  "prompt_token_ids",
+  "generated_token_ids"
+];
+const HISTORY_HEAVY_DASHBOARD_FIELDS = ["responseJson", "sessionRunEvolution"];
+
+function slimHistoryResponseJson(responseJsonValue) {
+  const response = asObject(responseJsonValue);
+  if (!Object.keys(response).length) {
+    return undefined;
+  }
+  const slim = { ...response };
+  for (const field of HISTORY_HEAVY_RESPONSE_FIELDS) {
+    delete slim[field];
+  }
+  return slim;
+}
+
+function slimHistoryEntry(entry) {
+  const slimmed = { ...entry };
+  const dashboard = asObject(entry.dashboard);
+  if (Object.keys(dashboard).length) {
+    const slimDashboard = { ...dashboard };
+    for (const field of HISTORY_HEAVY_DASHBOARD_FIELDS) {
+      delete slimDashboard[field];
+    }
+    const slimResponse = slimHistoryResponseJson(dashboard.responseJson);
+    if (slimResponse) {
+      slimDashboard.responseJson = slimResponse;
+    }
+    slimmed.dashboard = slimDashboard;
+  }
+  return slimmed;
 }
 
 async function postHistoryEntries(entries) {
@@ -453,15 +511,19 @@ async function postHistoryEntries(entries) {
   if (!rows.length) {
     return;
   }
-  const batched = rows.slice(0, HISTORY_POST_BATCH_LIMIT);
+  const batched = rows.slice(0, HISTORY_POST_BATCH_LIMIT).map(slimHistoryEntry);
   try {
-    await fetch("/api/history", {
+    const res = await fetch("/api/history", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ entries: batched })
     });
-  } catch {
-    // ignore history persistence errors in UI path
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      console.error(`History persistence failed: ${res.status} ${res.statusText} ${detail}`);
+    }
+  } catch (error) {
+    console.error("History persistence request failed:", error);
   }
 }
 
@@ -735,7 +797,7 @@ function syncBodyFromFeatureFlagControls() {
 
   const nextBody = { ...parsed };
   const flags = readFeatureFlagsFromControls();
-  
+
   if (isBaselineFeatureFlags(flags)) {
     delete nextBody.feature_flags;
   } else {
@@ -755,18 +817,32 @@ function syncGenerationFieldsFromBody() {
   }
   if (parsed.max_new_tokens != null) {
     els.endpointMaxTokens.value = String(
-      clampNumber(parsed.max_new_tokens, 1, 512, 24)
+      floorNumber(parsed.max_new_tokens, 1, 24)
     );
   }
   if (parsed.min_new_tokens != null) {
     els.endpointMinTokens.value = String(
-      clampNumber(parsed.min_new_tokens, 1, 512, 8)
+      floorNumber(parsed.min_new_tokens, 1, 8)
     );
   }
   if (parsed.temperature != null) {
     els.endpointTemperature.value = String(
       clampNumber(parsed.temperature, 0, 2, 0.2)
     );
+  }
+  if (els.endpointTopK && parsed.top_k != null) {
+    els.endpointTopK.value = String(floorNumber(parsed.top_k, 0, 0));
+  }
+  if (els.endpointTopP && parsed.top_p != null) {
+    els.endpointTopP.value = String(clampNumber(parsed.top_p, 0, 1, 1));
+  }
+  if (els.endpointSeed) {
+    els.endpointSeed.value =
+      parsed.seed != null && parsed.seed !== "" ? String(Math.round(Number(parsed.seed))) : "";
+  }
+  if (els.endpointPrecision) {
+    els.endpointPrecision.value =
+      String(parsed.activation_precision || "fp32") === "fp16" ? "fp16" : "fp32";
   }
 
   applyFeatureFlagControls(asObject(parsed.feature_flags));
@@ -782,8 +858,8 @@ function syncBodyFromGenerationFields() {
     return;
   }
 
-  const maxNewTokens = clampNumber(els.endpointMaxTokens.value, 1, 512, 24);
-  const minNewTokens = clampNumber(els.endpointMinTokens.value, 1, maxNewTokens, 8);
+  const maxNewTokens = floorNumber(els.endpointMaxTokens.value, 1, 24);
+  const minNewTokens = floorNumber(els.endpointMinTokens.value, 1, 8);
   const temperature = clampNumber(els.endpointTemperature.value, 0, 2, 0.2);
 
   els.endpointMinTokens.value = String(minNewTokens);
@@ -795,6 +871,44 @@ function syncBodyFromGenerationFields() {
     min_new_tokens: Math.round(minNewTokens),
     temperature
   };
+
+  // top_k (0 = off) and top_p (>=1 = off) are sampling controls the gateway
+  // forwards to the terminal stage. Include them only when active so baseline
+  // greedy bodies stay clean; the gateway treats an absent top_p as disabled.
+  const topK = els.endpointTopK ? floorNumber(els.endpointTopK.value, 0, 0) : 0;
+  if (topK > 0) {
+    nextBody.top_k = Math.round(topK);
+  } else {
+    delete nextBody.top_k;
+  }
+
+  const topP = els.endpointTopP ? clampNumber(els.endpointTopP.value, 0, 1, 1) : 1;
+  if (topP > 0 && topP < 1) {
+    nextBody.top_p = topP;
+  } else {
+    delete nextBody.top_p;
+  }
+
+  // seed: blank field => omit (rolling random). A value (incl. -1) => send it;
+  // >= 0 is reproducible, -1 forces a fresh random stream each run.
+  const seedRaw = els.endpointSeed ? String(els.endpointSeed.value).trim() : "";
+  if (seedRaw !== "" && Number.isFinite(Number(seedRaw))) {
+    nextBody.seed = Math.round(Number(seedRaw));
+  } else {
+    delete nextBody.seed;
+  }
+
+  // The native gateway reads activation_precision from the top level of the
+  // body. Drop it when fp32 to keep baseline bodies clean.
+  const precision = els.endpointPrecision
+    ? String(els.endpointPrecision.value || "fp32")
+    : "fp32";
+  if (precision === "fp16") {
+    nextBody.activation_precision = "fp16";
+  } else {
+    delete nextBody.activation_precision;
+  }
+
   els.endpointBody.value = prettyJson(nextBody);
 }
 
@@ -1887,6 +2001,37 @@ function nativeStepToStageMetric(step) {
     session_kv_cache_bytes: sessionKvCacheBytes,
     session_kv_cache_mib: sessionKvCacheBytes / (1024 * 1024),
 
+    // Per-request resource usage sampled from /proc on the native stage.
+    process_cpu_percent: Number(metrics.process_cpu_percent || 0),
+    system_cpu_percent: Number(metrics.system_cpu_percent || 0),
+    process_threads: Number(metrics.process_threads || 0),
+    process_context_switches: {
+      voluntary: Number(asObject(metrics.process_context_switches).voluntary || 0),
+      involuntary: Number(asObject(metrics.process_context_switches).involuntary || 0)
+    },
+    process_io_delta: {
+      read_bytes: Number(asObject(metrics.process_io_delta).read_bytes || 0),
+      write_bytes: Number(asObject(metrics.process_io_delta).write_bytes || 0),
+      read_count: Number(asObject(metrics.process_io_delta).read_count || 0),
+      write_count: Number(asObject(metrics.process_io_delta).write_count || 0)
+    },
+
+    // Compute breakdown + ggml thread count (native CPU optimization metrics).
+    matmul_ms: Number(metrics.matmul_ms || 0),
+    attention_ms: Number(metrics.attention_ms || 0),
+    ggml_threads: Number(metrics.ggml_threads || 0),
+
+    // Native stages don't expose per-process net counters, so net delta is the
+    // real socket bytes moved this hop (request + response) and bandwidth is
+    // those bytes over the RPC wall time.
+    network_delta: {
+      bytes_sent: requestBodyBytes,
+      bytes_recv: responseBodyBytes,
+      bytes_total: transportPayloadBytes,
+      bandwidth_mbps_total:
+        rpcWallMs > 0 ? (transportPayloadBytes * 8) / (rpcWallMs * 1000) : 0
+    },
+
     native_stage_metadata: metadata
   };
 }
@@ -1946,12 +2091,22 @@ function normalizeNativeResponseMetrics(responseJson, callMeta = {}) {
     aggregateMetrics.true_comm_ms ||
       stageSamples.reduce((sum, sample) => sum + Number(sample.true_comm_ms || 0), 0)
   );
-  const payloadBytes = Number(
+  // Raw activation/tensor data volume moved between stages (excludes transport
+  // framing/encoding overhead).
+  const tensorDataBytes =
+    Number(aggregateMetrics.tensor_bytes_in || 0) +
+    Number(aggregateMetrics.tensor_bytes_out || 0);
+  // Bytes actually serialized onto the wire in both directions (request +
+  // response bodies). The native gateway sums these as transport_payload_bytes;
+  // on the co-located/native path there is no separate OS-level NIC counter, so
+  // this is the real network-transfer figure.
+  const wireBytes = Number(
     aggregateMetrics.transport_payload_bytes ||
       aggregateMetrics.payload_bytes_sum ||
-      ((aggregateMetrics.tensor_bytes_in || 0) + (aggregateMetrics.tensor_bytes_out || 0)) ||
+      tensorDataBytes ||
       stageSamples.reduce((sum, sample) => sum + metricPayloadBytes(sample), 0)
   );
+  const payloadBytes = tensorDataBytes || wireBytes;
   const maxMemoryMb = Number(
     aggregateMetrics.memory_rss_mb ||
       stageSamples.reduce((max, sample) => Math.max(max, Number(sample.process_memory_mb || 0)), 0)
@@ -2014,8 +2169,8 @@ function normalizeNativeResponseMetrics(responseJson, callMeta = {}) {
         true_comm_compute_ratio: trueCommSum / Math.max(1e-9, computeSum),
         payload_bytes_sum: payloadBytes,
         payload_mebibytes_sum: payloadBytes / (1024 * 1024),
-        network_delta_bytes_sum: 0,
-        network_delta_mebibytes_sum: 0,
+        network_delta_bytes_sum: wireBytes,
+        network_delta_mebibytes_sum: wireBytes / (1024 * 1024),
         max_process_memory_mb: maxMemoryMb,
         max_cgroup_memory_mb: maxCgroupMemMb,
         max_cgroup_memory_limit_mb: maxCgroupLimitMb,
@@ -2140,7 +2295,12 @@ function aggregateStageMetrics(stageSamples, perStageSummary) {
       maxSystemCpuPct: 0,
       maxBandwidthMbps: 0,
       maxThreads: 0,
-      ctxSwitches: 0
+      ctxSwitches: 0,
+      ioReadCountDelta: 0,
+      ioWriteCountDelta: 0,
+      matmulMs: 0,
+      attentionMs: 0,
+      ggmlThreads: 0
     });
   }
 
@@ -2167,7 +2327,12 @@ function aggregateStageMetrics(stageSamples, perStageSummary) {
       maxSystemCpuPct: 0,
       maxBandwidthMbps: 0,
       maxThreads: 0,
-      ctxSwitches: 0
+      ctxSwitches: 0,
+      ioReadCountDelta: 0,
+      ioWriteCountDelta: 0,
+      matmulMs: 0,
+      attentionMs: 0,
+      ggmlThreads: 0
     };
 
     curr.samples += 1;
@@ -2216,6 +2381,11 @@ function aggregateStageMetrics(stageSamples, perStageSummary) {
     curr.maxThreads = Math.max(curr.maxThreads, Number(sample.process_threads || 0));
     curr.ctxSwitches += Number(sample.process_context_switches?.voluntary || 0);
     curr.ctxSwitches += Number(sample.process_context_switches?.involuntary || 0);
+    curr.ioReadCountDelta += Number(sample.process_io_delta?.read_count || 0);
+    curr.ioWriteCountDelta += Number(sample.process_io_delta?.write_count || 0);
+    curr.matmulMs += Number(sample.matmul_ms || 0);
+    curr.attentionMs += Number(sample.attention_ms || 0);
+    curr.ggmlThreads = Math.max(curr.ggmlThreads, Number(sample.ggml_threads || 0));
     result.set(stageKey, curr);
   }
 
@@ -2261,7 +2431,10 @@ function aggregateNodeMetrics(stageSamples, podNodeMap = null) {
       maxThreads: 0,
       ctxSwitches: 0,
       ioReadCountDelta: 0,
-      ioWriteCountDelta: 0
+      ioWriteCountDelta: 0,
+      matmulMs: 0,
+      attentionMs: 0,
+      ggmlThreads: 0
     };
 
     curr.podHostnames.add(podHostname);
@@ -2314,6 +2487,9 @@ function aggregateNodeMetrics(stageSamples, podNodeMap = null) {
     curr.ctxSwitches += Number(sample.process_context_switches?.involuntary || 0);
     curr.ioReadCountDelta += Number(sample.process_io_delta?.read_count || 0);
     curr.ioWriteCountDelta += Number(sample.process_io_delta?.write_count || 0);
+    curr.matmulMs += Number(sample.matmul_ms || 0);
+    curr.attentionMs += Number(sample.attention_ms || 0);
+    curr.ggmlThreads = Math.max(curr.ggmlThreads, Number(sample.ggml_threads || 0));
 
     result.set(key, curr);
   }
@@ -2421,6 +2597,9 @@ function buildInvokeRunSummary({
   const trueCommComputeRatio = Number(
     aggregate.true_comm_compute_ratio ?? trueCommSumMs / Math.max(1e-9, computeSumMs)
   );
+  const matmulSumMs = stageRows.reduce((sum, row) => sum + Number(row.matmulMs || 0), 0);
+  const attentionSumMs = stageRows.reduce((sum, row) => sum + Number(row.attentionMs || 0), 0);
+  const ggmlThreads = stageRows.reduce((max, row) => Math.max(max, Number(row.ggmlThreads || 0)), 0);
   return {
     timestamp: new Date().toISOString(),
     totalLatencyMs: Number(totalLatencyMs || 0),
@@ -2429,6 +2608,9 @@ function buildInvokeRunSummary({
     computeSumMs,
     transferSumMs,
     trueCommSumMs,
+    matmulSumMs,
+    attentionSumMs,
+    ggmlThreads,
     transferComputeRatio: trueCommComputeRatio,
     rpcComputeRatio,
     trueCommComputeRatio,
@@ -2453,6 +2635,9 @@ function buildInvokeRunSummary({
       maxNewTokens: Number(requestConfig?.maxNewTokens || 0),
       minNewTokens: Number(requestConfig?.minNewTokens || 0),
       temperature: Number(requestConfig?.temperature || 0),
+      topK: Number(requestConfig?.topK || 0),
+      topP: requestConfig?.topP != null ? Number(requestConfig.topP) : 1,
+      seed: requestConfig?.seed != null ? Number(requestConfig.seed) : null,
       timeoutMs: Number(requestConfig?.timeoutMs || 0),
       method: String(requestConfig?.method || "POST"),
       path: String(requestConfig?.path || "/generate"),
@@ -2663,6 +2848,9 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
     (max, row) => Math.max(max, Number(row.maxModelFileSizeMb || 0)),
     0
   );
+  const matmulMsSum = stageRows.reduce((sum, row) => sum + Number(row.matmulMs || 0), 0);
+  const attentionMsSum = stageRows.reduce((sum, row) => sum + Number(row.attentionMs || 0), 0);
+  const ggmlThreads = stageRows.reduce((max, row) => Math.max(max, Number(row.ggmlThreads || 0)), 0);
 
   const cards = [
     { k: "Prompt Tokens", v: String(promptTokenCount) },
@@ -2695,6 +2883,9 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
     { k: "Max System CPU (%)", v: formatNumber(maxSystemCpu, 1) },
     { k: "Max Link Mbps", v: formatNumber(maxBandwidth, 2) },
     { k: "Max Threads", v: String(Math.round(maxThreads)) },
+    { k: "GGML Threads", v: String(Math.round(ggmlThreads)) },
+    { k: "Matmul Sum (ms)", v: formatNumber(matmulMsSum, 1) },
+    { k: "Attention Sum (ms)", v: formatNumber(attentionMsSum, 1) },
     { k: "Nodes Seen", v: String(nodeRows.length) },
     { k: "Token Latency p50 (ms)", v: formatNumber(tokenLatencyP50, 1) },
     { k: "Token Latency p95 (ms)", v: formatNumber(tokenLatencyP95, 1) },
@@ -2713,6 +2904,8 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
         <td>${safeText(row.stageId)}</td>
         <td>${row.samples}</td>
         <td>${formatNumber(row.computeMs, 1)}</td>
+        <td>${formatNumber(row.matmulMs, 1)}</td>
+        <td>${formatNumber(row.attentionMs, 1)}</td>
         <td>${formatNumber(row.transferMs, 1)}</td>
         <td>${formatNumber(row.maxMemMb, 1)}</td>
         <td>${formatNumber(row.maxCgroupMemMb, 1)}</td>
@@ -2725,6 +2918,7 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
         <td>${formatNumber(row.networkBytes / (1024 * 1024), 3)}</td>
         <td>${formatNumber(row.payloadBytes / (1024 * 1024), 3)}</td>
         <td>${formatNumber(row.maxBandwidthMbps, 2)}</td>
+        <td>${Math.round(row.ggmlThreads || 0)}</td>
       </tr>
     `
     )
@@ -2914,6 +3108,7 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
   postHistoryEntries([
     {
       type: "endpoint",
+      label: els.endpointLabel ? String(els.endpointLabel.value || "").trim() : "",
       createdAt: runSummary.timestamp,
       namespace: getNamespace(),
       target: runSummary.config?.target || requestConfig.target || "gateway",
@@ -2925,6 +3120,9 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
         maxNewTokens: runSummary.config?.maxNewTokens || 0,
         minNewTokens: runSummary.config?.minNewTokens || 0,
         temperature: runSummary.config?.temperature || 0,
+        topK: runSummary.config?.topK || 0,
+        topP: runSummary.config?.topP != null ? runSummary.config.topP : 1,
+        seed: runSummary.config?.seed != null ? runSummary.config.seed : null,
         timeoutMs: runSummary.config?.timeoutMs || 0,
         topologyHash: buildTopologyHash()
       },
@@ -2941,6 +3139,9 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
         computeMs: runSummary.computeSumMs,
         transferMs: runSummary.transferSumMs,
         trueCommMs: runSummary.trueCommSumMs,
+        matmulMs: runSummary.matmulSumMs,
+        attentionMs: runSummary.attentionSumMs,
+        ggmlThreads: runSummary.ggmlThreads,
         transferComputeRatio: runSummary.transferComputeRatio,
         rpcComputeRatio: runSummary.rpcComputeRatio,
         trueCommComputeRatio: runSummary.trueCommComputeRatio,
@@ -3043,6 +3244,8 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
             <th>ID</th>
             <th>Samples</th>
             <th>Compute (ms)</th>
+            <th>Matmul (ms)</th>
+            <th>Attention (ms)</th>
             <th>RPC Wall (ms)</th>
             <th>Max RSS Mem (MB)</th>
             <th>Cgroup Mem (MB)</th>
@@ -3055,9 +3258,10 @@ function renderInvokeMetrics(responseJson, callMeta, requestConfig = {}) {
             <th>Net Delta (MiB)</th>
             <th>Transport Payload (MiB)</th>
             <th>Max Mbps</th>
+            <th>GGML Threads</th>
           </tr>
         </thead>
-        <tbody>${stageTableRows || "<tr><td colspan='17'>No stage metrics found.</td></tr>"}</tbody>
+        <tbody>${stageTableRows || "<tr><td colspan='20'>No stage metrics found.</td></tr>"}</tbody>
       </table>
     </div>
 
@@ -3414,6 +3618,9 @@ function summarizeTurnMetrics(response, requestConfig = {}) {
       maxNewTokens: Number(requestConfig.maxNewTokens || 0),
       minNewTokens: Number(requestConfig.minNewTokens || 0),
       temperature: Number(requestConfig.temperature || 0),
+      topK: Number(requestConfig.topK || 0),
+      topP: requestConfig.topP != null ? Number(requestConfig.topP) : 1,
+      seed: requestConfig.seed != null ? Number(requestConfig.seed) : null,
       timeoutMs: Number(requestConfig.timeoutMs || 0),
       method: String(requestConfig.method || "POST"),
       path: String(requestConfig.path || "/chat"),
@@ -3956,6 +4163,13 @@ async function sendChatTurn() {
     maxNewTokens,
     minNewTokens,
     temperature,
+    topK: els.endpointTopK ? floorNumber(els.endpointTopK.value, 0, 0) : 0,
+    topP: els.endpointTopP ? clampNumber(els.endpointTopP.value, 0, 1, 1) : 1,
+    seed:
+      els.endpointSeed && String(els.endpointSeed.value).trim() !== "" &&
+      Number.isFinite(Number(els.endpointSeed.value))
+        ? Math.round(Number(els.endpointSeed.value))
+        : null,
     timeoutMs,
     method: "POST",
     path: chatPath,
@@ -3964,6 +4178,30 @@ async function sendChatTurn() {
   };
   setChatBusy(true);
   els.chatMeta.innerHTML = "";
+
+  // The native gateway reads activation_precision from the top level of the
+  // body (not feature_flags). Drive it from the always-visible precision select
+  // so it works for the native variant (where the feature-flags panel is hidden).
+  const chatActivationPrecision = els.endpointPrecision
+    ? String(els.endpointPrecision.value || "fp32")
+    : "fp32";
+  const activationPrecisionField =
+    chatActivationPrecision === "fp16"
+      ? { activation_precision: "fp16" }
+      : {};
+
+  // Sampling controls (shared with the endpoint tester). top_k 0 = off,
+  // top_p >= 1 = off; only send them when active.
+  const chatTopK = els.endpointTopK ? floorNumber(els.endpointTopK.value, 0, 0) : 0;
+  const chatTopP = els.endpointTopP ? clampNumber(els.endpointTopP.value, 0, 1, 1) : 1;
+  const chatSeedRaw = els.endpointSeed ? String(els.endpointSeed.value).trim() : "";
+  const samplingFields = {
+    ...(chatTopK > 0 ? { top_k: Math.round(chatTopK) } : {}),
+    ...(chatTopP > 0 && chatTopP < 1 ? { top_p: chatTopP } : {}),
+    ...(chatSeedRaw !== "" && Number.isFinite(Number(chatSeedRaw))
+      ? { seed: Math.round(Number(chatSeedRaw)) }
+      : {})
+  };
 
   try {
     const invokePayload = {
@@ -3979,13 +4217,17 @@ async function sendChatTurn() {
             max_new_tokens: maxNewTokens,
             min_new_tokens: minNewTokens,
             temperature,
+            ...samplingFields,
+            ...activationPrecisionField,
             ...(supportsFeatureFlags() ? { feature_flags: featureFlags } : {})
           }
         : {
             prompt: userText,
             max_new_tokens: maxNewTokens,
             min_new_tokens: minNewTokens,
-            temperature
+            temperature,
+            ...samplingFields,
+            ...activationPrecisionField
           }
     };
 
@@ -4039,6 +4281,9 @@ async function sendChatTurn() {
           maxNewTokens: turnSummary.config?.maxNewTokens || 0,
           minNewTokens: turnSummary.config?.minNewTokens || 0,
           temperature: turnSummary.config?.temperature || 0,
+          topK: turnSummary.config?.topK || 0,
+          topP: turnSummary.config?.topP != null ? turnSummary.config.topP : 1,
+          seed: turnSummary.config?.seed != null ? turnSummary.config.seed : null,
           timeoutMs: turnSummary.config?.timeoutMs || 0,
           topologyHash: buildTopologyHash()
         },
@@ -4231,6 +4476,18 @@ els.endpointPrompt.addEventListener("input", syncBodyFromGenerationFields);
 els.endpointMaxTokens.addEventListener("input", syncBodyFromGenerationFields);
 els.endpointMinTokens.addEventListener("input", syncBodyFromGenerationFields);
 els.endpointTemperature.addEventListener("input", syncBodyFromGenerationFields);
+if (els.endpointTopK) {
+  els.endpointTopK.addEventListener("input", syncBodyFromGenerationFields);
+}
+if (els.endpointTopP) {
+  els.endpointTopP.addEventListener("input", syncBodyFromGenerationFields);
+}
+if (els.endpointSeed) {
+  els.endpointSeed.addEventListener("input", syncBodyFromGenerationFields);
+}
+if (els.endpointPrecision) {
+  els.endpointPrecision.addEventListener("change", syncBodyFromGenerationFields);
+}
 [
   els.featureTransportJson,
   els.featureTransportBinary,
@@ -4308,3 +4565,797 @@ renderChatMetricsTimeline();
 updateChatContextInfo();
 syncGenerationControlsEnabledState();
 updateAutoRefresh();
+
+/* =========================================================================
+ * Automated Test Suites — replay §11 cases against /generate, save to History.
+ * Reuses renderInvokeMetrics() (same save-to-history path as the manual tester).
+ * ========================================================================= */
+(function initAutoSuites() {
+  const AUTO_PROMPT =
+    "Explain how to overcome the challenges introduced by artificial intelligence in university education.";
+
+  const G = {
+    temp: 0, topK: 0, topP: 1, seed: "", precision: "fp32", routing: "hub",
+    enabled: true, nOverride: "", threads: "", attn: ""
+  };
+  const row = (o) => ({ maxNew: o.tokens, minNew: o.tokens, ...G, ...o });
+
+  // §11.11 decoding presets, reused across the length sweep.
+  const P11 = {
+    greedy: { temp: 0, topK: 0, topP: 1, seed: "" },
+    conservative: { temp: 0.4, topK: 20, topP: 0.85, seed: 42 },
+    balanced: { temp: 0.7, topK: 40, topP: 0.9, seed: 42 },
+    diverse: { temp: 1.0, topK: 80, topP: 0.95, seed: 42 }
+  };
+  const LENS = [256, 512, 1024, 2048, 4096];
+
+  // Built-in suites — one entry per §11.10 matrix row. HTTP-drivable knobs are applied
+  // from the /generate body; threads/attn rows only take effect with the kubectl sweep on.
+  const SUITES = {
+    token_scaling: () => [128, 512, 1024, 2048, 4096].map((t) => row({ label: `11.1-token-${t}`, tokens: t })),
+    attention_11_2a: () => ["1", "0"].map((a) => row({ label: `11.2a-attn-${a}`, tokens: 1024, attn: a })),
+    threads_11_2b: () => ["1", "2", "3", "4"].map((t) => row({ label: `11.2b-threads-${t}`, tokens: 1024, threads: t })),
+    concurrency_11_4: () => [1, 2, 4, 8].map((n) => row({ label: `11.4-conc-N${n}`, tokens: 256, nOverride: String(n) })),
+    precision_11_6: () => [
+      row({ label: "11.6-fp32", tokens: 512, seed: 42, precision: "fp32" }),
+      row({ label: "11.6-fp16", tokens: 512, seed: 42, precision: "fp16" })
+    ],
+    fp16_sampling_11_6c: () => [
+      row({ label: "11.6c-fp16-balanced", tokens: 512, minNew: 8, seed: 42, temp: 0.7, topK: 40, topP: 0.9, precision: "fp16" })
+    ],
+    temperature_11_7a: () => [0, 0.2, 0.5, 0.7, 1.0, 1.2].map((t) =>
+      row({ label: `11.7a-temp-${t}`, tokens: 256, minNew: 8, seed: 42, temp: t, topK: 40, topP: 0.9 })),
+    topk_11_7b: () => [0, 20, 40, 80].map((k) =>
+      row({ label: `11.7b-topk-${k}`, tokens: 256, minNew: 8, seed: 42, temp: 0.7, topK: k, topP: 0.9 })),
+    topp_11_7c: () => [0.8, 0.9, 0.95, 1.0].map((p) =>
+      row({ label: `11.7c-topp-${p}`, tokens: 256, minNew: 8, seed: 42, temp: 0.7, topK: 40, topP: p })),
+    longctx_11_7d: () => [row({ label: "11.7d-longctx-2048", tokens: 2048, seed: 42, temp: 0.7, topK: 40, topP: 0.9 })],
+    correctness_11_8: () => [
+      row({ label: "11.8-determinism-a", tokens: 256, minNew: 8, seed: 42, temp: 0.8, topK: 40, topP: 0.9 }),
+      row({ label: "11.8-determinism-b", tokens: 256, minNew: 8, seed: 42, temp: 0.8, topK: 40, topP: 0.9 }),
+      row({ label: "11.8-diversity-a", tokens: 256, minNew: 8, seed: "", temp: 0.8, topK: 40, topP: 0.9 }),
+      row({ label: "11.8-diversity-b", tokens: 256, minNew: 8, seed: "", temp: 0.8, topK: 40, topP: 0.9 }),
+      row({ label: "11.8-topk1-greedy", tokens: 256, minNew: 8, seed: 42, temp: 1.0, topK: 1, topP: 1 })
+    ],
+    endurance_11_9: () => [row({ label: "11.9-endurance-2048", tokens: 2048 })],
+    length_x_sampling_11_11: () => {
+      const out = [];
+      for (const [name, p] of Object.entries(P11)) {
+        for (const t of LENS) out.push(row({ label: `11.11-${name}-${t}`, tokens: t, ...p }));
+      }
+      return out;
+    },
+    routing_11_13: () => [
+      row({ label: "11.13-routing-hub", tokens: 1024, routing: "hub" }),
+      row({ label: "11.13-routing-chain", tokens: 1024, routing: "chain" })
+    ],
+    smoke_all: () => [
+      ...SUITES.token_scaling(),
+      ...SUITES.precision_11_6(),
+      ...SUITES.temperature_11_7a(),
+      ...SUITES.routing_11_13()
+    ]
+  };
+
+  // Dropdown label per suite (order preserved).
+  const SUITE_LABELS = {
+    token_scaling: "11.1 token scaling",
+    attention_11_2a: "11.2a attention (needs kubectl sweep)",
+    threads_11_2b: "11.2b threads (needs kubectl sweep)",
+    concurrency_11_4: "11.4 concurrency (use concurrency mode)",
+    precision_11_6: "11.6 precision fp32/fp16",
+    fp16_sampling_11_6c: "11.6c fp16 + sampling",
+    temperature_11_7a: "11.7a temperature",
+    topk_11_7b: "11.7b top_k",
+    topp_11_7c: "11.7c top_p",
+    longctx_11_7d: "11.7d long-context quality",
+    correctness_11_8: "11.8 determinism / diversity",
+    endurance_11_9: "11.9 endurance",
+    length_x_sampling_11_11: "11.11 length × sampling (20 cases)",
+    routing_11_13: "11.13 routing hub vs chain",
+    smoke_all: "smoke (11.1 + 11.6 + 11.7a + 11.13)"
+  };
+
+  // Suites whose effect requires the opt-in kubectl env sweep.
+  const NEEDS_CLUSTER = new Set(["attention_11_2a", "threads_11_2b"]);
+
+  const $ = (id) => document.getElementById(id);
+  const body = $("autoTestBody");
+  if (!body) return;
+  const attr = (s) =>
+    String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const mean = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
+
+  let stopFlag = false;
+
+  function opt(v, cur, txt) {
+    return `<option value="${attr(v)}"${String(cur) === String(v) ? " selected" : ""}>${attr(txt || v)}</option>`;
+  }
+
+  function rowHtml(r) {
+    return `<tr>
+      <td><input type="checkbox" class="a-on"${r.enabled ? " checked" : ""}></td>
+      <td><input type="text" class="a-label auto-label" value="${attr(r.label)}"></td>
+      <td><select class="a-routing">${opt("hub", r.routing)}${opt("chain", r.routing)}</select></td>
+      <td><input type="number" class="a-nover" min="1" step="1" placeholder="N" value="${attr(r.nOverride)}"></td>
+      <td><input type="number" class="a-maxnew" min="1" step="1" value="${attr(r.maxNew)}"></td>
+      <td><input type="number" class="a-minnew" min="1" step="1" value="${attr(r.minNew)}"></td>
+      <td><input type="number" class="a-temp" min="0" max="2" step="0.1" value="${attr(r.temp)}"></td>
+      <td><input type="number" class="a-topk" min="0" step="1" value="${attr(r.topK)}"></td>
+      <td><input type="number" class="a-topp" min="0" max="1" step="0.05" value="${attr(r.topP)}"></td>
+      <td><input type="text" class="a-seed" placeholder="—" value="${attr(r.seed)}"></td>
+      <td><select class="a-prec">${opt("fp32", r.precision)}${opt("fp16", r.precision)}</select></td>
+      <td><input type="number" class="a-threads" min="1" max="4" step="1" placeholder="—" value="${attr(r.threads)}"></td>
+      <td><input type="text" class="a-attn" placeholder="—" value="${attr(r.attn)}"></td>
+      <td class="auto-remove auto-rowops">
+        <button type="button" class="a-up" title="Move up">▲</button>
+        <button type="button" class="a-down" title="Move down">▼</button>
+        <button type="button" class="a-remove danger-button" title="Remove row">✕</button>
+      </td>
+    </tr>`;
+  }
+
+  function renderRows(rows) {
+    body.innerHTML = rows.map(rowHtml).join("");
+  }
+
+  /* ---- suite catalog: built-ins + user-defined custom suites (localStorage) ---- */
+  const CUSTOM_KEY = "opsui.autoCustomSuites.v1";
+  function loadCustom() {
+    try {
+      const o = JSON.parse(localStorage.getItem(CUSTOM_KEY) || "{}");
+      return o && typeof o === "object" && !Array.isArray(o) ? o : {};
+    } catch {
+      return {};
+    }
+  }
+  function saveCustom(o) {
+    try {
+      localStorage.setItem(CUSTOM_KEY, JSON.stringify(o));
+    } catch {
+      /* ignore quota */
+    }
+  }
+
+  function refreshSuiteOptions(selected) {
+    const sel = $("autoSuite");
+    if (!sel) return;
+    const current = selected || sel.value;
+    const builtin = Object.keys(SUITE_LABELS)
+      .map((k) => `<option value="${attr(k)}">${attr(SUITE_LABELS[k])}</option>`)
+      .join("");
+    const custom = loadCustom();
+    const customKeys = Object.keys(custom).sort();
+    const customOpts = customKeys.length
+      ? `<optgroup label="Custom suites">${customKeys
+          .map((k) => `<option value="custom:${attr(k)}">${attr(k)} (${(custom[k] || []).length})</option>`)
+          .join("")}</optgroup>`
+      : "";
+    sel.innerHTML = `<optgroup label="Built-in (§11)">${builtin}</optgroup>${customOpts}`;
+    if (current) sel.value = current;
+    if (!sel.value) sel.value = "token_scaling";
+  }
+
+  function suiteRows(value) {
+    if (value && value.startsWith("custom:")) {
+      const rows = loadCustom()[value.slice(7)] || [];
+      return rows.map((r) => ({ ...G, ...r })); // re-hydrate against current defaults
+    }
+    return (SUITES[value] || SUITES.token_scaling)();
+  }
+
+  function loadDefaults() {
+    const value = ($("autoSuite") && $("autoSuite").value) || "token_scaling";
+    renderRows(suiteRows(value));
+    // NB: do NOT clear the log here — loading/building a suite should not wipe the
+    // previous run's console. The log is only reset when a fresh queue starts running.
+    logLine(`Loaded ${body.children.length} case(s) for "${value}".`);
+    if (NEEDS_CLUSTER.has(value) && (!$("autoClusterSweep") || !$("autoClusterSweep").checked)) {
+      logLine(`Note: this suite sweeps threads/attn — tick "Sweep threads/attn via kubectl" or those columns are ignored.`);
+    }
+  }
+
+  function saveAsSuite() {
+    const rows = readRows().map(({ el, ...rest }) => rest); // drop DOM ref
+    if (!rows.length) {
+      logLine("Nothing to save — the table is empty.");
+      return;
+    }
+    const name = (window.prompt("Save current table as a new suite.\nName:", "") || "").trim();
+    if (!name) return;
+    if (SUITE_LABELS[name]) {
+      logLine(`"${name}" collides with a built-in key — pick another name.`);
+      return;
+    }
+    const custom = loadCustom();
+    const existed = Object.prototype.hasOwnProperty.call(custom, name);
+    custom[name] = rows;
+    saveCustom(custom);
+    refreshSuiteOptions(`custom:${name}`);
+    logLine(`${existed ? "Updated" : "Saved"} custom suite "${name}" with ${rows.length} row(s).`);
+  }
+
+  function deleteSuite() {
+    const value = ($("autoSuite") && $("autoSuite").value) || "";
+    if (!value.startsWith("custom:")) {
+      logLine("Select a custom suite to delete (built-in §11 suites can't be removed).");
+      return;
+    }
+    const name = value.slice(7);
+    const custom = loadCustom();
+    delete custom[name];
+    saveCustom(custom);
+    refreshSuiteOptions("token_scaling");
+    loadDefaults();
+    logLine(`Deleted custom suite "${name}".`);
+  }
+
+  function readRows() {
+    return Array.from(body.querySelectorAll("tr")).map((tr) => ({
+      el: tr,
+      enabled: tr.querySelector(".a-on").checked,
+      label: tr.querySelector(".a-label").value.trim() || "auto",
+      routing: tr.querySelector(".a-routing").value,
+      nOverride: tr.querySelector(".a-nover").value.trim(),
+      maxNew: Math.max(1, Number(tr.querySelector(".a-maxnew").value) || 1),
+      minNew: Math.max(1, Number(tr.querySelector(".a-minnew").value) || 1),
+      temp: Number(tr.querySelector(".a-temp").value) || 0,
+      topK: Number(tr.querySelector(".a-topk").value) || 0,
+      topP: tr.querySelector(".a-topp").value === "" ? 1 : Number(tr.querySelector(".a-topp").value),
+      seed: tr.querySelector(".a-seed").value.trim(),
+      precision: tr.querySelector(".a-prec").value,
+      threads: tr.querySelector(".a-threads").value.trim(),
+      attn: tr.querySelector(".a-attn").value.trim()
+    }));
+  }
+
+  function buildBody(r) {
+    const b = {
+      prompt: AUTO_PROMPT,
+      max_new_tokens: r.maxNew,
+      min_new_tokens: r.minNew,
+      temperature: r.temp,
+      top_k: r.topK,
+      top_p: r.topP
+    };
+    if (r.seed !== "" && r.seed != null && !Number.isNaN(Number(r.seed))) b.seed = Number(r.seed);
+    if (r.precision === "fp16") b.activation_precision = "fp16";
+    if (r.routing === "chain") b.native_stage_chaining_enabled = true;
+    return b;
+  }
+
+  async function invokeOnce(r, label, timeoutMs, ctx = {}) {
+    const at = new Date().toISOString();
+    const meta = {
+      suite: ctx.suite || "",
+      mode: ctx.mode || "",
+      sweep: ctx.sweep ? "yes" : "no",
+      nUsed: ctx.n || 1,
+      threads: ctx.threads || "",
+      attn: ctx.attn || "",
+      pass: ctx.pass || 1,
+      caseKey: ctx.caseKey || label,
+      caseLabel: ctx.caseLabel || label
+    };
+    const b = buildBody(r);
+    const requestPayload = {
+      namespace: getNamespace(),
+      variant: getRuntimeVariant(),
+      target: "gateway",
+      method: "POST",
+      path: "/generate",
+      timeoutMs,
+      body: b
+    };
+    try {
+      const res = await fetch("/api/invoke", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestPayload)
+      });
+      const text = await res.text();
+      let payload = null;
+      try {
+        payload = text ? JSON.parse(text) : null;
+      } catch {
+        payload = null;
+      }
+      if (!res.ok || !payload || !payload.responseJson) {
+        throw new Error(payload?.error || `${res.status} ${res.statusText}`);
+      }
+      const responseJson = normalizeResponseMetrics(payload.responseJson, payload.call || {});
+      // renderInvokeMetrics reads the label from els.endpointLabel at save time; set it
+      // synchronously right before the (synchronous) render+save so parallel runs don't race.
+      if (els.endpointLabel) els.endpointLabel.value = label;
+      renderInvokeMetrics(responseJson, payload.call || {}, {
+        ...parseGenerateConfigFromBody(b),
+        timeoutMs,
+        method: "POST",
+        path: "/generate",
+        target: "gateway",
+        variant: getRuntimeVariant()
+      });
+      const agg = responseJson.aggregate_metrics || {};
+      const out = {
+        label,
+        ...meta,
+        status: "ok",
+        latencyMs: Number(payload.call?.elapsedMs || responseJson.total_latency_ms || 0),
+        tokPerSec: Number(responseJson.tokens_per_second || 0),
+        computeMs: Number(agg.compute_ms || 0),
+        rpcMs: Number(agg.rpc_wall_ms || 0),
+        commMs: Number(agg.true_comm_ms || 0),
+        payloadMib: Number(agg.transport_payload_mebibytes || 0),
+        genTok: Number(responseJson.generated_token_count || 0),
+        at
+      };
+      recordResult(out); // intermediate result — persisted + rendered immediately
+      return out;
+    } catch (e) {
+      recordResult({
+        label,
+        ...meta,
+        status: `fail: ${e.message}`,
+        latencyMs: 0, tokPerSec: 0, computeMs: 0, rpcMs: 0, commMs: 0, payloadMib: 0, genTok: 0,
+        at
+      });
+      throw e;
+    }
+  }
+
+  /* ---- live intermediate-results tracker (crash-safe via localStorage) ---- */
+  const RESULTS_KEY = "opsui.autoResults.v1";
+  let results = [];
+  function loadResults() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(RESULTS_KEY) || "[]");
+      results = Array.isArray(raw) ? raw : [];
+    } catch {
+      results = [];
+    }
+  }
+  function saveResults() {
+    try {
+      localStorage.setItem(RESULTS_KEY, JSON.stringify(results.slice(-500)));
+    } catch {
+      /* quota / private mode — keep in-memory only */
+    }
+  }
+  function recordResult(entry) {
+    results.push(entry);
+    if (results.length > 500) results = results.slice(-500);
+    saveResults(); // persist BEFORE the next test starts, so nothing is lost mid-suite
+    renderResults();
+    renderAggregates(); // keep per-case aggregates live as runs land
+  }
+  const fmt = (n, d) => (Number.isFinite(n) ? n.toFixed(d) : "–");
+  function renderResults() {
+    const tb = $("autoResultsBody");
+    if (!tb) return;
+    tb.innerHTML = results
+      .map((e, i) => {
+        const ok = e.status === "ok";
+        const sweepTag = e.sweep === "yes" ? `sweep t${e.threads || "?"}/a${e.attn || "?"}` : "";
+        return `<tr class="${ok ? "auto-row-done" : "auto-row-fail"}">
+          <td>${i + 1}</td>
+          <td>${attr(e.label)}</td>
+          <td>${attr(e.suite || "")}</td>
+          <td>${attr(e.mode || "")}${e.sweep === "yes" ? ` <span class="auto-sweep-tag" title="${attr(sweepTag)}">⚙</span>` : ""}</td>
+          <td>${attr(ok ? "ok" : e.status)}</td>
+          <td>${fmt((e.latencyMs || 0) / 1000, 1)}</td>
+          <td>${fmt(e.tokPerSec, 2)}</td>
+          <td>${fmt((e.computeMs || 0) / 1000, 1)}</td>
+          <td>${fmt((e.rpcMs || 0) / 1000, 1)}</td>
+          <td>${fmt((e.commMs || 0) / 1000, 1)}</td>
+          <td>${fmt(e.payloadMib, 1)}</td>
+          <td>${e.genTok || 0}</td>
+          <td>${e.at ? new Date(e.at).toLocaleTimeString() : ""}</td>
+        </tr>`;
+      })
+      .join("");
+    const c = $("autoResultsCount");
+    if (c) c.textContent = results.length ? `${results.length} result(s)` : "";
+  }
+  function clearResults() {
+    results = [];
+    saveResults();
+    renderResults();
+    renderAggregates();
+  }
+
+  /* ---- per-case aggregation (median / min / max / mean over successful runs) ---- */
+  const median = (arr) => {
+    if (!arr.length) return NaN;
+    const s = [...arr].sort((a, b) => a - b);
+    const m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  };
+  function computeAggregates() {
+    const groups = new Map();
+    for (const e of results) {
+      if (e.status !== "ok") continue; // aggregate only successful runs
+      const key = e.caseKey || e.label;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(e);
+    }
+    const out = [];
+    for (const [key, arr] of groups) {
+      const f = arr[0];
+      const lat = arr.map((x) => Number(x.latencyMs) || 0);
+      const tps = arr.map((x) => Number(x.tokPerSec) || 0);
+      out.push({
+        caseKey: key,
+        caseLabel: f.caseLabel || f.label,
+        suite: f.suite || "",
+        mode: f.mode || "",
+        sweep: f.sweep || "no",
+        threads: f.threads || "",
+        attn: f.attn || "",
+        n: arr.length,
+        latencyMedianMs: median(lat),
+        latencyMinMs: Math.min(...lat),
+        latencyMaxMs: Math.max(...lat),
+        latencyMeanMs: mean(lat),
+        tokPerSecMedian: median(tps),
+        tokPerSecMean: mean(tps),
+        computeMeanMs: mean(arr.map((x) => Number(x.computeMs) || 0)),
+        rpcMeanMs: mean(arr.map((x) => Number(x.rpcMs) || 0)),
+        commMeanMs: mean(arr.map((x) => Number(x.commMs) || 0)),
+        payloadMibMean: mean(arr.map((x) => Number(x.payloadMib) || 0))
+      });
+    }
+    // stable-ish ordering: by suite then case label
+    out.sort((a, b) => (a.suite + a.caseLabel).localeCompare(b.suite + b.caseLabel));
+    return out;
+  }
+  function renderAggregates() {
+    const tb = $("autoAggBody");
+    if (!tb) return;
+    const aggs = computeAggregates();
+    tb.innerHTML = aggs
+      .map(
+        (a) => `<tr>
+          <td>${attr(a.caseLabel)}</td>
+          <td>${attr(a.suite)}</td>
+          <td>${attr(a.mode)}${a.sweep === "yes" ? ` <span class="auto-sweep-tag" title="sweep t${attr(a.threads)}/a${attr(a.attn)}">⚙</span>` : ""}</td>
+          <td>${a.sweep}</td>
+          <td>${a.n}</td>
+          <td>${fmt(a.latencyMedianMs / 1000, 1)}</td>
+          <td>${fmt(a.latencyMinMs / 1000, 1)}</td>
+          <td>${fmt(a.latencyMaxMs / 1000, 1)}</td>
+          <td>${fmt(a.latencyMeanMs / 1000, 1)}</td>
+          <td>${fmt(a.tokPerSecMedian, 2)}</td>
+          <td>${fmt(a.computeMeanMs / 1000, 1)}</td>
+          <td>${fmt(a.rpcMeanMs / 1000, 1)}</td>
+          <td>${fmt(a.commMeanMs / 1000, 1)}</td>
+        </tr>`
+      )
+      .join("");
+    const c = $("autoAggCount");
+    if (c) c.textContent = aggs.length ? `${aggs.length} case(s)` : "";
+  }
+
+  /* ---- CSV export: individual runs, aggregates, or both in one file ---- */
+  const csvEsc = (s) => `"${String(s == null ? "" : s).replace(/"/g, '""')}"`;
+  function download(name, text) {
+    const blob = new Blob([text], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+  function runsCsvText() {
+    const head = [
+      "idx", "label", "case", "suite", "mode", "sweep", "pass", "n_used", "threads", "attn",
+      "status", "latency_ms", "tok_per_sec", "compute_ms", "rpc_wall_ms", "true_comm_ms",
+      "payload_mib", "generated_tokens", "timestamp"
+    ];
+    return [head.join(",")]
+      .concat(
+        results.map((e, i) =>
+          [i + 1, csvEsc(e.label), csvEsc(e.caseLabel || ""), csvEsc(e.suite || ""), csvEsc(e.mode || ""),
+           csvEsc(e.sweep || "no"), e.pass || 1, e.nUsed || 1, csvEsc(e.threads || ""), csvEsc(e.attn || ""),
+           csvEsc(e.status), e.latencyMs || 0, e.tokPerSec || 0, e.computeMs || 0, e.rpcMs || 0, e.commMs || 0,
+           e.payloadMib || 0, e.genTok || 0, csvEsc(e.at || "")].join(",")
+        )
+      )
+      .join("\n");
+  }
+  function aggCsvText() {
+    const head = [
+      "case", "suite", "mode", "sweep", "threads", "attn", "n",
+      "latency_median_ms", "latency_min_ms", "latency_max_ms", "latency_mean_ms",
+      "tok_per_sec_median", "tok_per_sec_mean", "compute_mean_ms", "rpc_wall_mean_ms",
+      "true_comm_mean_ms", "payload_mib_mean"
+    ];
+    return [head.join(",")]
+      .concat(
+        computeAggregates().map((a) =>
+          [csvEsc(a.caseLabel), csvEsc(a.suite), csvEsc(a.mode), csvEsc(a.sweep), csvEsc(a.threads),
+           csvEsc(a.attn), a.n, a.latencyMedianMs.toFixed(1), a.latencyMinMs.toFixed(1),
+           a.latencyMaxMs.toFixed(1), a.latencyMeanMs.toFixed(1), a.tokPerSecMedian.toFixed(3),
+           a.tokPerSecMean.toFixed(3), a.computeMeanMs.toFixed(1), a.rpcMeanMs.toFixed(1),
+           a.commMeanMs.toFixed(1), a.payloadMibMean.toFixed(3)].join(",")
+        )
+      )
+      .join("\n");
+  }
+  function exportResultsCsv() {
+    if (!results.length) return;
+    download(`auto-runs-${Date.now()}.csv`, runsCsvText());
+  }
+  function exportAggregatesCsv() {
+    if (!results.length) return;
+    download(`auto-aggregates-${Date.now()}.csv`, aggCsvText());
+  }
+  function exportAllCsv() {
+    if (!results.length) return;
+    // one file: individual runs, a blank line, then the aggregates section
+    const text = `# INDIVIDUAL RUNS\n${runsCsvText()}\n\n# AGGREGATES (per case, over successful runs)\n${aggCsvText()}\n`;
+    download(`auto-runs+aggregates-${Date.now()}.csv`, text);
+  }
+
+  const LOG_MAX_LINES = 800;
+  function logLine(msg) {
+    const el = $("autoLog");
+    el.textContent += `${new Date().toLocaleTimeString()}  ${msg}\n`;
+    const lines = el.textContent.split("\n");
+    if (lines.length > LOG_MAX_LINES) el.textContent = lines.slice(-LOG_MAX_LINES).join("\n");
+    el.scrollTop = el.scrollHeight;
+  }
+  // Run/Load/Add stay enabled while a queue runs so you can build & enqueue more suites.
+  function setBusy(b) {
+    $("autoRunBtn").textContent = b ? "Queue / running…" : "Run suite";
+    $("autoStopBtn").disabled = !b;
+    $("autoProgress").innerHTML = b ? `<div class="log-pill">queue processing…</div>` : "";
+  }
+
+  // Opt-in: patch the configmap (DLI_GGML_THREADS / DLI_GGML_ATTENTION), rollout-restart
+  // the 4 stage deployments, and wait for readiness. Governor is host sysfs and stays
+  // manual (§11.2c). Only fires when the sweep checkbox is on AND a row sets a value that
+  // differs from what we last applied — so consecutive same-value rows don't re-patch.
+  let appliedThreads = null;
+  let appliedAttn = null;
+  async function applyClusterConfig(threads, attn) {
+    const payload = { namespace: getNamespace() };
+    if (threads !== "" && threads != null) payload.threads = String(threads);
+    if (attn !== "" && attn != null) payload.attention = String(attn);
+    if (payload.threads == null && payload.attention == null) return;
+    logLine(`  ↳ cluster: patch ${JSON.stringify({ threads: payload.threads, attn: payload.attention })} + rollout restart (waiting)…`);
+    const res = await fetch("/api/cluster-config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const text = await res.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+    if (!res.ok || !data || data.ok !== true) {
+      throw new Error(`cluster-config failed: ${data?.error || `${res.status} ${res.statusText}`}`);
+    }
+    if (payload.threads != null) appliedThreads = payload.threads;
+    if (payload.attention != null) appliedAttn = payload.attention;
+    logLine(`  ↳ cluster ready (verified ${JSON.stringify(data.verified || {})}).`);
+  }
+
+  /* ---- suite queue: enqueue snapshots and run them back-to-back ---- */
+  let queue = [];
+  let processing = false;
+  let abortQueue = false;
+  let currentJob = null;
+
+  function snapshotJob() {
+    const rows = readRows().filter((r) => r.enabled).map(({ el, ...rest }) => rest); // strip DOM ref
+    return {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      suite: ($("autoSuite") && $("autoSuite").value) || "",
+      mode: $("autoMode").value,
+      globalN: Math.max(1, Number($("autoN").value) || 1),
+      R: Math.max(1, Math.floor(Number($("autoRepeat").value) || 1)),
+      delay: Math.max(0, Number($("autoDelay").value) || 0),
+      timeoutMs: Math.max(0, Number($("autoTimeout").value) || 0),
+      clusterSweep: !!($("autoClusterSweep") && $("autoClusterSweep").checked),
+      rows
+    };
+  }
+
+  function renderQueue() {
+    const tb = $("autoQueueBody");
+    if (tb) {
+      const cur = currentJob
+        ? `<tr class="auto-row-active"><td>▶</td><td>${attr(currentJob.suite)}</td><td>${attr(currentJob.mode)}${currentJob.R > 1 ? ` ×${currentJob.R}` : ""}</td><td>${currentJob.rows.length}</td><td>${currentJob.clusterSweep ? "yes" : "no"}</td><td>running</td></tr>`
+        : "";
+      tb.innerHTML =
+        cur +
+        queue
+          .map(
+            (j, i) => `<tr>
+              <td>${i + 1}</td>
+              <td>${attr(j.suite)}</td>
+              <td>${attr(j.mode)}${j.R > 1 ? ` ×${j.R}` : ""}</td>
+              <td>${j.rows.length}</td>
+              <td>${j.clusterSweep ? "yes" : "no"}</td>
+              <td><button type="button" class="a-dequeue danger-button" data-id="${attr(j.id)}" title="Remove from queue">✕</button></td>
+            </tr>`
+          )
+          .join("");
+    }
+    const c = $("autoQueueCount");
+    if (c) c.textContent = queue.length ? `${queue.length} queued` : processing ? "running…" : "empty";
+  }
+
+  function enqueue() {
+    const job = snapshotJob();
+    if (!job.rows.length) {
+      logLine("Nothing to queue — no enabled rows.");
+      return;
+    }
+    queue.push(job);
+    renderQueue();
+    logLine(
+      `Queued "${job.suite}" [${job.mode}${job.R > 1 ? ` ×${job.R}` : ""}] — ${job.rows.length} case(s). ${processing ? `will run after current (${queue.length} in queue).` : "starting…"}`
+    );
+    if (!processing) processQueue();
+  }
+
+  async function processQueue() {
+    if (processing) return;
+    processing = true;
+    abortQueue = false;
+    stopFlag = false;
+    setBusy(true);
+    logLine("──────── queue run started ────────");
+    while (queue.length && !abortQueue) {
+      currentJob = queue.shift();
+      renderQueue();
+      stopFlag = false; // a fresh job starts un-stopped (Stop clears the whole queue instead)
+      await runJob(currentJob);
+      currentJob = null;
+      renderQueue();
+      const gap = Math.max(0, Number($("autoSuiteGap").value) || 0);
+      if (queue.length && !abortQueue && gap) {
+        logLine(`… ${gap}ms before next suite (${queue.length} left) …`);
+        await sleep(gap);
+      }
+    }
+    processing = false;
+    currentJob = null;
+    renderQueue();
+    setBusy(false);
+    logLine(abortQueue ? "Queue stopped." : "Queue drained — all suites done.");
+    if (typeof loadRuntime === "function") loadRuntime();
+  }
+
+  async function runJob(job) {
+    const { mode, suite, globalN, R, delay, timeoutMs, clusterSweep, rows } = job;
+    const total = rows.length * R;
+    logLine(
+      `▶ Suite "${suite}" [${mode}${R > 1 ? ` × ${R} passes = ${total}` : ""}]${mode === "simple" ? "" : `, N=${globalN}`}, gap ${delay}ms${clusterSweep ? ", cluster env sweep ON" : ""}.`
+    );
+    appliedThreads = null;
+    appliedAttn = null;
+    let i = 0;
+    for (let pass = 1; pass <= R && !stopFlag; pass++) {
+      if (R > 1) logLine(`— pass ${pass}/${R} —`);
+      for (const r of rows) {
+        if (stopFlag) {
+          logLine("Stopped by user.");
+          break;
+        }
+        i++;
+        const N = r.nOverride !== "" && Number(r.nOverride) > 0 ? Math.floor(Number(r.nOverride)) : globalN;
+        const passTag = R > 1 ? ` p${pass}/${R}` : "";
+        try {
+          if (clusterSweep && (r.threads !== "" || r.attn !== "")) {
+            const needThreads = r.threads !== "" && r.threads !== appliedThreads;
+            const needAttn = r.attn !== "" && r.attn !== appliedAttn;
+            if (needThreads || needAttn) {
+              await applyClusterConfig(needThreads ? r.threads : "", needAttn ? r.attn : "");
+            }
+          }
+          const sweepDesc = clusterSweep ? `t${appliedThreads || ""}a${appliedAttn || ""}` : "nosweep";
+          const ctx = {
+            mode,
+            suite,
+            sweep: clusterSweep,
+            n: mode === "simple" ? 1 : N,
+            threads: clusterSweep ? appliedThreads || "" : "",
+            attn: clusterSweep ? appliedAttn || "" : "",
+            pass,
+            caseKey: `${suite}::${r.label}::${mode}::${sweepDesc}`,
+            caseLabel: r.label
+          };
+          if (mode === "simple") {
+            const out = await invokeOnce(r, `${r.label}${passTag}`, timeoutMs, ctx);
+            logLine(`[${i}/${total}] ${r.label}${passTag} → ${out.latencyMs} ms, ${out.tokPerSec.toFixed(2)} tok/s`);
+          } else if (mode === "batch") {
+            const lat = [];
+            for (let c = 1; c <= N && !stopFlag; c++) {
+              const out = await invokeOnce(r, `${r.label}${passTag} b${c}/${N}`, timeoutMs, ctx);
+              lat.push(out.latencyMs);
+              logLine(`[${i}/${total}] ${r.label}${passTag} b${c}/${N} → ${out.latencyMs} ms`);
+            }
+            logLine(`[${i}/${total}] ${r.label}${passTag} batch mean ${mean(lat).toFixed(0)} ms over ${lat.length} run(s)`);
+          } else {
+            const settled = await Promise.allSettled(
+              Array.from({ length: N }, (_, c) => invokeOnce(r, `${r.label}${passTag} c${c + 1}/${N}`, timeoutMs, ctx))
+            );
+            const ok = settled.filter((s) => s.status === "fulfilled");
+            const lat = ok.map((s) => s.value.latencyMs);
+            logLine(
+              `[${i}/${total}] ${r.label}${passTag} concurrency N=${N}: ${ok.length} ok / ${settled.length - ok.length} dropped-or-failed, mean ${lat.length ? mean(lat).toFixed(0) : "–"} ms`
+            );
+          }
+        } catch (e) {
+          logLine(`[${i}/${total}] ${r.label}${passTag} ✗ ${e.message}`);
+        }
+        if (i < total && !stopFlag && delay) await sleep(delay);
+      }
+    }
+    renderAggregates();
+    logLine(`✔ Suite "${suite}" done (${i}/${total} run(s)).`);
+  }
+
+  function clearQueue() {
+    const n = queue.length;
+    queue = [];
+    renderQueue();
+    if (n) logLine(`Cleared ${n} queued suite(s) (current one keeps running).`);
+  }
+
+  $("autoLoadDefaultsBtn").addEventListener("click", loadDefaults);
+  $("autoSuite").addEventListener("change", loadDefaults);
+  $("autoAddRowBtn").addEventListener("click", () => {
+    body.insertAdjacentHTML("beforeend", rowHtml(row({ label: "custom", tokens: 256 })));
+  });
+  body.addEventListener("click", (e) => {
+    const btn = e.target.closest("button");
+    if (!btn) return;
+    const tr = btn.closest("tr");
+    if (!tr) return;
+    if (btn.classList.contains("a-remove")) {
+      tr.remove();
+    } else if (btn.classList.contains("a-up")) {
+      const prev = tr.previousElementSibling;
+      if (prev) tr.parentNode.insertBefore(tr, prev); // run order follows DOM order
+    } else if (btn.classList.contains("a-down")) {
+      const next = tr.nextElementSibling;
+      if (next) tr.parentNode.insertBefore(next, tr);
+    }
+  });
+  $("autoRunBtn").addEventListener("click", enqueue); // Run = enqueue current table; press again to schedule more
+  $("autoStopBtn").addEventListener("click", () => {
+    stopFlag = true; // halt the current suite after the in-flight request
+    abortQueue = true; // and don't start any more queued suites
+    const cleared = queue.length;
+    queue = [];
+    renderQueue();
+    logLine(`Stop requested — halting current suite${cleared ? ` and clearing ${cleared} queued` : ""} (finishing in-flight request)…`);
+  });
+  if ($("autoClearQueueBtn")) $("autoClearQueueBtn").addEventListener("click", clearQueue);
+  if ($("autoQueueBody")) {
+    $("autoQueueBody").addEventListener("click", (e) => {
+      const btn = e.target.closest(".a-dequeue");
+      if (!btn) return;
+      const id = btn.getAttribute("data-id");
+      queue = queue.filter((j) => j.id !== id);
+      renderQueue();
+    });
+  }
+  if ($("autoClearResultsBtn")) $("autoClearResultsBtn").addEventListener("click", clearResults);
+  if ($("autoExportResultsBtn")) $("autoExportResultsBtn").addEventListener("click", exportResultsCsv);
+  if ($("autoExportAggBtn")) $("autoExportAggBtn").addEventListener("click", exportAggregatesCsv);
+  if ($("autoExportAllBtn")) $("autoExportAllBtn").addEventListener("click", exportAllCsv);
+  if ($("autoSaveSuiteBtn")) $("autoSaveSuiteBtn").addEventListener("click", saveAsSuite);
+  if ($("autoDeleteSuiteBtn")) $("autoDeleteSuiteBtn").addEventListener("click", deleteSuite);
+
+  loadResults();
+  renderResults(); // restore any intermediate results from a previous / interrupted run
+  renderAggregates(); // restore per-case aggregates too
+  renderQueue();
+  refreshSuiteOptions("token_scaling"); // build the dropdown (built-ins + saved custom suites)
+  loadDefaults();
+})();

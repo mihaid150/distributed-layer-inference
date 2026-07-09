@@ -22,12 +22,18 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 namespace dli::gateway {
 
 namespace {
+
+// Practical upper bound for generated tokens. The real limit is the model's
+// context window (enforced downstream by the stage KV cache); this ceiling only
+// guards against pathological allocation from a malformed request.
+constexpr int kMaxNewTokensCeiling = 1 << 20;
 
 int parse_int_field_or_default(
     const std::string& json,
@@ -50,6 +56,26 @@ int parse_int_field_or_default(
         return std::max(min_value, std::min(max_value, parsed));
     } catch (const std::exception&) {
         return default_value;
+    }
+}
+
+std::optional<double> parse_double_field(
+    const std::string& json,
+    const std::string& field_name
+) {
+    const std::regex pattern(
+        "\"" + field_name + R"dli("\s*:\s*(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?))dli"
+    );
+
+    std::smatch match;
+    if (!std::regex_search(json, match, pattern)) {
+        return std::nullopt;
+    }
+
+    try {
+        return std::stod(match[1].str());
+    } catch (const std::exception&) {
+        return std::nullopt;
     }
 }
 
@@ -288,13 +314,26 @@ std::string generate_loop_json(
         "max_new_tokens",
         2,
         0,
-        512
+        kMaxNewTokensCeiling
     );
 
     const int min_new_tokens = std::min(
         max_new_tokens,
-        parse_int_field_or_default(body_text, "min_new_tokens", 0, 0, 512)
+        parse_int_field_or_default(body_text, "min_new_tokens", 0, 0, kMaxNewTokensCeiling)
     );
+
+    const double temperature =
+        std::max(0.0, parse_double_field(body_text, "temperature").value_or(0.0));
+
+    // top_k <= 0 disables top-k filtering on the stage. Default 0 so a positive
+    // temperature samples over the full distribution unless the caller narrows it.
+    const int top_k = parse_int_field_or_default(body_text, "top_k", 0, 0, kMaxNewTokensCeiling);
+
+    const std::optional<double> top_p = parse_double_field(body_text, "top_p");
+
+    // Optional RNG seed. Absent -> rolling random stream (current behaviour);
+    // >= 0 -> reproducible; < 0 (e.g. -1) -> explicit random each sequence.
+    const std::optional<double> seed_field = parse_double_field(body_text, "seed");
 
     const bool apply_chat_template =
         parse_bool_field_or_default(body_text, "apply_chat_template", true);
@@ -327,6 +366,12 @@ std::string generate_loop_json(
     loop_config.persistent_sessions_enabled = feature_persistent_sessions_enabled;
     loop_config.native_stage_chaining_enabled = native_stage_chaining_enabled;
     loop_config.metadata_level = metadata_level;
+    loop_config.temperature = temperature;
+    loop_config.top_k = top_k;
+    loop_config.has_top_p = top_p.has_value();
+    loop_config.top_p = top_p.value_or(1.0);
+    loop_config.has_seed = seed_field.has_value();
+    loop_config.seed = static_cast<long long>(seed_field.value_or(0.0));
 
     GenerationLoop loop(loop_config, tokenizer);
 
@@ -531,6 +576,11 @@ int GatewayServer::run() {
             std::cerr << "[dli-gateway-cpp] accept failed: " << std::strerror(errno) << "\n";
             continue;
         }
+
+        // Disable Nagle so the client<->gateway request/response is not delayed
+        // by ACK batching on small payloads.
+        const int nodelay = 1;
+        (void)::setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
         std::thread(
             handle_gateway_client_connection,

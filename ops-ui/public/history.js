@@ -17,6 +17,14 @@ const els = {
   historyDeleteSelectedBtn: document.getElementById("historyDeleteSelectedBtn"),
   historyClearAllBtn: document.getElementById("historyClearAllBtn"),
   historySelectAll: document.getElementById("historySelectAll"),
+  historyChartsExportPngBtn: document.getElementById("historyChartsExportPngBtn"),
+  customChartMetrics: document.getElementById("customChartMetrics"),
+  customChartXAxis: document.getElementById("customChartXAxis"),
+  customChartFilter: document.getElementById("customChartFilter"),
+  customChartSortByX: document.getElementById("customChartSortByX"),
+  customChartRenderBtn: document.getElementById("customChartRenderBtn"),
+  customChartExportPngBtn: document.getElementById("customChartExportPngBtn"),
+  customChart: document.getElementById("customChart"),
 };
 
 const CHART_PALETTE = ["#5db2ff", "#24c38e", "#f0b429", "#f05c7a", "#9a7cff"];
@@ -148,6 +156,107 @@ function selectedHistoryRows() {
   return historyRows.filter((row) => selectedHistoryIds.has(Number(row.id)));
 }
 
+// Raw, per-token/per-step traces captured at request time. These already get
+// summarized into row.metrics and dashboard.runSummary/cards, so we strip them
+// from exports — otherwise a single run drags ~1.5 MB of redundant data along.
+const HEAVY_RESPONSE_FIELDS = [
+  "token_metrics",
+  "steps",
+  "prompt_token_ids",
+  "generated_token_ids",
+];
+
+// Dashboard sub-fields stripped from exports because they are either pure UI
+// render state, redundant across rows, or raw per-token/per-sample traces whose
+// aggregates already live in runSummary/cards/perStage/perNode:
+//   - sessionRunEvolution embeds the whole session history into every entry.
+//   - tokenRows is one row per generated token, so a 512-token run alone adds
+//     ~150 KB; the p50/p95/p99 + sums in runSummary already summarize it.
+//   - metricCatalogRows is a derived min/avg/max catalog recomputable on demand.
+const HEAVY_DASHBOARD_FIELDS = [
+  "responseJson",
+  "sessionRunEvolution",
+  "tokenRows",
+  "metricCatalogRows",
+];
+
+// Compact token-level summary kept in place of the full tokenRows array so the
+// export still carries per-run token aggregates without the row-per-token bulk.
+function summarizeTokenRowsForExport(tokenRowsValue) {
+  const rows = asArray(tokenRowsValue);
+  if (!rows.length) {
+    return undefined;
+  }
+  const latencies = rows.map((row) => Number(asObject(row).latencyMs || 0));
+  const computeSum = rows.reduce((sum, row) => sum + Number(asObject(row).computeMs || 0), 0);
+  const transferSum = rows.reduce((sum, row) => sum + Number(asObject(row).transferMs || 0), 0);
+  const sorted = [...latencies].sort((a, b) => a - b);
+  const pct = (p) => {
+    if (!sorted.length) {
+      return 0;
+    }
+    const rank = p * (sorted.length - 1);
+    const lo = Math.floor(rank);
+    const hi = Math.min(lo + 1, sorted.length - 1);
+    return sorted[lo] + (sorted[hi] - sorted[lo]) * (rank - lo);
+  };
+  return {
+    count: rows.length,
+    latencyMsP50: Number(pct(0.5).toFixed(3)),
+    latencyMsP95: Number(pct(0.95).toFixed(3)),
+    latencyMsP99: Number(pct(0.99).toFixed(3)),
+    latencyMsMax: sorted.length ? Number(sorted[sorted.length - 1].toFixed(3)) : 0,
+    computeMsSum: Number(computeSum.toFixed(3)),
+    transferMsSum: Number(transferSum.toFixed(3)),
+  };
+}
+
+function slimResponseJson(responseJsonValue) {
+  const response = asObject(responseJsonValue);
+  if (!Object.keys(response).length) {
+    return undefined;
+  }
+  const slim = { ...response };
+  for (const field of HEAVY_RESPONSE_FIELDS) {
+    delete slim[field];
+  }
+  return slim;
+}
+
+function sanitizeDashboardForExport(dashboardValue) {
+  const dashboard = asObject(dashboardValue);
+  if (!Object.keys(dashboard).length) {
+    return undefined;
+  }
+  const slim = { ...dashboard };
+  for (const field of HEAVY_DASHBOARD_FIELDS) {
+    delete slim[field];
+  }
+  // Replace the dropped per-token rows with a compact aggregate.
+  const tokenSummary = summarizeTokenRowsForExport(dashboard.tokenRows);
+  if (tokenSummary) {
+    slim.tokenSummary = tokenSummary;
+  }
+  // Keep a trimmed response payload (summaries + generated text) without the
+  // heavy per-token/per-step arrays.
+  const slimResponse = slimResponseJson(dashboard.responseJson);
+  if (slimResponse) {
+    slim.responseJson = slimResponse;
+  }
+  return slim;
+}
+
+function sanitizeHistoryEntryForExport(row) {
+  const entry = { ...row };
+  const dashboard = sanitizeDashboardForExport(row.dashboard);
+  if (dashboard) {
+    entry.dashboard = dashboard;
+  } else {
+    delete entry.dashboard;
+  }
+  return entry;
+}
+
 function downloadTextFile(fileName, text, mimeType) {
   const blob = new Blob([text], { type: mimeType });
   const url = URL.createObjectURL(blob);
@@ -173,9 +282,10 @@ function historyRowToCsvRecord(row) {
   const metrics = asObject(row.metrics);
   const profile = asObject(row.profile);
   const output = asObject(row.output);
-  const dashboard = asObject(row.dashboard);
+  const dashboard = sanitizeDashboardForExport(row.dashboard) || {};
   return {
     id: row.id,
+    label: row.label || "",
     created_at: row.createdAt,
     type: row.type,
     namespace: row.namespace,
@@ -188,6 +298,9 @@ function historyRowToCsvRecord(row) {
     max_new_tokens: config.maxNewTokens,
     min_new_tokens: config.minNewTokens,
     temperature: config.temperature,
+    top_k: config.topK,
+    top_p: config.topP,
+    seed: config.seed,
     timeout_ms: config.timeoutMs,
     model_name: config.modelName,
     topology_hash: config.topologyHash,
@@ -198,6 +311,9 @@ function historyRowToCsvRecord(row) {
     latency_ms: metrics.latencyMs,
     tokens_per_second: metrics.tokensPerSecond,
     compute_ms: metrics.computeMs,
+    matmul_ms: metrics.matmulMs,
+    attention_ms: metrics.attentionMs,
+    ggml_threads: metrics.ggmlThreads,
     transfer_ms: metrics.transferMs,
     true_comm_ms: metrics.trueCommMs,
     rpc_compute_ratio: metrics.rpcComputeRatio,
@@ -225,7 +341,7 @@ function exportSelectedHistoryJson() {
   const payload = {
     exportedAt: new Date().toISOString(),
     count: rows.length,
-    entries: rows
+    entries: rows.map(sanitizeHistoryEntryForExport)
   };
   downloadTextFile(
     `dli-history-selected-${Date.now()}.json`,
@@ -520,6 +636,9 @@ function renderCompareSummary() {
           <tr><th>Field</th><th>A</th><th>B</th></tr>
         </thead>
         <tbody>
+          <tr><td>Label</td><td>${escapeHtml(runA.label || "-")}</td><td>${escapeHtml(
+            runB.label || "-"
+          )}</td></tr>
           <tr><td>Date</td><td>${escapeHtml(new Date(runA.createdAt).toLocaleString())}</td><td>${escapeHtml(
             new Date(runB.createdAt).toLocaleString()
           )}</td></tr>
@@ -540,6 +659,15 @@ function renderCompareSummary() {
           )}</td></tr>
           <tr><td>Temperature</td><td>${escapeHtml(cA.temperature || "-")}</td><td>${escapeHtml(
             cB.temperature || "-"
+          )}</td></tr>
+          <tr><td>Top-k</td><td>${escapeHtml(cA.topK ?? "-")}</td><td>${escapeHtml(
+            cB.topK ?? "-"
+          )}</td></tr>
+          <tr><td>Top-p</td><td>${escapeHtml(cA.topP ?? "-")}</td><td>${escapeHtml(
+            cB.topP ?? "-"
+          )}</td></tr>
+          <tr><td>Seed</td><td>${escapeHtml(cA.seed == null ? "random" : cA.seed)}</td><td>${escapeHtml(
+            cB.seed == null ? "random" : cB.seed
           )}</td></tr>
           <tr><td>Timeout (ms)</td><td>${escapeHtml(cA.timeoutMs || "-")}</td><td>${escapeHtml(
             cB.timeoutMs || "-"
@@ -671,6 +799,7 @@ function renderTable() {
             />
           </td>
           <td>${row.id}</td>
+          <td>${escapeHtml(row.label || "")}</td>
           <td>${escapeHtml(new Date(row.createdAt).toLocaleString())}</td>
           <td>${escapeHtml(row.type)}</td>
           <td>${escapeHtml(row.namespace)}</td>
@@ -682,6 +811,9 @@ function renderTable() {
           <td>${formatNumber(config.maxNewTokens, 0)}</td>
           <td>${formatNumber(config.minNewTokens, 0)}</td>
           <td>${formatNumber(config.temperature, 2)}</td>
+          <td>${formatNumber(config.topK, 0)}</td>
+          <td>${formatNumber(config.topP != null ? config.topP : 1, 2)}</td>
+          <td>${config.seed == null ? "rnd" : escapeHtml(String(config.seed))}</td>
           <td>${formatNumber(config.timeoutMs, 0)}</td>
           <td>${escapeHtml(config.topologyHash || "-")}</td>
           <td>${formatNumber(metrics.latencyMs, 1)}</td>
@@ -754,6 +886,7 @@ async function refreshHistory() {
     renderTable();
     renderCompareOptions();
     renderCompareSummary();
+    populateCustomChartMetrics();
   } catch (error) {
     els.historyMeta.textContent = `History error: ${error.message}`;
     historyRows = [];
@@ -765,6 +898,245 @@ async function refreshHistory() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Custom chart builder
+// ---------------------------------------------------------------------------
+
+// Numeric metrics selectable as chart series. Each accessor reads a single
+// value from a history row (metrics + config), returning a finite number.
+const METRIC_CATALOG = [
+  { key: "latencyMs", label: "Latency (ms)", get: (r) => Number(asObject(r.metrics).latencyMs || 0) },
+  { key: "tokensPerSecond", label: "Tokens/sec", get: (r) => Number(asObject(r.metrics).tokensPerSecond || 0) },
+  { key: "computeMs", label: "Compute (ms)", get: (r) => Number(asObject(r.metrics).computeMs || 0) },
+  { key: "matmulMs", label: "Matmul (ms)", get: (r) => Number(asObject(r.metrics).matmulMs || 0) },
+  { key: "attentionMs", label: "Attention (ms)", get: (r) => Number(asObject(r.metrics).attentionMs || 0) },
+  { key: "ggmlThreads", label: "GGML Threads", get: (r) => Number(asObject(r.metrics).ggmlThreads || 0) },
+  { key: "transferMs", label: "RPC Wall (ms)", get: (r) => Number(asObject(r.metrics).transferMs || 0) },
+  { key: "rpcComputeRatio", label: "RPC/Compute", get: (r) => Number(asObject(r.metrics).rpcComputeRatio ?? asObject(r.metrics).transferComputeRatio ?? 0) },
+  { key: "trueCommComputeRatio", label: "True Comm/Compute", get: (r) => Number(asObject(r.metrics).trueCommComputeRatio ?? asObject(r.metrics).transferComputeRatio ?? 0) },
+  { key: "payloadMib", label: "Payload (MiB)", get: (r) => Number(asObject(r.metrics).payloadMib || 0) },
+  { key: "networkMib", label: "Net (MiB)", get: (r) => Number(asObject(r.metrics).networkMib || 0) },
+  { key: "maxMemoryMb", label: "Max Memory (MB)", get: (r) => Number(asObject(r.metrics).maxMemoryMb || 0) },
+  { key: "tokenP50Ms", label: "Token p50 (ms)", get: (r) => Number(asObject(r.metrics).tokenP50Ms || 0) },
+  { key: "tokenP95Ms", label: "Token p95 (ms)", get: (r) => Number(asObject(r.metrics).tokenP95Ms || 0) },
+  { key: "tokenP99Ms", label: "Token p99 (ms)", get: (r) => Number(asObject(r.metrics).tokenP99Ms || 0) },
+  { key: "transferP95Ms", label: "RPC Wall p95 (ms)", get: (r) => Number(asObject(r.metrics).transferP95Ms || 0) },
+  { key: "generatedTokens", label: "Generated tokens", get: (r) => Number(asObject(r.metrics).generatedTokens || 0) },
+  { key: "maxNewTokens", label: "Max new tokens", get: (r) => Number(asObject(r.config).maxNewTokens || 0) },
+  { key: "minNewTokens", label: "Min new tokens", get: (r) => Number(asObject(r.config).minNewTokens || 0) },
+  { key: "temperature", label: "Temperature", get: (r) => Number(asObject(r.config).temperature || 0) },
+  { key: "topK", label: "Top-k", get: (r) => Number(asObject(r.config).topK || 0) },
+  { key: "topP", label: "Top-p", get: (r) => { const v = asObject(r.config).topP; return v != null ? Number(v) : 1; } },
+  { key: "seed", label: "Seed", get: (r) => { const v = asObject(r.config).seed; return v != null ? Number(v) : 0; } },
+  { key: "promptTokens", label: "Prompt tokens", get: (r) => Number(asObject(r.config).promptTokens || 0) },
+];
+
+const METRIC_BY_KEY = new Map(METRIC_CATALOG.map((m) => [m.key, m]));
+
+function readXValue(row, xKey) {
+  if (xKey === "createdAt") {
+    return new Date(row.createdAt).getTime();
+  }
+  const metric = METRIC_BY_KEY.get(xKey);
+  return metric ? metric.get(row) : 0;
+}
+
+function matchesCustomFilter(row, filter) {
+  if (!filter) {
+    return true;
+  }
+  const profile = asObject(row.profile);
+  const haystack = [
+    row.type,
+    row.namespace,
+    row.target,
+    row.path,
+    asArray(profile.enabledModules).join(" "),
+    asArray(profile.moduleVariants).join(" "),
+    JSON.stringify(asObject(profile.featureFlags)),
+  ]
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes(filter);
+}
+
+let customChartMetricsInitialized = false;
+function populateCustomChartMetrics() {
+  if (customChartMetricsInitialized || !els.customChartMetrics) {
+    return;
+  }
+  els.customChartMetrics.innerHTML = METRIC_CATALOG.map(
+    (m) => `<option value="${m.key}">${escapeHtml(m.label)}</option>`
+  ).join("");
+  // Sensible default selection.
+  for (const option of els.customChartMetrics.options) {
+    if (option.value === "latencyMs") {
+      option.selected = true;
+    }
+  }
+  customChartMetricsInitialized = true;
+}
+
+function renderCustomChart() {
+  if (!els.customChart) {
+    return;
+  }
+  const selectedKeys = [...els.customChartMetrics.selectedOptions].map((o) => o.value);
+  if (!selectedKeys.length) {
+    els.customChart.innerHTML = `<div class="muted">Select at least one metric, then click Render.</div>`;
+    els.customChartExportPngBtn.disabled = true;
+    return;
+  }
+
+  const filter = String(els.customChartFilter.value || "").trim().toLowerCase();
+  const xKey = String(els.customChartXAxis.value || "index");
+
+  // historyRows arrives newest-first; ascending order reads better on a trend.
+  let rows = [...historyRows].reverse().filter((row) => matchesCustomFilter(row, filter));
+  if (xKey !== "index" && els.customChartSortByX.checked) {
+    rows = rows.sort((a, b) => readXValue(a, xKey) - readXValue(b, xKey));
+  }
+
+  if (!rows.length) {
+    els.customChart.innerHTML = `<div class="muted">No runs match the current filter.</div>`;
+    els.customChartExportPngBtn.disabled = true;
+    return;
+  }
+
+  const series = selectedKeys
+    .map((key) => METRIC_BY_KEY.get(key))
+    .filter(Boolean)
+    .map((metric) => ({ name: metric.label, values: rows.map((row) => metric.get(row)) }));
+
+  const xLabel =
+    xKey === "index"
+      ? "run order"
+      : (METRIC_BY_KEY.get(xKey)?.label || xKey);
+  const title = `${series.map((s) => s.name).join(", ")} vs ${xLabel} — ${rows.length} run${rows.length === 1 ? "" : "s"}`;
+
+  els.customChart.innerHTML = `<h4>${escapeHtml(title)}</h4>${buildLineChartSvg(series)}`;
+  els.customChartExportPngBtn.disabled = false;
+}
+
+// ---------------------------------------------------------------------------
+// Chart PNG export (SVG -> canvas -> PNG)
+// ---------------------------------------------------------------------------
+
+function svgDimensions(svgEl, fallbackW = 920, fallbackH = 210) {
+  const viewBox = (svgEl.getAttribute("viewBox") || "").split(/\s+/).map(Number);
+  if (viewBox.length === 4 && viewBox[2] > 0 && viewBox[3] > 0) {
+    return { width: viewBox[2], height: viewBox[3] };
+  }
+  const rect = svgEl.getBoundingClientRect();
+  return { width: rect.width || fallbackW, height: rect.height || fallbackH };
+}
+
+function loadSvgAsImage(svgEl, width, height) {
+  const clone = svgEl.cloneNode(true);
+  clone.setAttribute("width", String(width));
+  clone.setAttribute("height", String(height));
+  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  const svgString = new XMLSerializer().serializeToString(clone);
+  const blob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Failed to rasterize chart SVG"));
+    };
+    img.src = url;
+  });
+}
+
+function downloadCanvasPng(canvas, fileName) {
+  canvas.toBlob((blob) => {
+    if (!blob) {
+      return;
+    }
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  }, "image/png");
+}
+
+// Stitch every chart inside `container` into one tall PNG, drawing each card's
+// <h4> title above its plot. Works for the trends grid and the custom chart.
+async function exportContainerChartsToPng(container, fileName, scale = 2) {
+  if (!container) {
+    return;
+  }
+  const cards = [...container.querySelectorAll(".chart-card")];
+  const items = (cards.length ? cards : [container])
+    .map((card) => ({
+      title: (card.querySelector("h4")?.textContent || "").trim(),
+      svg: card.querySelector("svg.timeseries-svg"),
+    }))
+    .filter((item) => item.svg);
+
+  if (!items.length) {
+    return;
+  }
+
+  const titleH = 22;
+  const gap = 14;
+  const pad = 16;
+  const dims = items.map((item) => svgDimensions(item.svg));
+  const contentW = Math.max(...dims.map((d) => d.width));
+  const totalH =
+    pad * 2 + items.reduce((sum, _item, i) => sum + titleH + dims[i].height + gap, 0) - gap;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = (contentW + pad * 2) * scale;
+  canvas.height = totalH * scale;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(scale, scale);
+  ctx.fillStyle = "#0d1430";
+  ctx.fillRect(0, 0, contentW + pad * 2, totalH);
+
+  let y = pad;
+  for (let i = 0; i < items.length; i += 1) {
+    const { width, height } = dims[i];
+    if (items[i].title) {
+      ctx.fillStyle = "#d9e2ff";
+      ctx.font = "600 13px system-ui, sans-serif";
+      ctx.fillText(items[i].title, pad, y + 15);
+    }
+    y += titleH;
+    // eslint-disable-next-line no-await-in-loop
+    const img = await loadSvgAsImage(items[i].svg, width, height);
+    ctx.drawImage(img, pad, y, width, height);
+    y += height + gap;
+  }
+
+  downloadCanvasPng(canvas, fileName);
+}
+
+async function exportHistoryTrendCharts() {
+  try {
+    await exportContainerChartsToPng(els.historyCharts, `dli-history-charts-${Date.now()}.png`);
+  } catch (error) {
+    els.historyMeta.textContent = `Chart export error: ${error.message}`;
+  }
+}
+
+async function exportCustomChart() {
+  try {
+    await exportContainerChartsToPng(els.customChart, `dli-custom-chart-${Date.now()}.png`);
+  } catch (error) {
+    els.historyMeta.textContent = `Chart export error: ${error.message}`;
+  }
+}
+
 els.historyRefreshBtn.addEventListener("click", refreshHistory);
 els.historyType.addEventListener("change", refreshHistory);
 els.historyNamespace.addEventListener("change", refreshHistory);
@@ -773,6 +1145,15 @@ els.compareA.addEventListener("change", renderCompareSummary);
 els.compareB.addEventListener("change", renderCompareSummary);
 els.historyExportJsonBtn.addEventListener("click", exportSelectedHistoryJson);
 els.historyExportCsvBtn.addEventListener("click", exportSelectedHistoryCsv);
+if (els.historyChartsExportPngBtn) {
+  els.historyChartsExportPngBtn.addEventListener("click", exportHistoryTrendCharts);
+}
+if (els.customChartRenderBtn) {
+  els.customChartRenderBtn.addEventListener("click", renderCustomChart);
+}
+if (els.customChartExportPngBtn) {
+  els.customChartExportPngBtn.addEventListener("click", exportCustomChart);
+}
 els.historyDeleteSelectedBtn.addEventListener("click", deleteSelectedHistoryRuns);
 els.historyClearAllBtn.addEventListener("click", clearAllHistoryRuns);
 

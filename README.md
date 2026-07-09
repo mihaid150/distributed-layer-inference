@@ -184,6 +184,8 @@ The native build produces:
 - `dli-partition-manifest`
 - `dli-gguf-shard-writer`
 - `dli-gguf-shard-validate`
+- `dli-gguf-info`
+- `dli-native-model-controller`
 
 ### 4. Generate native GGUF stage shards
 
@@ -195,15 +197,22 @@ scripts/generate_native_shards.sh \
   build/dli-native-shards
 ```
 
-The native tools create partition manifests, write `.dli.gguf` shards, and
-validate that every partition owns the expected tensor subset.
+The native tools create partition manifests, write `.dli.gguf` shards, validate
+that every partition owns the expected tensor subset, and can run the C++
+`dli-native-model-controller` used by `ops-ui` prep Jobs.
 
 ### 5. Upload native shards to Hugging Face Hub
 
-The native Kubernetes profile downloads model artifacts from Hugging Face during
-pod startup. Each stage init container downloads one file named
-`partition-${STAGE_ID}.dli.gguf`; the native gateway init container downloads
-the full GGUF file used for tokenizer/model metadata.
+The native Kubernetes profile downloads model-scoped artifacts from Hugging
+Face during pod startup. Each stage init container downloads
+`<model-slug>/partition-${STAGE_ID}.dli.gguf`; the native gateway init container
+downloads the full GGUF file used for tokenizer/model metadata.
+
+The preferred dynamic path is the `ops-ui` Native Model Controller panel. It
+starts a Kubernetes prep Job using the native tools image and the compiled C++
+`dli-native-model-controller` binary. That Job downloads the full GGUF,
+generates `stage_map.yaml`, creates and validates shards, uploads artifacts to
+Hugging Face with `git-lfs`, and emits the activation payload used by `ops-ui`.
 
 Install and authenticate the current Hugging Face CLI:
 
@@ -224,12 +233,14 @@ hf repos create "${HF_REPO}" \
   --exist-ok
 ```
 
-Upload the generated stage shards at the repository root:
+Upload the generated stage shards into the model slug directory:
 
 ```bash
+MODEL_SLUG="tinyllama-1.1b-chat-v1.0-q4_k_m"
+
 hf upload "${HF_REPO}" \
   build/dli-native-shards/shards \
-  . \
+  "${MODEL_SLUG}" \
   --type model \
   --include "partition-*.dli.gguf" \
   --commit-message "Upload DLI native stage shards"
@@ -240,7 +251,7 @@ Upload the full GGUF file expected by the native gateway:
 ```bash
 hf upload "${HF_REPO}" \
   models/gguf/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
-  tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
+  "${MODEL_SLUG}/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf" \
   --type model \
   --commit-message "Upload native gateway GGUF"
 ```
@@ -248,21 +259,27 @@ hf upload "${HF_REPO}" \
 For very large or unreliable uploads, use the resumable command instead:
 
 ```bash
+mkdir -p "build/dli-native-upload/${MODEL_SLUG}"
+cp build/dli-native-shards/shards/partition-*.dli.gguf "build/dli-native-upload/${MODEL_SLUG}/"
+cp models/gguf/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf "build/dli-native-upload/${MODEL_SLUG}/"
+
 hf upload-large-folder "${HF_REPO}" \
-  build/dli-native-shards/shards \
-  --type model \
-  --include "partition-*.dli.gguf"
+  build/dli-native-upload \
+  --type model
 ```
 
-After upload, the Hugging Face repository should contain:
+The minimum Hugging Face repository contents are:
 
 ```text
-partition-1.dli.gguf
-partition-2.dli.gguf
-partition-3.dli.gguf
-partition-4.dli.gguf
-tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
+tinyllama-1.1b-chat-v1.0-q4_k_m/partition-1.dli.gguf
+tinyllama-1.1b-chat-v1.0-q4_k_m/partition-2.dli.gguf
+tinyllama-1.1b-chat-v1.0-q4_k_m/partition-3.dli.gguf
+tinyllama-1.1b-chat-v1.0-q4_k_m/partition-4.dli.gguf
+tinyllama-1.1b-chat-v1.0-q4_k_m/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
 ```
+
+The C++ prep controller also uploads `<model-slug>/stage_map.yaml` and
+`<model-slug>/native-model.json` for auditability.
 
 Configure `k8s/native/configmap.yaml` to point at that repository:
 
@@ -273,7 +290,7 @@ data:
 
   HF_NATIVE_FULL_GGUF_REPO: "your-user-or-org/dli-tinyllama-native-gguf-4stage"
   HF_NATIVE_FULL_GGUF_REVISION: "main"
-  HF_NATIVE_FULL_GGUF_FILE: "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
+  HF_NATIVE_FULL_GGUF_FILE: "tinyllama-1.1b-chat-v1.0-q4_k_m/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
 ```
 
 Use an immutable tag or commit SHA instead of `main` for reproducible cluster
@@ -283,6 +300,7 @@ the native deployments:
 ```bash
 kubectl -n inference create secret generic hf-hub \
   --from-literal=HF_TOKEN="<hugging-face-read-token>" \
+  --from-literal=HF_UPLOAD_TOKEN="<hugging-face-write-token>" \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
@@ -409,7 +427,8 @@ secret in the `inference` namespace:
 
 ```bash
 kubectl -n inference create secret generic hf-hub \
-  --from-literal=HF_TOKEN="<your-hugging-face-token>"
+  --from-literal=HF_TOKEN="<your-hugging-face-read-token>" \
+  --from-literal=HF_UPLOAD_TOKEN="<your-hugging-face-write-token>"
 ```
 
 Deploy the native profile:
@@ -926,6 +945,8 @@ ctest --test-dir build/native --output-on-failure
 
 ## Documentation Index
 
+- `docs/ARCHITECTURE.md` - system design, components, native compute path,
+  observability/metrics, CPU-optimization status, and measured results.
 - `documentation/k3s-master-setup.md` - master-node installation notes and the
   final working K3s server command.
 - `documentation/k3s-client-setup.md` - worker-node join flow and token handling.

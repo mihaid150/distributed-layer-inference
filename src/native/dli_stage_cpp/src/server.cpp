@@ -29,6 +29,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -265,7 +268,23 @@ std::string metrics_json(const dli::common::StageMetrics& metrics) {
         << "\"memory_cgroup_percent\":" << metrics.memory_cgroup_percent << ","
         << "\"model_file_size_mb\":" << metrics.model_file_size_mb << ","
         << "\"session_count\":" << metrics.session_count << ","
-        << "\"session_kv_cache_bytes\":" << metrics.session_kv_cache_bytes
+        << "\"session_kv_cache_bytes\":" << metrics.session_kv_cache_bytes << ","
+        << "\"process_cpu_percent\":" << metrics.process_cpu_percent << ","
+        << "\"system_cpu_percent\":" << metrics.system_cpu_percent << ","
+        << "\"process_threads\":" << metrics.process_threads << ","
+        << "\"process_context_switches\":{"
+        << "\"voluntary\":" << metrics.ctx_switches_voluntary << ","
+        << "\"involuntary\":" << metrics.ctx_switches_involuntary
+        << "},"
+        << "\"process_io_delta\":{"
+        << "\"read_bytes\":" << metrics.io_read_bytes_delta << ","
+        << "\"write_bytes\":" << metrics.io_write_bytes_delta << ","
+        << "\"read_count\":" << metrics.io_read_count_delta << ","
+        << "\"write_count\":" << metrics.io_write_count_delta
+        << "},"
+        << "\"matmul_ms\":" << metrics.matmul_ms << ","
+        << "\"attention_ms\":" << metrics.attention_ms << ","
+        << "\"ggml_threads\":" << metrics.ggml_threads
         << "}";
 
     return out.str();
@@ -324,7 +343,28 @@ std::string runtime_response_metadata_json(
         << "\"activation_precision\":\"" << dli::common::json_escape(request.activation_precision) << "\","
         << "\"persistent_sessions_enabled\":" << (request.persistent_sessions_enabled ? "true" : "false") << ","
         << "\"metadata_level\":\"" << dli::common::json_escape(request.metadata_level) << "\""
-        << "},"
+        << "},";
+
+    // Propagate the sampling controls downstream. Orchestrated and chained routing
+    // both feed each stage the *previous* stage's response frame, so the terminal
+    // stage only samples with the requested params if they ride along the chain --
+    // otherwise temperature/top_k/top_p are lost after stage-1 and decoding falls
+    // back to greedy regardless of the request. Emit only when present so an absent
+    // field keeps the greedy default.
+    if (request.has_temperature) {
+        out << "\"temperature\":" << request.temperature << ",";
+    }
+    if (request.has_top_k) {
+        out << "\"top_k\":" << request.top_k << ",";
+    }
+    if (request.has_top_p) {
+        out << "\"top_p\":" << request.top_p << ",";
+    }
+    if (request.has_seed) {
+        out << "\"seed\":" << request.seed << ",";
+    }
+
+    out
         << "\"metrics\":" << metrics_json(response.metrics) << ","
         << "\"backend_metadata\":"
         << (response.backend_metadata_json.empty() ? "{}" : response.backend_metadata_json)
@@ -427,6 +467,9 @@ RuntimeRequest make_runtime_request(
 
     request.has_top_p = parsed.has_top_p;
     request.top_p = parsed.top_p;
+
+    request.has_seed = parsed.has_seed;
+    request.seed = parsed.seed;
 
     request.has_next_token_id = parsed.has_next_token_id;
     request.next_token_id = parsed.next_token_id;
@@ -654,6 +697,11 @@ int HttpServer::run() {
             std::cerr << "[dli-stage-cpp] accept failed: " << std::strerror(errno) << "\n";
             continue;
         }
+
+        // Disable Nagle on the accepted connection so the chained/orchestrated
+        // request->response ping-pong is not stalled by delayed ACKs.
+        const int nodelay = 1;
+        (void)::setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
         std::thread(
             handle_stage_client_connection,

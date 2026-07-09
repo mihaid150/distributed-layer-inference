@@ -35,6 +35,25 @@ struct StageMetrics {
     std::uint64_t model_file_size_mb = 0;
     std::uint64_t session_count = 0;
     std::uint64_t session_kv_cache_bytes = 0;
+
+    // Per-request resource usage sampled from /proc during this forward call.
+    // CPU percentages are measured across the request's wall-clock window;
+    // context-switch and IO figures are deltas accumulated over the same window.
+    double process_cpu_percent = 0.0;
+    double system_cpu_percent = 0.0;
+    std::uint64_t process_threads = 0;
+    std::uint64_t ctx_switches_voluntary = 0;
+    std::uint64_t ctx_switches_involuntary = 0;
+    std::uint64_t io_read_bytes_delta = 0;
+    std::uint64_t io_write_bytes_delta = 0;
+    std::uint64_t io_read_count_delta = 0;
+    std::uint64_t io_write_count_delta = 0;
+
+    // Compute breakdown for this forward call (ggml matmul vs scalar attention)
+    // plus the ggml CPU worker-thread count, so CPU optimizations are measurable.
+    double matmul_ms = 0.0;
+    double attention_ms = 0.0;
+    int ggml_threads = 0;
 };
 
 struct ChainMetrics {

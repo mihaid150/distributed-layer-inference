@@ -191,6 +191,19 @@ class GenerationLoop:
                     "feature_modules": feature_flags.enabled_module_keys(),
                 },
             )
+            # psutil.net_io_counters() cannot observe the stage transport when
+            # stages are co-located / in-process (the common native llama.cpp
+            # path), so its per-token delta collapses to ~0 and networkMib reads
+            # 0 even though bytes really crossed the transport boundary. Fall
+            # back to the serialized wire bytes we already measured (request +
+            # response) so networkMib reflects true bidirectional bytes-on-wire.
+            gateway_network_delta = gateway_metric.setdefault("network_delta", {})
+            if int(gateway_network_delta.get("bytes_total", 0)) <= 0:
+                wire_bytes = int(request_payload_bytes) + int(response_payload_bytes)
+                gateway_network_delta["bytes_sent"] = int(request_payload_bytes)
+                gateway_network_delta["bytes_recv"] = int(response_payload_bytes)
+                gateway_network_delta["bytes_total"] = wire_bytes
+
             stage_metrics = list(stage_response.metrics)
             stage_metrics.append(gateway_metric)
             TopologyAwareRoutingModule.observe_stage_metrics(stage_metrics)
