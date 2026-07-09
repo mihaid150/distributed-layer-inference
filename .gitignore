@@ -10,6 +10,4 @@ sota-papers/
 .claude/
 docs/test-results-*.md
 temp-results/dli-history-*.csv
-
-# Local optimization backlog (not committed)
 docs/future-optimizations.md
